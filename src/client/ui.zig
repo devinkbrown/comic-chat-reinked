@@ -913,12 +913,15 @@ fn drawStarGlyph(c: *Canvas, cx: i32, cy: i32, color: u32) void {
     }
 }
 
-pub fn drawMenuItem(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, hovered: bool, checked: bool, enabled: bool) void {
+pub fn drawMenuItem(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, hint: []const u8, hovered: bool, checked: bool, enabled: bool) void {
     if (hovered and enabled) {
         c.fillRect(x, y, width, 27, current.accent_soft);
         c.fillRect(x, y, 4, 27, current.accent);
         drawInkRule(c, x + 4, y, 1, 27, current.ink);
         c.fillRect(x + width - 3, y + 4, 3, 19, current.accent);
+    } else if (!enabled) {
+        c.fillRect(x, y, width, 27, current.subtle);
+        c.fillRect(x, y, 2, 27, current.divider);
     } else {
         c.fillRect(x, y, 2, 27, current.subtle);
     }
@@ -927,7 +930,9 @@ pub fn drawMenuItem(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, h
         drawGlyphLine(c, x + 13, y + 14, x + 15, y + 16, current.paper);
         drawGlyphLine(c, x + 15, y + 16, x + 19, y + 11, current.paper);
     }
-    drawEllipsized(c, label, x + 27, y + 5, width - 40, if (enabled) current.ink else current.secondary);
+    const hint_w: i32 = if (hint.len == 0) 0 else Canvas.uiTextWidth(hint) + 8;
+    drawEllipsized(c, label, x + 27, y + 5, width - 40 - hint_w, if (enabled) current.ink else current.secondary);
+    if (hint_w > 0) drawEllipsized(c, hint, x + width - hint_w - 12, y + 5, hint_w, if (hovered and enabled) current.accent else current.secondary);
 }
 
 pub fn drawMenuLabel(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, selected: bool) void {
@@ -1696,9 +1701,10 @@ pub fn drawStatusBar(c: *Canvas, x: i32, y: i32, width: i32, height: i32, status
     if (hovered) c.fillRect(x + 4, y + 4, @max(1, badge_x - x - 10), @max(1, height - 8), current.navigation_hover);
     drawInkChip(c, .{ .x = badge_x, .y = y + 3, .w = badge_w, .h = @max(1, height - 6) }, members, false);
     const action = "Connect";
-    const action_w = if (hovered or badge_x - x >= 220) Canvas.uiTextWidth(action) + 28 else 0;
+    const needs_connect = statusTone(status) != .success;
+    const action_w = if (needs_connect or hovered or badge_x - x >= 220) Canvas.uiTextWidth(action) + 28 else 0;
     drawEllipsized(c, status, x + 24, y + 5, badge_x - x - 34 - action_w, current.navigation_ink);
-    if (action_w > 0) drawInkChip(c, .{ .x = badge_x - action_w - 6, .y = y + 3, .w = action_w, .h = @max(1, height - 6) }, action, true);
+    if (action_w > 0) drawInkChip(c, .{ .x = badge_x - action_w - 6, .y = y + 3, .w = action_w, .h = @max(1, height - 6) }, action, needs_connect or hovered);
 }
 
 pub fn statusTone(status: []const u8) NoticeTone {
@@ -1708,10 +1714,10 @@ pub fn statusTone(status: []const u8) NoticeTone {
     return .info;
 }
 
-pub fn drawEmptyState(c: *Canvas, x: i32, y: i32, width: i32, height: i32, detail: []const u8, requested_columns: u8) void {
+pub fn drawEmptyState(c: *Canvas, x: i32, y: i32, width: i32, height: i32, title: []const u8, detail: []const u8, requested_columns: u8) void {
     c.fillRect(x, y, width, height, current.comic_paper);
     if (width < 360 or height < 140) {
-        drawEllipsized(c, "Ink the first balloon to open the page", x + 16, y + @max(8, @divTrunc(height - 17, 2)), width - 32, current.secondary);
+        drawEllipsized(c, detail, x + 16, y + @max(8, @divTrunc(height - 17, 2)), width - 32, current.secondary);
         return;
     }
     const card_w = @min(420, @max(260, width - 72));
@@ -1719,7 +1725,7 @@ pub fn drawEmptyState(c: *Canvas, x: i32, y: i32, width: i32, height: i32, detai
     const card_x = x + @divTrunc(width - card_w, 2);
     const card_y = y + @max(16, height - card_h - 20);
     _ = requested_columns;
-    drawEmptyCaption(c, .{ .x = card_x, .y = card_y, .w = card_w, .h = card_h }, "Sunday page is open", detail);
+    drawEmptyCaption(c, .{ .x = card_x, .y = card_y, .w = card_w, .h = card_h }, title, detail);
 }
 
 /// Caption overlay used when the source title panel already occupies the well.

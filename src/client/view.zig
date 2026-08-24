@@ -385,6 +385,34 @@ pub const View = struct {
         self.context_menu = null;
         self.hovered_context_item = null;
         self.active_dialog = id;
+        if (id == .settings) self.prefillSettingsFromAppearance();
+    }
+
+    fn prefillSettingsFromAppearance(self: *View) void {
+        const theme = if (self.appearance.mode == .dark) "Dark studio" else "Light studio";
+        const accent = switch (self.appearance.accent) {
+            .cobalt => "Cobalt",
+            .violet => "Violet",
+            .forest => "Forest",
+        };
+        const contrast = if (self.appearance.high_contrast) "High contrast" else "Standard";
+        const page = if (self.shell.content_mode == .text) "Text" else "Comic";
+        const panels = switch (self.shell.comic_columns) {
+            1 => "1 panel",
+            2 => "2 panels",
+            3 => "3 panels",
+            5 => "5 panels",
+            6 => "6 panels",
+            else => "4 panels",
+        };
+        const members = if (self.shell.show_members) "Shown" else "Hidden";
+        const member_layout = if (self.shell.member_view == .list) "List" else "Icons";
+        const details = if (self.status_detailed) "Detailed" else "Compact";
+        const values = [_][]const u8{ theme, accent, contrast, page, panels, members, member_layout, details };
+        for (values, 0..) |value, index| {
+            self.dialog_editors[index].clear();
+            self.dialog_editors[index].paste(value) catch {};
+        }
     }
 
     pub fn openConnectionDialog(self: *View, host: []const u8, port: u16, use_tls: bool) void {
@@ -1260,17 +1288,17 @@ pub const View = struct {
         drawSplitters(&self.canvas, layout, comic_mode);
 
         if (comic_mode) {
-            try self.drawComicBuffer(layout.transcript, transcript);
+            try self.drawComicBuffer(layout.transcript, transcript, status);
         } else {
-            self.drawTextBuffer(layout.transcript, transcript);
+            self.drawTextBuffer(layout.transcript, transcript, status);
         }
         if (layout.right.w > 0) {
             ui.drawInspectorRail(&self.canvas, layout.right);
-            try self.drawMemberList(layout.members, transcript, self.shell.member_view == .icons);
+            try self.drawMemberList(layout.members, transcript, self.shell.member_view == .icons, status);
             if (comic_mode) try self.drawBodyCamera(layout.body_camera, transcript);
         }
-        drawSayWindow(&self.canvas, layout, input, cursor, selection, self.shell.focus == .composer, self.hovered_composer, self.shell.say_mode, self.hovered_say_action, if (self.shell.focus == .say_actions) self.focused_say_action else null);
-        drawStatusBar(&self.canvas, layout.status, self.hoveredToolbarLabel() orelse status, transcript.activeMemberCount(), self.hovered_status);
+        drawSayWindow(&self.canvas, layout, input, cursor, selection, self.shell.focus == .composer, self.hovered_composer, self.shell.say_mode, self.hovered_say_action, if (self.shell.focus == .say_actions) self.focused_say_action else null, status);
+        drawStatusBar(&self.canvas, layout.status, status, transcript.activeMemberCount(), self.hovered_status);
 
         if (self.shell.focus == .transcript) drawFocus(&self.canvas, layout.transcript);
         if (self.shell.focus == .members) drawFocus(&self.canvas, layout.members);
@@ -1281,11 +1309,6 @@ pub const View = struct {
         if (self.context_menu) |kind| drawContextPopup(&self.canvas, kind, self.context_x, self.context_y, self.hovered_context_item orelse self.focused_context_item, self.shell.emotion_frozen, self.can_moderate);
         if (self.status_panel_open) drawStatusPanel(&self.canvas, status, transcript.activeMemberCount(), self.shell, self.appearance, self.status_detailed, self.hovered_status_action);
         if (self.active_dialog) |id| drawDialog(&self.canvas, dialogs.get(id), &self.dialog_editors, self.dialog_field, self.dialog_first_field, self.dialog_action_focus, self.hovered_dialog_field, self.hovered_dialog_browse, self.dialog_notice, self.hovered_dialog_button);
-    }
-
-    fn hoveredToolbarLabel(self: *const View) ?[]const u8 {
-        const index = self.hovered_toolbar orelse return null;
-        return toolbarLabel(index);
     }
 
     pub fn semanticSnapshot(self: *const View, status: []const u8, tabs: []const Tab, active_tab: usize) accessibility.Snapshot {
@@ -1429,7 +1452,7 @@ pub const View = struct {
         return snapshot;
     }
 
-    fn drawComicBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) !void {
+    fn drawComicBuffer(self: *View, rect: Rect, transcript: *const session.Transcript, status: []const u8) !void {
         ui.drawContentSurface(&self.canvas, rect, true);
         if (rect.w <= 0 or rect.h <= 0) return;
 
@@ -1490,6 +1513,7 @@ pub const View = struct {
         blitSourcePage(&self.canvas, page.pixels, page.width, page.height, rect.x + 8, rect.y + 8, rect.w - 16, rect.h - 16);
 
         if (all.len == 0) {
+            const empty = emptyPageCopy(status);
             const caption_w = @min(400, @max(220, rect.w - 40));
             const caption_h: i32 = 88;
             ui.drawEmptyCaption(&self.canvas, .{
@@ -1497,7 +1521,7 @@ pub const View = struct {
                 .y = rect.bottom() - caption_h - 12,
                 .w = caption_w,
                 .h = caption_h,
-            }, "Sunday page is open", "Ink the first balloon and press Enter");
+            }, empty.title, empty.detail);
         }
 
         if (self.shell.history_offset > 0) {
@@ -1506,10 +1530,11 @@ pub const View = struct {
         ui.drawVerticalScrollbar(&self.canvas, rect, all.len, 9, range.start);
     }
 
-    fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) void {
+    fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript, status: []const u8) void {
         ui.drawContentSurface(&self.canvas, rect, false);
         if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "Ink the first balloon and press Enter", 1);
+            const empty = emptyPageCopy(status);
+            drawEmptyBuffer(&self.canvas, rect, empty.title, empty.detail, 1);
             return;
         }
         // The text view is a calm reading surface rather than a debug log:
@@ -1542,7 +1567,7 @@ pub const View = struct {
         return false;
     }
 
-    fn drawMemberList(self: *View, rect: Rect, transcript: *const session.Transcript, icon_mode: bool) !void {
+    fn drawMemberList(self: *View, rect: Rect, transcript: *const session.Transcript, icon_mode: bool, status: []const u8) !void {
         ui.drawMemberRailSurface(&self.canvas, rect);
         if (rect.h <= 0) return;
         var count_buf: [16]u8 = undefined;
@@ -1550,7 +1575,8 @@ pub const View = struct {
         ui.drawPaneCountHeader(&self.canvas, rect, "CAST", count);
         const content = Rect{ .x = rect.x, .y = rect.y + 30, .w = rect.w, .h = @max(0, rect.h - 30) };
         if (transcript.roster.items.len == 0) {
-            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "The playbill is empty", "Join and take a panel");
+            const waiting = emptyPageCopy(status).waiting;
+            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "The playbill is empty", if (waiting) "Connect and take a panel" else "Join and take a panel");
             return;
         }
         const viewport = memberViewport(rect, icon_mode);
@@ -1839,6 +1865,53 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
     };
 }
 
+fn menuItemHint(menu: u8, item: u8) []const u8 {
+    return switch (menu) {
+        0 => switch (item) {
+            0, 1, 2 => "Open",
+            3, 4, 5 => "Save",
+            else => "Quit",
+        },
+        1 => switch (item) {
+            3 => "Studio",
+            else => "Edit",
+        },
+        2 => switch (item) {
+            2, 3, 4 => "CAST",
+            else => "Page",
+        },
+        3 => switch (item) {
+            5, 6, 7 => "Type",
+            else => "Look",
+        },
+        4 => "Room",
+        5 => "Cast",
+        6 => switch (item) {
+            0, 1 => "Wire",
+            7 => "About",
+            else => "Auto",
+        },
+        else => "",
+    };
+}
+
+fn contextItemHint(kind: ContextKind, item: u8) []const u8 {
+    return switch (kind) {
+        .member => switch (item) {
+            0 => "Say",
+            1 => "Card",
+            2 => "Room",
+            else => "Mod",
+        },
+        .body_camera => switch (item) {
+            0 => "Hold",
+            1 => "Cast",
+            2 => "Reset",
+            else => "Send",
+        },
+    };
+}
+
 fn isConnectionMenuItem(menu: u8, item: u8) bool {
     return menu == 6 and item == 0;
 }
@@ -1850,8 +1923,11 @@ fn isQuitMenuItem(menu: u8, item: u8) bool {
 fn menuPopupRect(canvas_width: u32, menu: u8) Rect {
     var content_width: i32 = 210;
     var item: u8 = 0;
-    while (item < menuItemCount(menu)) : (item += 1)
-        content_width = @max(content_width, Canvas.uiTextWidth(menuItemLabel(menu, item)) + 52);
+    while (item < menuItemCount(menu)) : (item += 1) {
+        const hint = menuItemHint(menu, item);
+        const hint_w: i32 = if (hint.len == 0) 0 else Canvas.uiTextWidth(hint) + 18;
+        content_width = @max(content_width, Canvas.uiTextWidth(menuItemLabel(menu, item)) + 56 + hint_w);
+    }
     return ui.PopupLayout.menu(canvas_width, menuStart(menu), geometry.menu_height, content_width, menuItemCount(menu)).rect;
 }
 
@@ -1864,14 +1940,21 @@ fn drawMenuBar(c: *Canvas, rect: Rect, active: ?u8, hovered: ?u8) void {
     ui.drawMenuBarSurface(c, rect);
     ui.drawAppBrand(c, rect, "Comic Chat");
     var x = rect.x + 170;
+    var overflow = false;
     for (menu_labels, 0..) |item, raw_index| {
         const index: u8 = @intCast(raw_index);
         const selected = active == index or hovered == index;
         const item_w = Canvas.uiTextWidth(item) + 16;
         const edition_reserve: i32 = if (rect.w >= 760) Canvas.uiTextWidth(ui.mastheadEdition(rect.w)) + 42 else 8;
-        if (x + item_w > rect.right() - edition_reserve) break;
+        if (x + item_w > rect.right() - edition_reserve) {
+            overflow = true;
+            break;
+        }
         ui.drawMenuLabel(c, x, rect.y, item_w, item, selected);
         x += Canvas.uiTextWidth(item) + 28;
+    }
+    if (overflow and x + 28 <= rect.right() - 8) {
+        ui.drawInkChip(c, .{ .x = x, .y = rect.y + 6, .w = 26, .h = 20 }, "...", false);
     }
 }
 
@@ -1885,7 +1968,7 @@ fn drawMenuPopup(c: *Canvas, menu: u8, hovered: ?u8, shell: shell_mod.State, can
         if (menuStartsGroup(menu, item))
             ui.drawMenuGroupDivider(c, rect, item_rect.y);
         const enabled = menuItemEnabled(menu, item, can_moderate);
-        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, menuItemLabel(menu, item), hovered == item, menuItemChecked(menu, item, shell), enabled);
+        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, menuItemLabel(menu, item), menuItemHint(menu, item), hovered == item, menuItemChecked(menu, item, shell), enabled);
     }
 }
 
@@ -1987,7 +2070,7 @@ fn drawContextPopup(c: *Canvas, kind: ContextKind, anchor_x: i32, anchor_y: i32,
     while (item < contextItemCount(kind)) : (item += 1) {
         const item_rect = layout.itemRect(item).?;
         const enabled = contextItemEnabled(kind, item, can_moderate);
-        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, contextItemLabel(kind, item, frozen), hovered == item, kind == .body_camera and item == 0 and frozen, enabled);
+        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, contextItemLabel(kind, item, frozen), contextItemHint(kind, item), hovered == item, kind == .body_camera and item == 0 and frozen, enabled);
     }
 }
 
@@ -2357,23 +2440,28 @@ fn placeEditorCursor(editor: *input_mod.Editor, window: TextWindow, local_x: i32
     editor.selection_anchor = null;
 }
 
-fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor: usize, selection: ?TextSelection, focused: bool, hovered: bool, say_mode: shell_mod.SayMode, hovered_action: ?u8, focused_action: ?u8) void {
+fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor: usize, selection: ?TextSelection, focused: bool, hovered: bool, say_mode: shell_mod.SayMode, hovered_action: ?u8, focused_action: ?u8, status: []const u8) void {
     const edit = layout.say_editor;
     ui.drawComposerSurface(c, layout.say);
     const editor_layout = ui.ComposerEditorLayout.init(edit);
     ui.drawComposerEditor(c, editor_layout, focused, hovered, input.len > 0);
     const content_rect = editor_layout.content;
+    const mode = sayActionLabel(@intFromEnum(say_mode));
+    const mode_w: i32 = if (edit.w >= 220 and input.len == 0) Canvas.uiTextWidth(mode) + 18 else 0;
+    const enter_w: i32 = if (edit.w >= 220 and input.len == 0) Canvas.uiTextWidth("Enter") + 20 else 0;
+    if (mode_w > 0) ui.drawComposerModeChip(c, .{ .x = edit.x + 14, .y = edit.y + 13, .w = mode_w, .h = 18 }, mode, focused);
+    if (enter_w > 0) {
+        ui.drawInkPlate(c, edit.right() - enter_w - 10, edit.y + 13, enter_w, 18, 2, if (focused) ui.current.accent else ui.current.layer);
+        drawTextEllipsized(c, "Enter", edit.right() - enter_w - 2, edit.y + 14, enter_w - 16, if (focused) ui.current.layer else ui.current.ink);
+    }
     if (input.len == 0) {
-        const mode = sayActionLabel(@intFromEnum(say_mode));
-        const mode_w: i32 = if (edit.w >= 280) Canvas.uiTextWidth(mode) + 18 else 0;
-        const enter_w: i32 = if (edit.w >= 240) Canvas.uiTextWidth("Enter") + 20 else 0;
         const placeholder_x = edit.x + 18 + placeholderGap(focused) + if (mode_w > 0) mode_w + 6 else 0;
-        if (mode_w > 0) ui.drawComposerModeChip(c, .{ .x = edit.x + 14, .y = edit.y + 13, .w = mode_w, .h = 18 }, mode, focused);
-        drawTextEllipsized(c, "Ink the next balloon...", placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - enter_w, ui.current.secondary);
-        if (enter_w > 0) {
-            ui.drawInkPlate(c, edit.right() - enter_w - 10, edit.y + 13, enter_w, 18, 2, if (focused) ui.current.accent else ui.current.layer);
-            drawTextEllipsized(c, "Enter", edit.right() - enter_w - 2, edit.y + 14, enter_w - 16, if (focused) ui.current.layer else ui.current.ink);
-        }
+        const tone = ui.statusTone(status);
+        const placeholder = if (tone == .failure or std.mem.indexOf(u8, status, "offline") != null)
+            "Connect, then ink the next balloon..."
+        else
+            "Ink the next balloon...";
+        drawTextEllipsized(c, placeholder, placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - enter_w, ui.current.secondary);
     } else {
         const viewport = composerViewport(input, cursor, content_rect.w);
         for (viewport.rows[0..viewport.count], 0..) |row, row_index| {
@@ -2413,10 +2501,17 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
 fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
     if (index >= geometry.say_button_count) return;
     const label = sayActionLabel(index);
-    const width = Canvas.uiTextWidth(label) + 20;
+    const hint = switch (index) {
+        0 => "Talk",
+        1 => "Think",
+        2 => "Quiet",
+        3 => "Do",
+        else => "Play",
+    };
+    const width = @min(220, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
     const action_x = layout.say_actions.x + @as(i32, index) * layout.say_action_size;
     const x = std.math.clamp(action_x + @divTrunc(layout.say_action_size - width, 2), 6, @max(6, layout.transcript.right() - width - 6));
-    ui.drawTooltip(c, .{ .x = x, .y = layout.say.y - 34, .w = width, .h = 28 }, label);
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.say.y - 34, .w = width, .h = 28 }, label, hint);
 }
 
 fn drawStatusBar(c: *Canvas, rect: Rect, status: []const u8, member_count: usize, hovered: bool) void {
@@ -2434,7 +2529,8 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     ui.drawAnchoredPopoverSurface(c, panel, panel.x + 30);
     const tone = ui.statusTone(status);
     ui.drawStatusIdentity(c, .{ .x = panel.x + 16, .y = panel.y + 15, .w = 34, .h = 34 }, tone);
-    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, "On the wire", status);
+    const heading = if (ui.statusTone(status) == .success) "On the wire" else "Waiting on the wire";
+    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, heading, status);
     ui.drawSectionRule(c, panel.x + 16, panel.y + 60, panel.w - 32);
 
     var members_buf: [32]u8 = undefined;
@@ -2458,9 +2554,9 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
         };
         var studio_buf: [32]u8 = undefined;
         const studio = if (appearance.mode == .dark)
-            std.fmt.bufPrint(&studio_buf, "Dark · {s}", .{theme_label}) catch "Dark studio"
+            std.fmt.bufPrint(&studio_buf, "Dark / {s}", .{theme_label}) catch "Dark studio"
         else
-            theme_label;
+            std.fmt.bufPrint(&studio_buf, "Light / {s}", .{theme_label}) catch "Light studio";
         ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = detail_y, .w = metric_w, .h = 38 }, "INK", studio);
     }
     if (panel_layout.show_actions) {
@@ -2472,8 +2568,18 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     }
 }
 
-fn drawEmptyBuffer(c: *Canvas, rect: Rect, text: []const u8, columns: u8) void {
-    ui.drawEmptyState(c, rect.x, rect.y, rect.w, rect.h, text, columns);
+const EmptyPageCopy = struct { title: []const u8, detail: []const u8, waiting: bool };
+
+fn emptyPageCopy(status: []const u8) EmptyPageCopy {
+    const tone = ui.statusTone(status);
+    const waiting = tone != .success and (tone == .warning or tone == .failure or std.mem.indexOf(u8, status, "connecting") != null or std.mem.indexOf(u8, status, "registering") != null or std.mem.indexOf(u8, status, "offline") != null);
+    if (tone == .failure) return .{ .title = "Sunday page is waiting", .detail = "Connection failed - click Connect", .waiting = true };
+    if (waiting) return .{ .title = "Sunday page is waiting", .detail = "Connect to ink the first balloon", .waiting = true };
+    return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
+}
+
+fn drawEmptyBuffer(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8, columns: u8) void {
+    ui.drawEmptyState(c, rect.x, rect.y, rect.w, rect.h, title, detail, columns);
 }
 
 fn drawFocus(c: *Canvas, rect: Rect) void {
@@ -2681,11 +2787,14 @@ fn dialogLayout(width: u32, height: u32, spec: dialogs.Spec) ui.DialogLayout {
 }
 
 fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
-    if (id != .settings) return "";
-    return switch (index) {
-        0 => "STUDIO",
-        3 => "PAGE",
-        5 => "CAST",
+    return switch (id) {
+        .settings => switch (index) {
+            0 => "STUDIO",
+            3 => "PAGE",
+            5 => "CAST",
+            else => "",
+        },
+        .setup, .servers => if (index == 0) "WIRE" else "",
         else => "",
     };
 }
@@ -2716,7 +2825,7 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         },
     };
     ui.drawDialogSurface(c, rect, spec.title, group_text);
-    if (spec.id == .settings) {
+    if (spec.id == .settings or spec.id == .setup or spec.id == .servers) {
         const well_top = dialog_layout.body_y - 8;
         const well_h = @max(0, dialog_layout.primary.y - well_top - 12);
         ui.drawInkPlate(c, rect.x + 12, well_top, rect.w - 24, well_h, 2, ui.current.layer);
@@ -2802,12 +2911,20 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
     }
 
     const visible_rows = dialog_layout.visibleRows();
-    if (fields.len > visible_rows) ui.drawVerticalScrollbar(c, .{
-        .x = rect.right() - 13,
-        .y = dialog_layout.body_y,
-        .w = 8,
-        .h = @max(1, dialog_layout.primary.y - dialog_layout.body_y - 8),
-    }, fields.len, visible_rows, first_field);
+    if (fields.len > visible_rows) {
+        const hidden = fields.len - @min(fields.len, first_field + visible_rows);
+        if (hidden > 0) {
+            var more_buf: [24]u8 = undefined;
+            const more = std.fmt.bufPrint(&more_buf, "{d} more", .{hidden}) catch "more";
+            ui.drawEllipsized(c, more, rect.x + 18, dialog_layout.primary.y + 8, 72, ui.current.secondary);
+        }
+        ui.drawVerticalScrollbar(c, .{
+            .x = rect.right() - 13,
+            .y = dialog_layout.body_y,
+            .w = 8,
+            .h = @max(1, dialog_layout.primary.y - dialog_layout.body_y - 8),
+        }, fields.len, visible_rows, first_field);
+    }
 
     ui.drawDialogActionBar(c, rect, dialog_layout.primary.y - 8);
     if (notice.len != 0) ui.drawNotice(c, rect.x + 14, dialog_layout.primary.y - 22, rect.w - 28, notice, .warning);
