@@ -293,11 +293,11 @@ fn assembleDetailedForSourcePoseInner(
     if (asset.kind == .simple_avatar) {
         const record = selected.body orelse return error.PoseNotFound;
         var image = try bgb.decodeImageRef(gpa, avb_data, record.images[0]);
-        const origin_x = try takePaddedSimpleCard(gpa, &image);
+        const crop = try takePaddedSimpleCard(gpa, &image);
         if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
-            .face_x = clampedFaceX(record.face.x - origin_x, image.width),
+            .face_x = remappedSimpleFaceX(image, record.face.x, crop),
             .head_height = simpleHeadHeight(image.height),
             .requested = selected.requested,
         };
@@ -351,11 +351,11 @@ fn assembleDetailedAnalysisInner(
         const record = bgb.selectPose(table.records, .body, choice.emotion.assetIndex(), choice.intensity) orelse
             return error.PoseNotFound;
         var image = try bgb.decodePoseForEmotion(gpa, avb_data, .body, choice.emotion.assetIndex(), choice.intensity);
-        const origin_x = try takePaddedSimpleCard(gpa, &image);
+        const crop = try takePaddedSimpleCard(gpa, &image);
         if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
-            .face_x = clampedFaceX(record.face.x - origin_x, image.width),
+            .face_x = remappedSimpleFaceX(image, record.face.x, crop),
             .head_height = simpleHeadHeight(image.height),
         };
     }
@@ -441,6 +441,20 @@ fn clampedFaceX(face_x: i32, width: u32) i32 {
     return face_x;
 }
 
+/// Packager dummy `face` is `(120, 60)` on the 240-wide card (`package_generated_avb.py`).
+/// After the ink-run crop that point often sits in the right-hand paper, so balloon
+/// tails would aim at the pad instead of the head.
+fn remappedSimpleFaceX(image: Image, face_x: i32, crop: SimpleCardCrop) i32 {
+    const local = face_x - crop.origin_x;
+    if (!crop.applied) return clampedFaceX(face_x, image.width);
+    const ink = paperInkBounds(image) orelse return clampedFaceX(local, image.width);
+    if (local >= @as(i32, @intCast(ink.x)) and local <= @as(i32, @intCast(ink.x + ink.w)))
+        return local;
+    const head_h = @max(@as(u32, 1), ink.h / 2);
+    if (paperInkCenterX(image, ink.x, ink.y, ink.w, head_h)) |cx| return @intCast(cx);
+    return @intCast(ink.x + ink.w / 2);
+}
+
 /// Packager canvas from `tools/package_generated_avb.py`. Authored simple
 /// poses stay well below this; they keep their decoded DIB dimensions.
 fn isPaddedSimpleCard(image: Image, bbox: Bounds) bool {
@@ -482,6 +496,22 @@ fn columnHasPaperInk(image: Image, x: u32) bool {
     return false;
 }
 
+fn paperInkCenterX(image: Image, x: u32, y: u32, w: u32, h: u32) ?u32 {
+    var weighted: u64 = 0;
+    var mass: u64 = 0;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            if (!paperInkPixel(image, x + col, y + row)) continue;
+            weighted += x + col;
+            mass += 1;
+        }
+    }
+    if (mass == 0) return null;
+    return @intCast(weighted / mass);
+}
+
 /// Generated HD/Color cards sometimes store a wrap sliver to the right of the
 /// real figure. Layout must use the widest ink column-run, not the bbox of
 /// every non-white pixel.
@@ -519,16 +549,53 @@ fn largestPaperInkRun(image: Image) ?Bounds {
     return .{ .x = best_x0, .y = min_y, .w = best_x1 - best_x0, .h = max_y - min_y };
 }
 
-/// Crop a generated 240×280 white card to the ink silhouette. Returns the
-/// discarded left pad so `face.x` stays inside the cropped bitmap.
-pub fn takePaddedSimpleCard(gpa: std.mem.Allocator, image: *Image) !i32 {
-    const full = paperInkBounds(image.*) orelse return 0;
-    if (!isPaddedSimpleCard(image.*, full)) return 0;
-    const bbox = largestPaperInkRun(image.*) orelse full;
+/// Packager `normalize_pose` keeps 12px of paper around the silhouette. Grow
+/// the widest ink run by that much so hair/arm anti-alias is not flush with
+/// the dest rect. Stop before the next ink column-run so a wrap sliver stays out.
+const generated_card_pad: u32 = 12;
+
+fn expandPaperInkRun(image: Image, run: Bounds) Bounds {
+    var x0 = run.x;
+    var x1 = run.x + run.w;
+    var left: u32 = 0;
+    while (left < generated_card_pad and x0 > 0) {
+        if (columnHasPaperInk(image, x0 - 1)) break;
+        x0 -= 1;
+        left += 1;
+    }
+    var right: u32 = 0;
+    while (right < generated_card_pad and x1 < image.width) {
+        if (columnHasPaperInk(image, x1)) break;
+        x1 += 1;
+        right += 1;
+    }
+    const top_pad = @min(generated_card_pad, run.y);
+    const bot_room = image.height - (run.y + run.h);
+    const bot_pad = @min(generated_card_pad, bot_room);
+    return .{
+        .x = x0,
+        .y = run.y - top_pad,
+        .w = x1 - x0,
+        .h = run.h + top_pad + bot_pad,
+    };
+}
+
+pub const SimpleCardCrop = struct {
+    origin_x: i32 = 0,
+    applied: bool = false,
+};
+
+/// Crop a generated 240×280 white card to the ink silhouette plus paper pad.
+/// `origin_x` is the discarded left so `face.x` can be remapped.
+pub fn takePaddedSimpleCard(gpa: std.mem.Allocator, image: *Image) !SimpleCardCrop {
+    const full = paperInkBounds(image.*) orelse return .{};
+    if (!isPaddedSimpleCard(image.*, full)) return .{};
+    const run = largestPaperInkRun(image.*) orelse full;
+    const bbox = expandPaperInkRun(image.*, run);
     const cropped = try copyRect(gpa, image.*, bbox.x, bbox.y, bbox.w, bbox.h);
     image.deinit(gpa);
     image.* = cropped;
-    return @intCast(bbox.x);
+    return .{ .origin_x = @intCast(bbox.x), .applied = true };
 }
 
 /// `CBodyCam::DrawBody` calls `DrawBody(..., FALSE)` and `CBodySingle` uses
@@ -1032,6 +1099,38 @@ test "simple-avatar GetDimInfo keeps the source half-body head height" {
     try std.testing.expect(generated.head_height != generated.image.height);
     try std.testing.expect(generated.image.height < 240);
     try std.testing.expect(generated.image.width < 240);
+}
+
+test "authored simple face.x is unchanged and generated cards keep paper pad" {
+    const gpa = std.testing.allocator;
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var table = try avb_asset.parsePoseTable(gpa, jordan);
+    defer table.deinit(gpa);
+    const analysis = emotion_mod.analyzeText("ordinary text");
+    const choice = selectAvailable(table.records, &analysis, .body, null) orelse neutralChoice();
+    const record = bgb.selectPose(table.records, .body, choice.emotion.assetIndex(), choice.intensity).?;
+    var simple = try assembleDetailedForText(gpa, jordan, "ordinary text");
+    defer simple.deinit(gpa);
+    try std.testing.expectEqual(@as(i32, record.face.x), simple.face_x);
+
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/anna-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/anna-color-hd-v1.avb"),
+    };
+    for (blobs) |avb_data| {
+        var generated = try assembleDetailedForText(gpa, avb_data, "ordinary text");
+        defer generated.deinit(gpa);
+        const ink = paperInkBounds(generated.image).?;
+        try std.testing.expect(ink.x >= 4);
+        try std.testing.expect(ink.x + ink.w + 4 <= generated.image.width);
+        try std.testing.expect(ink.y >= 4);
+        try std.testing.expect(generated.face_x >= @as(i32, @intCast(ink.x)));
+        try std.testing.expect(generated.face_x <= @as(i32, @intCast(ink.x + ink.w)));
+        try std.testing.expect(generated.face_x * 4 > @as(i32, @intCast(generated.image.width)));
+        try std.testing.expect(generated.face_x * 4 < @as(i32, @intCast(generated.image.width)) * 3);
+        try std.testing.expect(generated.image.width < 140);
+        try std.testing.expect(generated.image.height < 230);
+    }
 }
 
 test "text rules select simple-avatar whole-body expressions" {
