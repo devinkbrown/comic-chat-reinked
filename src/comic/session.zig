@@ -1215,6 +1215,15 @@ test "live roster follows NAMES membership speech and current avatars" {
     try std.testing.expect(try transcript.observeIrc(&kick, "#room", "Me"));
     try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alicia").?].departed);
     try std.testing.expectEqual(@as(usize, 1), transcript.activeMemberCount());
+
+    var rejoin = irc_message.parse(":Alicia!u@h JOIN :#room");
+    try std.testing.expect(try transcript.observeIrc(&rejoin, "#room", "Me"));
+    var ban_then_op = irc_message.parse(":op!u@h MODE #room +bo bad!*@* Alicia");
+    try std.testing.expect(try transcript.observeIrc(&ban_then_op, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.operator, transcript.roster.items[transcript.findRosterIndex("Alicia").?].role);
+    var empty_kick = irc_message.parse(":op!u@h KICK #room Alicia");
+    try std.testing.expect(try transcript.observeIrc(&empty_kick, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alicia").?].departed);
 }
 
 test "NAMES 366 retires members missing from the snapshot" {

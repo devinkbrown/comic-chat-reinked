@@ -149,8 +149,14 @@ pub fn encodeSendOffer(gpa: std.mem.Allocator, offer: SendOffer) ![]u8 {
 /// Case-insensitive CTCP `DCC SEND` recognition. The consent path must use
 /// this instead of a literal `startsWith("\x01DCC SEND ")` so mixed-case
 /// offers still reach the approval dialog.
-pub fn looksLikeSendOffer(text: []const u8) bool {
+pub fn looksLikeDccControl(text: []const u8) bool {
     if (text.len < 5 or !std.ascii.eqlIgnoreCase(text[0..4], "\x01DCC") or text[4] != ' ')
+        return false;
+    return text[text.len - 1] == 0x01;
+}
+
+pub fn looksLikeSendOffer(text: []const u8) bool {
+    if (!looksLikeDccControl(text))
         return false;
     var rest = text[5..];
     if (rest.len > 0 and rest[rest.len - 1] == 0x01)
@@ -411,6 +417,11 @@ test "parseSendOffer accepts an omitted size field and rejects non-offers" {
     defer gpa.free(mixed.filename);
     try std.testing.expectEqualStrings("anna.avb", mixed.filename);
     try std.testing.expect(!looksLikeSendOffer("\x01dcc chat chat 16777343 9000\x01"));
+    try std.testing.expect(looksLikeDccControl("\x01DCC CHAT chat 16777343 9000\x01"));
+    try std.testing.expect(looksLikeDccControl("\x01dcc resume file 9000 64\x01"));
+    try std.testing.expect(looksLikeDccControl("\x01DCC SEND\x01"));
+    try std.testing.expect(!looksLikeDccControl("\x01ACTION waves\x01"));
+    try std.testing.expect(!looksLikeDccControl("ordinary message"));
 }
 
 test "sendFile and receiveFile round-trip real bytes over a loopback TCP connection" {

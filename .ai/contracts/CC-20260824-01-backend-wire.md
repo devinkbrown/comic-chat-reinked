@@ -53,7 +53,7 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - [x] `zig build test` passes
 - [x] `zig build` linux/amd64 still builds
 - [x] `git diff --check` clean
-- [ ] PR lists what was fixed and honest leftovers
+- [x] PR lists what was fixed and honest leftovers
 - [x] No desktop UI redesign
 
 ## Wave 2 leftovers in scope

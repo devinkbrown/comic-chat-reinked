@@ -3550,12 +3550,21 @@ fn processWorkspaceMessages(
             const room_name = msg.param(0) orelse "";
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
             if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Leave", who, room_name, msg.param(1) orelse "");
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick))
+                redraw = (try applySelfLeftChannel(workspace, client, state, room_name, msg.param(1))) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "KICK")) {
             const room_name = msg.param(0) orelse "";
             const who = msg.param(1) orelse "";
             if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Kick", who, room_name, msg.param(2) orelse "");
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick))
+                redraw = (try applySelfLeftChannel(workspace, client, state, room_name, msg.param(2))) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "INVITE")) {
-            if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, &active_room.transcript, preferences, "Invitation", if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "", msg.param(1) orelse "", "");
+            const invited = msg.param(0) orelse "";
+            const room_name = msg.param(1) orelse "";
+            const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+            if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, &active_room.transcript, preferences, "Invitation", who, room_name, "");
+            if (std.ascii.eqlIgnoreCase(invited, workspace.self_nick))
+                redraw = (try appendInviteLine(workspace, who, room_name)) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "RENAME")) {
             const old_name = msg.param(0) orelse "";
             const new_name = msg.param(1) orelse "";
@@ -3563,8 +3572,18 @@ fn processWorkspaceMessages(
                 client.renameRestoration(old_name, new_name);
                 redraw = true;
             }
-        } else if (std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or std.mem.eql(u8, msg.command, "332")) {
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or
+            std.mem.eql(u8, msg.command, "331") or
+            std.mem.eql(u8, msg.command, "332") or
+            std.mem.eql(u8, msg.command, "333"))
+        {
             redraw = (try appendTopicLine(workspace, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "MODE") or std.mem.eql(u8, msg.command, "324")) {
+            redraw = (try appendModeLine(workspace, &msg)) or redraw;
+        } else if (isJoinDeniedNumeric(msg.command)) {
+            redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
+        } else if (std.mem.eql(u8, msg.command, "432") or std.mem.eql(u8, msg.command, "436")) {
+            redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
         } else if (std.mem.eql(u8, msg.command, "305") or std.mem.eql(u8, msg.command, "306")) {
             const away = std.mem.eql(u8, msg.command, "306");
             for (workspace.rooms.items) |*room| {
@@ -3763,21 +3782,158 @@ fn applyClientPropertyBackdrop(workspace: *cc.client.workspace.Workspace, msg: *
 }
 
 fn appendTopicLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
-    const channel = if (std.mem.eql(u8, msg.command, "332")) msg.param(1) else msg.param(0);
-    const topic = if (std.mem.eql(u8, msg.command, "332")) msg.param(2) else msg.param(1);
+    const numeric = std.mem.eql(u8, msg.command, "331") or
+        std.mem.eql(u8, msg.command, "332") or
+        std.mem.eql(u8, msg.command, "333");
+    const channel = if (numeric) msg.param(1) else msg.param(0);
     const room_name = channel orelse return false;
-    const text = topic orelse return false;
     const room_index = workspace.find(room_name) orelse return false;
     var display: std.ArrayList(u8) = .empty;
     defer display.deinit(workspace.gpa);
-    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "Topic";
-    if (who.len != 0 and !std.mem.eql(u8, msg.command, "332")) {
-        try display.appendSlice(workspace.gpa, "Topic from ");
-        try display.appendSlice(workspace.gpa, who);
-        try display.appendSlice(workspace.gpa, ": ");
-    } else try display.appendSlice(workspace.gpa, "Topic: ");
-    try display.appendSlice(workspace.gpa, text);
+    if (std.mem.eql(u8, msg.command, "331")) {
+        try display.appendSlice(workspace.gpa, msg.param(2) orelse "No topic is set");
+    } else if (std.mem.eql(u8, msg.command, "333")) {
+        const setter = msg.param(2) orelse "someone";
+        try display.appendSlice(workspace.gpa, "Topic set by ");
+        try display.appendSlice(workspace.gpa, setter);
+        if (msg.param(3)) |when| {
+            try display.appendSlice(workspace.gpa, " at ");
+            try display.appendSlice(workspace.gpa, when);
+        }
+    } else {
+        const text = if (std.mem.eql(u8, msg.command, "332")) msg.param(2) else msg.param(1);
+        const topic = text orelse return false;
+        const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "Topic";
+        if (who.len != 0 and !std.mem.eql(u8, msg.command, "332")) {
+            try display.appendSlice(workspace.gpa, "Topic from ");
+            try display.appendSlice(workspace.gpa, who);
+            try display.appendSlice(workspace.gpa, ": ");
+        } else try display.appendSlice(workspace.gpa, "Topic: ");
+        try display.appendSlice(workspace.gpa, topic);
+    }
     try workspace.rooms.items[room_index].transcript.addWithOptions("Topic", display.items, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn appendModeLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const channel = if (std.mem.eql(u8, msg.command, "324")) msg.param(1) else msg.param(0);
+    const room_name = channel orelse return false;
+    const room_index = workspace.find(room_name) orelse return false;
+    var display: std.ArrayList(u8) = .empty;
+    defer display.deinit(workspace.gpa);
+    try display.appendSlice(workspace.gpa, "Mode");
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+    if (who.len != 0 and !std.mem.eql(u8, msg.command, "324")) {
+        try display.appendSlice(workspace.gpa, " from ");
+        try display.appendSlice(workspace.gpa, who);
+    }
+    try display.appendSlice(workspace.gpa, ":");
+    const start = if (std.mem.eql(u8, msg.command, "324")) @as(usize, 2) else @as(usize, 1);
+    if (start >= msg.param_count) return false;
+    for (msg.params[start..msg.param_count]) |param| {
+        try display.append(workspace.gpa, ' ');
+        try display.appendSlice(workspace.gpa, param);
+    }
+    try workspace.rooms.items[room_index].transcript.addWithOptions("Mode", display.items, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn isJoinDeniedNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "403") or
+        std.mem.eql(u8, command, "405") or
+        std.mem.eql(u8, command, "471") or
+        std.mem.eql(u8, command, "473") or
+        std.mem.eql(u8, command, "474") or
+        std.mem.eql(u8, command, "475") or
+        std.mem.eql(u8, command, "476") or
+        std.mem.eql(u8, command, "477");
+}
+
+fn anyRoomJoined(workspace: *const cc.client.workspace.Workspace) bool {
+    for (workspace.rooms.items) |room| {
+        if (room.joined) return true;
+    }
+    return false;
+}
+
+fn refreshJoinedState(workspace: *const cc.client.workspace.Workspace, state: *ChatState, idle_status: []const u8) void {
+    if (anyRoomJoined(workspace)) return;
+    state.joined = false;
+    state.status = idle_status;
+}
+
+fn applySelfLeftChannel(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    channel: []const u8,
+    reason: ?[]const u8,
+) !bool {
+    client.forgetRestoration(channel);
+    const room_index = workspace.find(channel) orelse {
+        refreshJoinedState(workspace, state, "left room");
+        return false;
+    };
+    var room = &workspace.rooms.items[room_index];
+    room.joined = false;
+    if (reason) |text| {
+        if (text.len > 0) {
+            var buf: [280]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "Left {s} ({s})", .{ room.name, text }) catch "Left the room.";
+            try room.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+        }
+    }
+    refreshJoinedState(workspace, state, "left room");
+    return true;
+}
+
+fn applyJoinDenied(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const channel = msg.param(1) orelse return false;
+    client.forgetRestoration(channel);
+    const detail = msg.param(2) orelse msg.command;
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "Cannot join {s}: {s}", .{ channel, detail }) catch "Cannot join room.";
+    if (workspace.find(channel)) |room_index| {
+        workspace.rooms.items[room_index].joined = false;
+        try workspace.rooms.items[room_index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    } else if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    refreshJoinedState(workspace, state, "join denied");
+    state.status = "join denied";
+    return true;
+}
+
+fn appendInviteLine(workspace: *cc.client.workspace.Workspace, who: []const u8, channel: []const u8) !bool {
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s} invited you to {s}", .{
+        if (who.len == 0) "Someone" else who,
+        if (channel.len == 0) "a room" else channel,
+    }) catch "You were invited to a room.";
+    const room_index = workspace.find(channel) orelse workspace.active;
+    const index = room_index orelse return false;
+    try workspace.rooms.items[index].transcript.addWithOptions("Invite", line, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn appendNickNumericLine(
+    workspace: *cc.client.workspace.Workspace,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const nick = msg.param(1) orelse "";
+    const detail = msg.param(2) orelse msg.command;
+    state.status = if (std.mem.eql(u8, msg.command, "432")) "invalid nickname" else "nickname collision";
+    if (workspace.activeRoom()) |room| {
+        var buf: [280]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "Nick {s}: {s}", .{ nick, detail }) catch "Nickname rejected.";
+        try room.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
     return true;
 }
 
@@ -3952,7 +4108,11 @@ fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
         std.ascii.eqlIgnoreCase(msg.command, "DATA") or
         std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
         std.ascii.eqlIgnoreCase(msg.command, "WHISPER")) return msg.param(0);
-    if (std.mem.eql(u8, msg.command, "332")) return msg.param(1);
+    if (std.mem.eql(u8, msg.command, "331") or
+        std.mem.eql(u8, msg.command, "332") or
+        std.mem.eql(u8, msg.command, "333") or
+        std.mem.eql(u8, msg.command, "324") or
+        isJoinDeniedNumeric(msg.command)) return msg.param(1);
     return null;
 }
 
@@ -3993,9 +4153,9 @@ fn receiveDccOffer(
     who: []const u8,
     wire: []const u8,
 ) !bool {
-    if (!cc.proto.dcc.looksLikeSendOffer(wire)) return false;
+    if (!cc.proto.dcc.looksLikeDccControl(wire)) return false;
     const maybe_offer = cc.proto.dcc.parseSendOffer(gpa, wire) catch return true;
-    const offer = maybe_offer orelse return false;
+    const offer = maybe_offer orelse return true;
     defer gpa.free(offer.filename);
     if (offer.port == 0 or offer.size == null or offer.size.? > cc.client.files.max_document_bytes) return true;
     try state.rememberDccOffer(gpa, who, offer);
@@ -4213,8 +4373,30 @@ fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8
         try client.refuseLegacyNetMeeting(who);
         return true;
     }
-    // The source explicitly ignores X-VCHAT.
-    return std.ascii.eqlIgnoreCase(command, "X-VCHAT");
+    // The source explicitly ignores X-VCHAT. Unknown CTCP must still be
+    // consumed so it is not inserted as ordinary speech. ACTION/SOUND and
+    // DCC fall through: SOUND/ACTION render through addWireMessage, and DCC
+    // is owned by receiveDccOffer.
+    return consumesUnknownCtcp(wire);
+}
+
+fn ctcpCommandName(wire: []const u8) ?[]const u8 {
+    if (wire.len < 3 or wire[0] != 0x01 or wire[wire.len - 1] != 0x01) return null;
+    const body = wire[1 .. wire.len - 1];
+    const separator = std.mem.indexOfScalar(u8, body, ' ');
+    return if (separator) |index| body[0..index] else body;
+}
+
+fn isSpeechCtcp(wire: []const u8) bool {
+    const command = ctcpCommandName(wire) orelse return false;
+    return std.ascii.eqlIgnoreCase(command, "ACTION") or std.ascii.eqlIgnoreCase(command, "SOUND");
+}
+
+fn consumesUnknownCtcp(wire: []const u8) bool {
+    const command = ctcpCommandName(wire) orelse return false;
+    return !std.ascii.eqlIgnoreCase(command, "ACTION") and
+        !std.ascii.eqlIgnoreCase(command, "SOUND") and
+        !std.ascii.eqlIgnoreCase(command, "DCC");
 }
 
 fn handleInputKey(
@@ -4425,15 +4607,118 @@ test "topic replies land in the matching room" {
     const changed = cc.net.message.parse(":alice!u@h TOPIC #root :New topic");
     try std.testing.expect(try appendTopicLine(&workspace, &changed));
     try std.testing.expectEqualStrings("Topic from alice: New topic", workspace.rooms.items[0].transcript.lines.items[1].text);
+    const empty = cc.net.message.parse(":server 331 me #root :No topic is set");
+    try std.testing.expect(try appendTopicLine(&workspace, &empty));
+    try std.testing.expectEqualStrings("No topic is set", workspace.rooms.items[0].transcript.lines.items[2].text);
+    const setter = cc.net.message.parse(":server 333 me #root alice 1700000000");
+    try std.testing.expect(try appendTopicLine(&workspace, &setter));
+    try std.testing.expectEqualStrings("Topic set by alice at 1700000000", workspace.rooms.items[0].transcript.lines.items[3].text);
 }
 
 test "live roster room lookup includes MODE KICK and topic numerics" {
     const kick = cc.net.message.parse(":op!u@h KICK #root alice :out");
     const mode = cc.net.message.parse(":op!u@h MODE #root +o alice");
     const topic = cc.net.message.parse(":server 332 me #root :hi");
+    const no_topic = cc.net.message.parse(":server 331 me #root :No topic is set");
+    const modes = cc.net.message.parse(":server 324 me #root +nt");
+    const invite_only = cc.net.message.parse(":server 473 me #root :Cannot join channel (+i)");
     try std.testing.expectEqualStrings("#root", messageRoom(&kick).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&mode).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&topic).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&no_topic).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&modes).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&invite_only).?);
+}
+
+test "channel mode and invite lines land in the matching room" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const listed = cc.net.message.parse(":server 324 me #root +ntk secret");
+    try std.testing.expect(try appendModeLine(&workspace, &listed));
+    try std.testing.expectEqualStrings("Mode: +ntk secret", workspace.rooms.items[0].transcript.lines.items[0].text);
+    const changed = cc.net.message.parse(":op!u@h MODE #root +o alice");
+    try std.testing.expect(try appendModeLine(&workspace, &changed));
+    try std.testing.expectEqualStrings("Mode from op: +o alice", workspace.rooms.items[0].transcript.lines.items[1].text);
+    try std.testing.expect(try appendInviteLine(&workspace, "alice", "#root"));
+    try std.testing.expectEqualStrings("alice invited you to #root", workspace.rooms.items[0].transcript.lines.items[2].text);
+}
+
+test "self leave and join denial clear membership without a live socket" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    var state: ChatState = .{ .joined = true, .status = "connected" };
+    defer state.deinit(gpa);
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try client.joinWithKey("#root", "swordfish");
+    try std.testing.expect(client.hasRestorationTargets());
+
+    try std.testing.expect(try applySelfLeftChannel(&workspace, &client, &state, "#root", "out"));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!state.joined);
+    try std.testing.expectEqualStrings("left room", state.status);
+    try std.testing.expect(!client.hasRestorationTargets());
+    try std.testing.expectEqualStrings("Left #root (out)", workspace.rooms.items[root].transcript.lines.items[0].text);
+
+    try client.join("#locked");
+    workspace.rooms.items[root].joined = false;
+    const denied = cc.net.message.parse(":server 473 me #locked :Cannot join channel (+i)");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &denied));
+    try std.testing.expect(!client.hasRestorationTargets());
+    try std.testing.expectEqualStrings("join denied", state.status);
+    try std.testing.expectEqualStrings("Cannot join #locked: Cannot join channel (+i)", workspace.rooms.items[root].transcript.lines.items[1].text);
+}
+
+test "unknown CTCP is consumed while ACTION and SOUND stay speech" {
+    try std.testing.expect(consumesUnknownCtcp("\x01FINGER\x01"));
+    try std.testing.expect(consumesUnknownCtcp("\x01X-VCHAT unused\x01"));
+    try std.testing.expect(consumesUnknownCtcp("\x01VERSION\x01"));
+    try std.testing.expect(!consumesUnknownCtcp("\x01ACTION waves\x01"));
+    try std.testing.expect(!consumesUnknownCtcp("\x01SOUND Chime\x01"));
+    try std.testing.expect(!consumesUnknownCtcp("\x01DCC CHAT chat 1 2\x01"));
+    try std.testing.expect(!isSpeechCtcp("\x01FINGER\x01"));
+    try std.testing.expect(isSpeechCtcp("\x01action waves\x01"));
+    try std.testing.expect(isSpeechCtcp("\x01sound Knock\x01"));
+}
+
+test "nick collision and invalid nick numerics update status" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    const invalid = cc.net.message.parse(":server 432 me badnick :Erroneous nickname");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &invalid));
+    try std.testing.expectEqualStrings("invalid nickname", state.status);
+    try std.testing.expectEqualStrings("Nick badnick: Erroneous nickname", workspace.rooms.items[0].transcript.lines.items[0].text);
+    const collision = cc.net.message.parse(":server 436 me stolen :Nickname collision");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &collision));
+    try std.testing.expectEqualStrings("nickname collision", state.status);
 }
 
 test "IRCX DATA transport requires numeric 800 enabled state" {

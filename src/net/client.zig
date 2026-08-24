@@ -192,6 +192,12 @@ const Registration = struct {
     fn handleCapEvent(self: *Registration, out: *std.ArrayList(u8), event: ircv3.Event) !void {
         switch (event) {
             .sasl_ready => if (self.credentials) |credentials| {
+                if (self.security == .plaintext) {
+                    credentials.zeroize();
+                    const completed = try self.cap.saslComplete(out);
+                    try self.handleCapEvent(out, completed);
+                    return;
+                }
                 if (self.sasl_session) |*old| old.deinit();
                 self.sasl_session = sasl.Session.init(self.cap.gpa, credentials, .{ .preference = self.sasl_preference });
                 const capability = self.cap.offered.get("sasl");
@@ -1327,6 +1333,10 @@ pub const Client = struct {
         self.ownedRestoration().moveFrom(source);
     }
 
+    pub fn forgetRestoration(self: *Client, channel: []const u8) void {
+        if (self.restoration) |*restoration| restoration.forget(channel);
+    }
+
     pub fn renameRestoration(self: *Client, old_channel: []const u8, new_channel: []const u8) void {
         const restoration = if (self.restoration) |*value| value else return;
         var key_storage: [512]u8 = undefined;
@@ -2055,6 +2065,39 @@ test "unsupported advertised SASL mechanisms complete CAP without blocking regis
     try std.testing.expect(credentials.zeroized);
 }
 
+test "plaintext SASL advertisement completes CAP without AUTHENTICATE" {
+    const gpa = std.testing.allocator;
+    var authzid = [_]u8{};
+    var authcid = [_]u8{ 'a', 'l', 'i', 'c', 'e' };
+    var password = [_]u8{ 's', 'e', 'c', 'r', 'e', 't' };
+    var credentials = sasl.Credentials{
+        .authorization_identity = &authzid,
+        .authentication_identity = &authcid,
+        .password = &password,
+    };
+    const preference = [_]sasl.Mechanism{.plain};
+    var registration = Registration.init(gpa, "irc.example", .plaintext, .{
+        .credentials = &credentials,
+        .sasl_preference = &preference,
+        .io = std.testing.io,
+    });
+    defer registration.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var upgrade: ?u16 = null;
+    try registration.cap.begin(&out);
+    out.clearRetainingCapacity();
+    var ls = message.parse(":irc CAP * LS :sasl=PLAIN");
+    _ = try registration.consume(&out, &ls, &upgrade);
+    out.clearRetainingCapacity();
+    var ack = message.parse(":irc CAP * ACK :sasl");
+    _ = try registration.consume(&out, &ack, &upgrade);
+    try std.testing.expectEqualStrings("CAP END\r\nMODE ISIRCX\r\n", out.items);
+    try std.testing.expect(registration.done);
+    try std.testing.expect(credentials.zeroized);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "AUTHENTICATE") == null);
+}
+
 test "reply reaction and typing commands are bounded tagged client messages" {
     const gpa = std.testing.allocator;
     const owned_host = try gpa.dupe(u8, "irc.example");
@@ -2537,6 +2580,7 @@ test "LIST ACCESS and PROP reject invented or invalid atoms" {
     try std.testing.expectError(error.InvalidIrcParameter, client.queryProperty("#root", "TOPIC ONJOIN"));
     try std.testing.expectError(error.InvalidIrcParameter, client.setProperty("#root", "TOPIC TOPIC", "x"));
     try client.queryProperty("#root", "*");
+    try client.setProperty("#root", "TOPIC", "");
     try std.testing.expectError(error.InvalidIrcParameter, client.accessAdd("#root", "FOUNDER", "anna!*@*", "", ""));
     try std.testing.expectError(error.InvalidIrcParameter, client.accessAdd("#root", "HOST", "anna !*@*", "", ""));
     try std.testing.expectError(error.InvalidIrcParameter, client.accessAdd("#root", "HOST", "anna!*@*", "soon", ""));
@@ -2544,7 +2588,8 @@ test "LIST ACCESS and PROP reject invented or invalid atoms" {
     try std.testing.expectEqualStrings("LIST #root,#lobby\r\n", client.tx.items.items[0].bytes);
     try std.testing.expectEqualStrings("LISTX 25\r\n", client.tx.items.items[1].bytes);
     try std.testing.expectEqualStrings("PROP #root *\r\n", client.tx.items.items[2].bytes);
-    try std.testing.expectEqualStrings("ACCESS #root ADD grant anna!*@* 15\r\n", client.tx.items.items[3].bytes);
+    try std.testing.expectEqualStrings("PROP #root TOPIC :\r\n", client.tx.items.items[3].bytes);
+    try std.testing.expectEqualStrings("ACCESS #root ADD grant anna!*@* 15\r\n", client.tx.items.items[4].bytes);
 }
 
 test "join and create remember restoration and replay JOIN without chat" {
@@ -2600,6 +2645,8 @@ test "join and create remember restoration and replay JOIN without chat" {
     const queued = client.tx.items.items[client.tx.items.items.len - 1].bytes;
     try std.testing.expect(std.mem.indexOf(u8, queued, "JOIN #vault swordfish") != null);
     try std.testing.expect(std.mem.indexOf(u8, queued, "CHATHISTORY") == null);
+    client.forgetRestoration("#vault");
+    try std.testing.expect(!client.hasRestorationTargets());
 }
 
 test "IRCX tagged data rejects malformed draft tags" {
