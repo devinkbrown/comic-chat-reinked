@@ -540,7 +540,10 @@ const ConnectionRuntime = struct {
         if (self.connect_options.security == .plaintext) return error.SaslRequiresTls;
 
         const selected = self.auth.mechanism;
-        const external_available = self.auth.external or selected == .external;
+        const wants_external = self.auth.external or selected == .external;
+        if (wants_external and self.connect_options.client_cert_file == null)
+            return error.SaslExternalRequiresClientCertificate;
+        const external_available = wants_external;
         if (!external_available and self.auth.password_file == null) return error.MissingSaslPasswordFile;
 
         self.authzid_storage = try self.gpa.dupe(u8, self.auth.authzid orelse "");
@@ -569,6 +572,11 @@ const ConnectionRuntime = struct {
         }
     }
 
+    fn refreshNowSeconds(self: *ConnectionRuntime) void {
+        const wall_seconds = std.Io.Clock.real.now(self.io).toSeconds();
+        if (wall_seconds > 0) self.now_seconds = @intCast(wall_seconds);
+    }
+
     fn registrationOptions(self: *ConnectionRuntime) cc.net.client.RegistrationOptions {
         return .{
             .credentials = if (self.credentials) |*credentials| credentials else null,
@@ -585,6 +593,7 @@ const ConnectionRuntime = struct {
     /// password file only after the previous SASL session wiped and released
     /// its copy, so no reusable cleartext command or queue entry survives.
     fn registrationOptionsForAttempt(self: *ConnectionRuntime) !cc.net.client.RegistrationOptions {
+        self.refreshNowSeconds();
         if (self.credentials) |credentials| if (credentials.zeroized) {
             self.clearCredentialStorage();
             try self.loadCredentials();
@@ -1016,7 +1025,7 @@ fn runChatComic(
             const wire = msg.param(2) orelse continue;
             if (!std.ascii.eqlIgnoreCase(target, channel) or !std.mem.eql(u8, kind, "CCUDI1")) continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, &client, &transcript, who, wire, nick, metadata_state.ircx_data, null)) continue;
+            if (try processComicControl(io, &client, &transcript, who, wire, nick, target, metadata_state.ircx_data, null)) continue;
             _ = cc.proto.udi.parseAnnotation(wire) catch continue;
             try metadata_state.rememberUdi(gpa, target, who, wire);
         } else if (std.mem.eql(u8, msg.command, "PRIVMSG")) {
@@ -1024,7 +1033,10 @@ fn runChatComic(
             if (!std.ascii.eqlIgnoreCase(target, channel)) continue;
             const text = msg.param(1) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
-            if (try processComicControl(io, &client, &transcript, who, text, nick, metadata_state.ircx_data, null)) continue;
+            if (try processComicControl(io, &client, &transcript, who, text, nick, target, metadata_state.ircx_data, null)) {
+                metadata_state.discardPendingUdi(gpa, target, who);
+                continue;
+            }
             var pending = metadata_state.takeUdi(target, who);
             defer if (pending) |*entry| entry.deinit(gpa);
             try transcript.addWireMessage(who, text, false, if (pending) |entry| entry.wire else null);
@@ -1296,7 +1308,15 @@ const ChatState = struct {
         errdefer gpa.free(owned_nick);
         const owned_wire = try gpa.dupe(u8, wire);
         errdefer gpa.free(owned_wire);
+        if (self.pending_udi.items.len >= 64) {
+            var oldest = self.pending_udi.orderedRemove(0);
+            oldest.deinit(gpa);
+        }
         try self.pending_udi.append(gpa, .{ .target = owned_target, .nick = owned_nick, .wire = owned_wire });
+    }
+
+    fn discardPendingUdi(self: *ChatState, gpa: std.mem.Allocator, target: []const u8, nick: []const u8) void {
+        if (self.takeUdi(target, nick)) |*entry| entry.deinit(gpa);
     }
 
     fn takeUdi(self: *ChatState, target: []const u8, nick: []const u8) ?PendingUdi {
@@ -1542,7 +1562,7 @@ const AsyncNetwork = struct {
     }
 };
 
-fn applyNetworkEvent(event: NetworkEvent, state: *ChatState) bool {
+fn applyNetworkEvent(event: NetworkEvent, state: *ChatState, gpa: std.mem.Allocator) bool {
     return switch (event) {
         .none => false,
         .connecting => changed: {
@@ -1554,24 +1574,27 @@ fn applyNetworkEvent(event: NetworkEvent, state: *ChatState) bool {
             break :changed true;
         },
         .retry_scheduled => |err| changed: {
-            resetChatConnectionState(state);
+            resetChatConnectionState(state, gpa);
             state.setConnectionFailure(err);
             break :changed true;
         },
         .sts_upgrading => changed: {
-            resetChatConnectionState(state);
+            resetChatConnectionState(state, gpa);
             state.status = "upgrading to TLS";
             break :changed true;
         },
     };
 }
 
-fn resetChatConnectionState(state: *ChatState) void {
+fn resetChatConnectionState(state: *ChatState, gpa: std.mem.Allocator) void {
     state.joined = false;
     state.join_requested = false;
     state.avatar_announced = false;
+    state.ircx_data = false;
     state.notification_poll_pending = 0;
     state.last_notification_poll_ms = 0;
+    for (state.pending_udi.items) |*entry| entry.deinit(gpa);
+    state.pending_udi.clearRetainingCapacity();
 }
 
 fn tickBackgroundFeatures(
@@ -1692,7 +1715,7 @@ fn runInteractivePollBackend(
         const timeout = if (has_client_side_repeat) @min(base_timeout, repeat_poll_timeout_ms) else base_timeout;
         _ = try posix.poll(&poll_fds, timeout);
         const now_ms = monotonicMilliseconds(io);
-        redraw = applyNetworkEvent(try network.tick(now_ms), &state) or redraw;
+        redraw = applyNetworkEvent(try network.tick(now_ms), &state, gpa) or redraw;
         redraw = (try tickBackgroundFeatures(&view, &network, &state, &workspace, now_ms)) or redraw;
         poll_fds[1].fd = if (network.clientPtr()) |client| client.fd() else -1;
 
@@ -1734,17 +1757,17 @@ fn runInteractivePollBackend(
 
         if (network.clientPtr()) |client| if ((poll_fds[1].revents & posix.POLL.IN) != 0) {
             const maybe_received: ?bool = client.receive() catch |err| failed: {
-                redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
                 poll_fds[1].fd = -1;
                 break :failed null;
             };
             if (maybe_received) |received| {
                 if (!received) {
-                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state) or redraw;
+                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, gpa) or redraw;
                     poll_fds[1].fd = -1;
                 } else if (network.clientPtr()) |active| {
                     const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, nick, channel, &state) catch |err| failed: {
-                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
                         poll_fds[1].fd = -1;
                         break :failed false;
                     };
@@ -1756,7 +1779,7 @@ fn runInteractivePollBackend(
         if (network.clientPtr() != null and
             (poll_fds[1].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL)) != 0)
         {
-            redraw = applyNetworkEvent(network.fail(now_ms, error.ConnectionResetByPeer), &state) or redraw;
+            redraw = applyNetworkEvent(network.fail(now_ms, error.ConnectionResetByPeer), &state, gpa) or redraw;
             poll_fds[1].fd = -1;
         }
 
@@ -1785,7 +1808,7 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
     while (true) {
         var redraw = false;
         const now_ms = monotonicMilliseconds(io);
-        redraw = applyNetworkEvent(try network.tick(now_ms), &state) or redraw;
+        redraw = applyNetworkEvent(try network.tick(now_ms), &state, gpa) or redraw;
         redraw = (try tickBackgroundFeatures(&view, &network, &state, &workspace, now_ms)) or redraw;
         while (try win.pollEvent()) |event| {
             const event_result = try handleWindowEvent(
@@ -1806,15 +1829,15 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
 
         if (network.clientPtr()) |client| {
             const receive_result = client.receiveTimeout(16) catch |err| disconnected: {
-                redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
                 break :disconnected null;
             };
             if (receive_result) |received| {
                 if (!received) {
-                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state) or redraw;
+                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, gpa) or redraw;
                 } else if (network.clientPtr()) |active| {
                     const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, nick, channel, &state) catch |err| failed: {
-                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
                         break :failed false;
                     };
                     redraw = redraw or processed;
@@ -2104,7 +2127,7 @@ fn loadStartupDocument(
     };
     if (locator.server) |server| if (!std.ascii.eqlIgnoreCase(server, network.host)) {
         try network.reconfigure(server, network.reconnect.port, network.effectiveOptions().security, monotonicMilliseconds(io));
-        resetChatConnectionState(state);
+        resetChatConnectionState(state, workspace.gpa);
     };
     try network.runtime.preferences.saveFile(io, network.runtime.preferences_path);
 }
@@ -2435,7 +2458,7 @@ fn applyDialogAction(
             view.setDialogNotice("Could not start that connection. Check the server and security mode.");
             return;
         };
-        resetChatConnectionState(state);
+        resetChatConnectionState(state, workspace.gpa);
         state.status = "connecting";
         _ = view.closeDialog();
         return;
@@ -2493,6 +2516,7 @@ fn applyDialogAction(
             const index = workspace.ensure(value) catch return;
             _ = workspace.activate(index);
             if (maybe_client) |client| try client.joinWithKey(value, view.dialogValueAt(1));
+            try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(1));
         },
         .channel_create => {
             const creation_modes = std.mem.trim(u8, view.dialogValueAt(2), " \t");
@@ -3021,7 +3045,7 @@ fn applyDialogAction(
                     view.setDialogNotice("The locator server could not be opened.");
                     return;
                 };
-                resetChatConnectionState(state);
+                resetChatConnectionState(state, workspace.gpa);
             };
             try preferences.saveFile(io, network.runtime.preferences_path);
         },
@@ -3337,9 +3361,10 @@ test "connection dialog validates a usable endpoint" {
 }
 
 test "connection failures remain actionable" {
-    var state: ChatState = .{ .joined = true, .join_requested = true };
-    try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state));
+    var state: ChatState = .{ .joined = true, .join_requested = true, .ircx_data = true };
+    try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state, std.testing.allocator));
     try std.testing.expect(!state.joined);
+    try std.testing.expect(!state.ircx_data);
     try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") != null);
     try std.testing.expect(std.mem.indexOf(u8, state.status, "click for settings") != null);
 }
@@ -3498,7 +3523,7 @@ fn processWorkspaceMessages(
                 try client.join(channel);
             } else for (workspace.rooms.items) |*room| {
                 room.joined = false;
-                try client.join(room.name);
+                try client.joinWithKey(room.name, room.join_key orelse "");
             }
             state.join_requested = true;
             state.status = "joining";
@@ -3534,7 +3559,7 @@ fn processWorkspaceMessages(
             if (!std.mem.eql(u8, kind, "CCUDI1")) continue;
             const room_index = workspace.find(target) orelse if (std.ascii.eqlIgnoreCase(target, nick)) workspace.active orelse continue else continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, nick, state.ircx_data, preferences)) {
+            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, nick, target, state.ircx_data, preferences)) {
                 redraw = true;
                 continue;
             }
@@ -3549,7 +3574,9 @@ fn processWorkspaceMessages(
             const text = msg.param(2) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             var room = &workspace.rooms.items[room_index];
-            try room.transcript.addWireMessage(who, text, true, null);
+            var pending = state.takeUdi(target, who);
+            defer if (pending) |*entry| entry.deinit(room.transcript.gpa);
+            try room.transcript.addWireMessage(who, text, true, if (pending) |entry| entry.wire else null);
             room.transcript.trimTo(64);
             if (workspace.active != room_index) room.unread +|= 1;
             redraw = true;
@@ -3562,22 +3589,27 @@ fn processWorkspaceMessages(
             const text = msg.param(1) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             if (observeFlood(state, workspace.gpa, who, monotonicMilliseconds(io), preferences.auto_ignore_count, preferences.auto_ignore_interval_s)) {
+                state.discardPendingUdi(workspace.gpa, target, who);
                 redraw = true;
                 continue;
             }
             if (try receiveDccOffer(workspace.gpa, view, state, who, text)) {
+                state.discardPendingUdi(workspace.gpa, target, who);
                 redraw = true;
                 continue;
             }
             if (try receiveCallControl(client, view, who, text)) {
+                state.discardPendingUdi(workspace.gpa, target, who);
                 redraw = true;
                 continue;
             }
-            if (try processComicControl(io, client, transcript, who, text, nick, state.ircx_data, preferences)) {
+            if (try processComicControl(io, client, transcript, who, text, nick, target, state.ircx_data, preferences)) {
+                state.discardPendingUdi(workspace.gpa, target, who);
                 redraw = true;
                 continue;
             }
             if (!std.ascii.eqlIgnoreCase(who, nick) and try runPersistentRules(workspace.gpa, client, transcript, preferences, if (is_private) "Whisper" else "Message", who, room.name, text)) {
+                state.discardPendingUdi(workspace.gpa, target, who);
                 redraw = true;
                 continue;
             }
@@ -3816,7 +3848,7 @@ fn receiveDccOffer(
     who: []const u8,
     wire: []const u8,
 ) !bool {
-    if (!std.mem.startsWith(u8, wire, "\x01DCC SEND ")) return false;
+    if (!cc.proto.dcc.looksLikeSendOffer(wire)) return false;
     const maybe_offer = cc.proto.dcc.parseSendOffer(gpa, wire) catch return true;
     const offer = maybe_offer orelse return false;
     defer gpa.free(offer.filename);
@@ -3892,6 +3924,26 @@ test "portable transfer and call inputs reject unsafe values" {
     try std.testing.expect(!validMeetingLink("https://example.test/bad link"));
 }
 
+test "pending UDI is discarded and bounded" {
+    const gpa = std.testing.allocator;
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try state.rememberUdi(gpa, "#room", "Alice", "#G000E000M1");
+    try state.rememberUdi(gpa, "#room", "Alice", "#G000E000M5");
+    try std.testing.expectEqual(@as(usize, 1), state.pending_udi.items.len);
+    try std.testing.expectEqualStrings("#G000E000M5", state.pending_udi.items[0].wire);
+    state.discardPendingUdi(gpa, "#room", "alice");
+    try std.testing.expectEqual(@as(usize, 0), state.pending_udi.items.len);
+
+    var i: usize = 0;
+    while (i < 70) : (i += 1) {
+        var nick_buf: [8]u8 = undefined;
+        const nick = try std.fmt.bufPrint(&nick_buf, "n{d}", .{i});
+        try state.rememberUdi(gpa, "#room", nick, "#G000E000M1");
+    }
+    try std.testing.expectEqual(@as(usize, 64), state.pending_udi.items.len);
+}
+
 test "flood suppression expires and nickname templates are bounded" {
     const gpa = std.testing.allocator;
     var state: ChatState = .{};
@@ -3915,6 +3967,7 @@ fn processComicControl(
     who: []const u8,
     wire: []const u8,
     self_nick: []const u8,
+    reply_target: []const u8,
     ircx_data: bool,
     preferences: ?*cc.client.preferences.Store,
 ) !bool {
@@ -3932,7 +3985,12 @@ fn processComicControl(
             return true;
         },
         .get_char_info => {
-            try announceRoomAvatar(client, who, transcript.resolvedAvatar(self_nick), ircx_data);
+            const dest = if (reply_target.len > 0 and
+                (reply_target[0] == '#' or reply_target[0] == '&' or reply_target[0] == '+' or reply_target[0] == '!'))
+                reply_target
+            else
+                who;
+            try announceRoomAvatar(client, dest, transcript.resolvedAvatar(self_nick), ircx_data);
             return true;
         },
         .heres_info => |profile| {

@@ -156,7 +156,11 @@ const Registration = struct {
         if (self.sasl_session) |*session| {
             if (std.ascii.eqlIgnoreCase(msg.command, "AUTHENTICATE") or isSaslNumeric(msg.command)) {
                 const event = session.handle(out, msg.*) catch |err| switch (err) {
-                    error.ServerSignatureMismatch => return true,
+                    error.ServerSignatureMismatch => {
+                        const cap_event = try self.cap.saslComplete(out);
+                        try self.handleCapEvent(out, cap_event);
+                        return true;
+                    },
                     else => return err,
                 };
                 switch (event) {
@@ -174,6 +178,14 @@ const Registration = struct {
                 return true;
             }
         }
+
+        // Onyx may still emit 433/437 while a second same-account attachment
+        // is waiting for 001 + SESSION RESUME. Do not surface that as a
+        // hard nick failure when a reusable credential is ready.
+        if (self.authenticated and !self.session_commands_sent and self.hasResumeToken() and
+            (std.mem.eql(u8, msg.command, "433") or std.mem.eql(u8, msg.command, "437")))
+            return true;
+
         return false;
     }
 
@@ -230,15 +242,28 @@ const Registration = struct {
                 return error.StsUpgradeRequired;
             },
             .persistence => |policy_value| if (self.store) |store| {
-                try store.update(self.host, policy_value.duration_seconds, self.now_seconds);
+                try store.update(self.host, policy_value.duration_seconds, self.currentNowSeconds());
             },
         }
+    }
+
+    fn currentNowSeconds(self: *const Registration) u64 {
+        if (self.io) |io| {
+            const wall = std.Io.Clock.real.now(io).toSeconds();
+            if (wall > 0) return @intCast(wall);
+        }
+        return self.now_seconds;
+    }
+
+    fn hasResumeToken(self: *const Registration) bool {
+        const store = self.session orelse return false;
+        return store.resumeToken(self.currentNowSeconds()) != null;
     }
 
     fn sendSessionCommands(self: *Registration, out: *std.ArrayList(u8)) !bool {
         if (self.session_commands_sent or !self.authenticated) return false;
         self.session_commands_sent = true;
-        if (self.session) |store| if (store.resumeToken(self.now_seconds)) |token| {
+        if (self.session) |store| if (store.resumeToken(self.currentNowSeconds())) |token| {
             try out.appendSlice(self.cap.gpa, "SESSION RESUME ");
             try out.appendSlice(self.cap.gpa, token);
             try out.appendSlice(self.cap.gpa, "\r\n");
@@ -342,7 +367,7 @@ pub const Client = struct {
         if (self.registration) |*registration| {
             if (registration.store) |store| {
                 const elapsed_seconds = (self.policy_now_ms -| self.policy_started_ms) / 1000;
-                store.rescheduleOnDisconnect(self.host, registration.now_seconds +| elapsed_seconds);
+                store.rescheduleOnDisconnect(self.host, registration.currentNowSeconds() +| elapsed_seconds);
             }
             registration.deinit();
         }
@@ -1699,6 +1724,59 @@ test "unauthenticated registration never transmits a session bearer" {
 
     try std.testing.expect(!try registration.sendSessionCommands(&out));
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "authenticated resume swallows 433 until SESSION commands are sent" {
+    const gpa = std.testing.allocator;
+    var store = try session_store.Store.init(gpa, "server.example", "alex");
+    defer store.deinit();
+    try std.testing.expect(try store.observe(message.parse(":server.example NOTICE alex :SESSION TOKEN reusable")));
+    var registration = Registration.init(gpa, "eshmaki.me", .tls, .{
+        .session = &store,
+        .now_seconds = 100,
+    });
+    defer registration.deinit();
+    registration.authenticated = true;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var upgrade: ?u16 = null;
+    var collision = message.parse(":irc 433 * alex :Nickname is already in use");
+    try std.testing.expect(try registration.consume(&out, &collision, &upgrade));
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try std.testing.expect(try registration.sendSessionCommands(&out));
+    var later = message.parse(":irc 433 alex newnick :Nickname is already in use");
+    try std.testing.expect(!try registration.consume(&out, &later, &upgrade));
+}
+
+test "unsigned SCRAM 903 completes CAP instead of stalling registration" {
+    const gpa = std.testing.allocator;
+    var authzid = [_]u8{};
+    var authcid = [_]u8{ 'u', 's', 'e', 'r' };
+    var password = [_]u8{ 'p', 'w' };
+    var credentials = sasl.Credentials{
+        .authorization_identity = &authzid,
+        .authentication_identity = &authcid,
+        .password = &password,
+    };
+    const preference = [_]sasl.Mechanism{.scram_sha_256};
+    var registration = Registration.init(gpa, "irc.example", .tls, .{
+        .credentials = &credentials,
+        .sasl_preference = &preference,
+        .io = std.testing.io,
+    });
+    defer registration.deinit();
+    registration.sasl_session = sasl.Session.init(gpa, &credentials, .{ .preference = &preference });
+    registration.sasl_session.?.selected = .scram_sha_256;
+    registration.sasl_session.?.phase = .awaiting_result;
+    registration.cap.phase = .waiting_sasl;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var upgrade: ?u16 = null;
+    var success = message.parse(":irc 903 user :SASL authentication successful");
+    try std.testing.expect(try registration.consume(&out, &success, &upgrade));
+    try std.testing.expectEqualStrings("CAP END\r\nMODE ISIRCX\r\n", out.items);
+    try std.testing.expect(registration.done);
+    try std.testing.expect(!registration.authenticated);
 }
 
 test "registration advances CAP then follows Microsoft IRCX probe and enable states" {

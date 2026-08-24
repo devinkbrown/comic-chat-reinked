@@ -339,6 +339,9 @@ pub const RosterEntry = struct {
     away: bool = false,
     role: MemberRole = .member,
     status_modes: u8 = 0,
+    /// Generation last listed in a 353 burst. Used with `Transcript.names_generation`
+    /// so 366 can retire members absent from the completed NAMES snapshot.
+    names_generation: u32 = 0,
 };
 
 /// Accumulates conversation lines, owning copies of the text (wire buffers are
@@ -348,6 +351,8 @@ pub const Transcript = struct {
     lines: std.ArrayList(Line) = .empty,
     roster: std.ArrayList(RosterEntry) = .empty,
     backdrop_storage: ?[]u8 = null,
+    names_generation: u32 = 0,
+    names_sync_active: bool = false,
 
     pub fn init(gpa: std.mem.Allocator) Transcript {
         return .{ .gpa = gpa };
@@ -405,9 +410,12 @@ pub const Transcript = struct {
         self_nick: []const u8,
     ) !bool {
         if (std.ascii.eqlIgnoreCase(msg.command, "353")) {
-            if (msg.param_count < 2) return false;
-            const names_channel = msg.params[msg.param_count - 2];
+            const names_channel = namesReplyChannel(msg) orelse return false;
             if (!std.ascii.eqlIgnoreCase(names_channel, channel)) return false;
+            if (!self.names_sync_active) {
+                self.names_generation +%= 1;
+                self.names_sync_active = true;
+            }
             var changed = false;
             var names = std.mem.tokenizeScalar(u8, msg.params[msg.param_count - 1], ' ');
             while (names.next()) |decorated| {
@@ -429,10 +437,28 @@ pub const Transcript = struct {
                 );
                 if (existing == null or self.roster.items[index].departed) changed = true;
                 self.roster.items[index].departed = false;
-                self.roster.items[index].away = false;
+                self.roster.items[index].names_generation = self.names_generation;
                 if (self.roster.items[index].role != role) changed = true;
                 self.roster.items[index].role = role;
                 self.roster.items[index].status_modes = status_modes;
+            }
+            return changed;
+        }
+
+        if (std.ascii.eqlIgnoreCase(msg.command, "366")) {
+            const names_channel = endOfNamesChannel(msg) orelse return false;
+            if (!std.ascii.eqlIgnoreCase(names_channel, channel)) return false;
+            if (!self.names_sync_active) {
+                self.names_generation +%= 1;
+            }
+            self.names_sync_active = false;
+            var changed = false;
+            for (self.roster.items) |*entry| {
+                if (entry.names_generation == self.names_generation) continue;
+                if (entry.is_self) continue;
+                if (entry.departed) continue;
+                entry.departed = true;
+                changed = true;
             }
             return changed;
         }
@@ -495,6 +521,12 @@ pub const Transcript = struct {
             return changed;
         }
 
+        if (std.ascii.eqlIgnoreCase(msg.command, "KICK")) {
+            if (msg.param_count < 2) return false;
+            if (!std.ascii.eqlIgnoreCase(msg.params[0], channel)) return false;
+            return self.markDeparted(msg.params[1]);
+        }
+
         if (std.ascii.eqlIgnoreCase(msg.command, "PART")) {
             const parted_channel = msg.param(0) orelse return false;
             if (!std.ascii.eqlIgnoreCase(parted_channel, channel)) return false;
@@ -521,7 +553,10 @@ pub const Transcript = struct {
                     var target = &self.roster.items[new_index];
                     target.avatar = old.avatar;
                     target.is_self = target.is_self or old.is_self;
-                    target.departed = old.departed;
+                    // Keep the surviving identity present if either side is
+                    // still in the room. A departed ghost must not evict an
+                    // active homonym during a nick collision merge.
+                    target.departed = target.departed and old.departed;
                     target.role = highestRole(target.role, old.role);
                     target.status_modes |= old.status_modes;
                     target.sends = saturatingAdd(target.sends, old.sends);
@@ -660,7 +695,7 @@ pub const Transcript = struct {
             if (pending_annotation) |wire| {
                 if (udi.parseAnnotation(wire)) |decoded| {
                     annotation = decoded;
-                    modes = decoded.modes;
+                    modes = if (is_private) udi.privateModes(decoded.modes) else decoded.modes;
                 } else |_| {}
             }
         }
@@ -806,6 +841,42 @@ test "every generated backdrop is accepted for local and remote comic state" {
         try std.testing.expectEqualStrings(name, transcript.resolvedBackdrop());
         try std.testing.expectEqualStrings(name, bundledBackdropByName(name ++ ".bgb").?);
     }
+}
+
+/// RFC 2812 `353 <me> <type> <channel> :<nicks>` plus the 3-parameter form
+/// and a glued type prefix (`=#room`). The last parameter is always the
+/// nick list; the channel is the last earlier token that looks like one.
+fn namesReplyChannel(msg: *const irc_message.Message) ?[]const u8 {
+    if (msg.param_count < 2) return null;
+    var index = msg.param_count - 2;
+    while (true) {
+        if (channelToken(msg.params[index])) |channel| return channel;
+        if (index == 0) break;
+        index -= 1;
+    }
+    return null;
+}
+
+/// RFC 2812 `366 <me> <channel> :End of /NAMES list`.
+fn endOfNamesChannel(msg: *const irc_message.Message) ?[]const u8 {
+    if (msg.param_count >= 2) {
+        if (channelToken(msg.params[1])) |channel| return channel;
+    }
+    if (msg.param_count >= 1) return channelToken(msg.params[0]);
+    return null;
+}
+
+fn channelToken(token: []const u8) ?[]const u8 {
+    var value = token;
+    if (value.len >= 2 and
+        (value[0] == '=' or value[0] == '*' or value[0] == '@') and
+        isChannelPrefix(value[1]))
+        value = value[1..];
+    return if (value.len > 0 and isChannelPrefix(value[0])) value else null;
+}
+
+fn isChannelPrefix(ch: u8) bool {
+    return ch == '#' or ch == '&' or ch == '+' or ch == '!';
 }
 
 fn isNickStatus(ch: u8) bool {
@@ -1065,6 +1136,66 @@ test "live roster follows NAMES membership speech and current avatars" {
     try std.testing.expect(try transcript.observeIrc(&join, "#room", "Me"));
     try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alicia").?].departed);
     try std.testing.expectEqual(@as(usize, 2), transcript.activeMemberCount());
+
+    var kick = irc_message.parse(":op!u@h KICK #room Alicia :out");
+    try std.testing.expect(try transcript.observeIrc(&kick, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alicia").?].departed);
+    try std.testing.expectEqual(@as(usize, 1), transcript.activeMemberCount());
+}
+
+test "NAMES 366 retires members missing from the snapshot" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+
+    try transcript.setSelf("Me");
+    var first = irc_message.parse(":server 353 Me = #room :@Me +Alice Bob");
+    try std.testing.expect(try transcript.observeIrc(&first, "#room", "Me"));
+    var end_first = irc_message.parse(":server 366 Me #room :End of /NAMES list");
+    try std.testing.expect(!try transcript.observeIrc(&end_first, "#room", "Me"));
+    try std.testing.expectEqual(@as(usize, 3), transcript.activeMemberCount());
+
+    var reconnect = irc_message.parse(":server 353 Me = #room :@Me +Alice");
+    try std.testing.expect(try transcript.observeIrc(&reconnect, "#room", "Me"));
+    var end_reconnect = irc_message.parse(":server 366 Me #room :End of /NAMES list");
+    try std.testing.expect(try transcript.observeIrc(&end_reconnect, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Bob").?].departed);
+    try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alice").?].departed);
+    try std.testing.expectEqual(@as(usize, 2), transcript.activeMemberCount());
+}
+
+test "353 does not clear away and accepts compact channel tokens" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+
+    try transcript.setSelf("Me");
+    try std.testing.expect(try transcript.consumeAwayControl("Alice", "\x01AWAY coffee\x01"));
+    var compact = irc_message.parse(":server 353 Me =#room :@Me +Alice");
+    try std.testing.expect(try transcript.observeIrc(&compact, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alice").?].away);
+
+    var three_param = irc_message.parse(":server 353 Me #room :@Me +Alice Carol");
+    try std.testing.expect(try transcript.observeIrc(&three_param, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alice").?].away);
+    try std.testing.expect(transcript.findRosterIndex("Carol") != null);
+}
+
+test "nick collision merge keeps an active member present" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+
+    try transcript.setSelf("Me");
+    var names = irc_message.parse(":server 353 Me = #room :Me Old Alice");
+    try std.testing.expect(try transcript.observeIrc(&names, "#room", "Me"));
+    var part = irc_message.parse(":Old!u@h PART #room");
+    try std.testing.expect(try transcript.observeIrc(&part, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Old").?].departed);
+    var rename = irc_message.parse(":Old!u@h NICK :Alice");
+    try std.testing.expect(try transcript.observeIrc(&rename, "#room", "Me"));
+    try std.testing.expect(transcript.findRosterIndex("Old") == null);
+    try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alice").?].departed);
 }
 
 test "page break insertion and selected line removal preserve ownership and tallies" {
@@ -1204,6 +1335,13 @@ test "source action preparation prefixes the speaker for comic and CTCP forms" {
     try transcript.addWireMessage("Cro", "waves", false, "#G000E000M5");
     try std.testing.expectEqualStrings("Cro waves", transcript.lines.items[2].text);
     try std.testing.expectEqual(original_page.bm_action, transcript.lines.items[2].modes);
+
+    try transcript.addWireMessage("Dan", "psst", true, "#G000E000M5");
+    try std.testing.expectEqualStrings("Dan psst", transcript.lines.items[3].text);
+    try std.testing.expectEqual(
+        original_page.bm_action | original_page.bm_whisper,
+        transcript.lines.items[3].modes,
+    );
 }
 
 test "source SOUND control becomes an action box with sender and filename" {

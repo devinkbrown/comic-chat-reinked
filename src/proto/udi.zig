@@ -218,7 +218,9 @@ pub const Message = struct {
     modes: u16,
 };
 
-fn privateModes(modes: u16) u16 {
+/// `ProcessSay` forces whisper balloon semantics on a private message
+/// regardless of the decoded serial mode (`M1`/`M5`).
+pub fn privateModes(modes: u16) u16 {
     return (modes & ~(bm_say | bm_think)) | bm_whisper;
 }
 
@@ -345,6 +347,8 @@ test "serial modes map with source SM2BM default and BM2SM precedence" {
     try std.testing.expectEqual(SerialMode.whisper, balloonToSerial(bm_whisper | bm_think));
     try std.testing.expectEqual(SerialMode.think, balloonToSerial(bm_think));
     try std.testing.expectEqual(SerialMode.say, balloonToSerial(0));
+    try std.testing.expectEqual(@as(u16, bm_whisper), privateModes(bm_say));
+    try std.testing.expectEqual(@as(u16, bm_action | bm_whisper), privateModes(bm_action));
 }
 
 test "strict parser rejects malformed and overlong annotations" {

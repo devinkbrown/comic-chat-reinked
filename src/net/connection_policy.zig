@@ -317,6 +317,7 @@ pub fn happyEyeballsPlan(
 
 pub const RestoreTarget = struct {
     channel: []u8,
+    key: ?[]u8 = null,
     after: ?[]u8 = null,
 };
 
@@ -332,6 +333,7 @@ pub const Restoration = struct {
     pub fn deinit(self: *Restoration) void {
         for (self.targets.items) |target| {
             self.gpa.free(target.channel);
+            if (target.key) |value| self.gpa.free(value);
             if (target.after) |value| self.gpa.free(value);
         }
         self.targets.deinit(self.gpa);
@@ -339,7 +341,14 @@ pub const Restoration = struct {
     }
 
     pub fn remember(self: *Restoration, channel: []const u8, last_timestamp_or_msgid: ?[]const u8) !void {
+        return self.rememberJoin(channel, "", last_timestamp_or_msgid);
+    }
+
+    /// Record an idempotent JOIN target. `key` is the optional channel
+    /// password (`JOIN <room> <password>`), never a PRIVMSG payload.
+    pub fn rememberJoin(self: *Restoration, channel: []const u8, key: []const u8, last_timestamp_or_msgid: ?[]const u8) !void {
         if (!validRestoreAtom(channel, false)) return error.InvalidRestoreTarget;
+        if (key.len != 0 and !validRestoreAtom(key, true)) return error.InvalidRestoreTarget;
         if (last_timestamp_or_msgid) |reference| {
             if (!validRestoreAtom(reference, true) or
                 (!std.mem.startsWith(u8, reference, "timestamp=") and !std.mem.startsWith(u8, reference, "msgid=")))
@@ -350,14 +359,32 @@ pub const Restoration = struct {
             const replacement = if (last_timestamp_or_msgid) |value| try self.gpa.dupe(u8, value) else null;
             if (target.after) |old| self.gpa.free(old);
             target.after = replacement;
+            if (key.len != 0) {
+                const owned_key = try self.gpa.dupe(u8, key);
+                if (target.key) |old| self.gpa.free(old);
+                target.key = owned_key;
+            }
             return;
         }
         if (self.targets.items.len >= max_targets) return error.RestoreBackpressure;
         const owned_channel = try self.gpa.dupe(u8, channel);
         errdefer self.gpa.free(owned_channel);
+        const owned_key = if (key.len != 0) try self.gpa.dupe(u8, key) else null;
+        errdefer if (owned_key) |value| self.gpa.free(value);
         const owned_after = if (last_timestamp_or_msgid) |value| try self.gpa.dupe(u8, value) else null;
         errdefer if (owned_after) |value| self.gpa.free(value);
-        try self.targets.append(self.gpa, .{ .channel = owned_channel, .after = owned_after });
+        try self.targets.append(self.gpa, .{ .channel = owned_channel, .key = owned_key, .after = owned_after });
+    }
+
+    pub fn forget(self: *Restoration, channel: []const u8) void {
+        for (self.targets.items, 0..) |target, index| {
+            if (!std.ascii.eqlIgnoreCase(target.channel, channel)) continue;
+            const removed = self.targets.orderedRemove(index);
+            self.gpa.free(removed.channel);
+            if (removed.key) |value| self.gpa.free(value);
+            if (removed.after) |value| self.gpa.free(value);
+            return;
+        }
     }
 
     /// Idempotent restoration only: JOIN, explicit NAMES, then bounded history
@@ -367,7 +394,12 @@ pub const Restoration = struct {
         for (self.targets.items) |target| {
             var join = message.Message{ .command = "JOIN" };
             join.params[0] = target.channel;
-            join.param_count = 1;
+            if (target.key) |key| {
+                join.params[1] = key;
+                join.param_count = 2;
+            } else {
+                join.param_count = 1;
+            }
             try message.write(out, gpa, join);
             var names = message.Message{ .command = "NAMES" };
             names.params[0] = target.channel;
@@ -533,13 +565,20 @@ test "reconnect jitter, happy eyeballs, restore, and proxy codecs" {
     var restore = Restoration.init(gpa);
     defer restore.deinit();
     try restore.remember("#comic", "timestamp=2026-07-16T00:00:00.000Z");
+    try restore.rememberJoin("#locked", "swordfish", null);
     try std.testing.expectError(error.InvalidRestoreTarget, restore.remember("#comic\r\nOPER root", null));
+    try std.testing.expectError(error.InvalidRestoreTarget, restore.rememberJoin("#locked", "bad\r\nOPER", null));
     try std.testing.expectError(error.InvalidHistoryReference, restore.remember("#comic", "timestamp=x\r\nPRIVMSG #c pwn"));
     var commands: std.ArrayList(u8) = .empty;
     defer commands.deinit(gpa);
     try restore.appendCommands(&commands, gpa, 100);
     try std.testing.expect(std.mem.indexOf(u8, commands.items, "PRIVMSG") == null);
     try std.testing.expect(std.mem.indexOf(u8, commands.items, "CHATHISTORY AFTER") != null);
+    try std.testing.expect(std.mem.indexOf(u8, commands.items, "JOIN #locked swordfish") != null);
+    restore.forget("#locked");
+    commands.clearRetainingCapacity();
+    try restore.appendCommands(&commands, gpa, 100);
+    try std.testing.expect(std.mem.indexOf(u8, commands.items, "JOIN #locked") == null);
 
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(gpa);

@@ -185,8 +185,11 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, msg.command, "903")) {
             if (self.selected == .scram_sha_256 and !self.server_signature_verified) {
+                // A success numeric without a verified server-final is a
+                // hard auth failure. Return `.failed` so registration can
+                // still emit CAP END instead of stalling in waiting_sasl.
                 self.finish(.failed);
-                return error.ServerSignatureMismatch;
+                return .failed;
             }
             self.finish(.complete);
             return .succeeded;
@@ -892,6 +895,27 @@ test "SCRAM rejects a non-extending nonce and aborts a bad server signature" {
     );
     try std.testing.expectEqualStrings("AUTHENTICATE *\r\n", out.items);
     try std.testing.expectEqual(Phase.awaiting_abort, session.phase);
+}
+
+test "unsigned SCRAM 903 is a terminal failure, not a success" {
+    const gpa = std.testing.allocator;
+    var authzid: [0]u8 = .{};
+    var authcid = [_]u8{'u'};
+    var password = [_]u8{'p'};
+    var credentials = Credentials{
+        .authorization_identity = &authzid,
+        .authentication_identity = &authcid,
+        .password = &password,
+    };
+    var session = Session.init(gpa, &credentials, .{});
+    defer session.deinit();
+    session.selected = .scram_sha_256;
+    session.phase = .awaiting_result;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try std.testing.expectEqual(Event.failed, try session.handle(&out, message.parse(":irc 903 user :success")));
+    try std.testing.expectEqual(Phase.failed, session.phase);
+    try std.testing.expect(credentials.zeroized);
 }
 
 test "SCRAM server-final error is acknowledged so the failure numeric can drive retry" {

@@ -33,7 +33,18 @@ pub fn parseCredential(msg: message.Message) ?Credential {
     const kind = parseKind(msg.param(1) orelse return null) orelse return null;
     const token = msg.param(2) orelse return null;
     if (!validCredential(token)) return null;
-    return .{ .kind = kind, .token = token };
+    var expires_at: ?u64 = null;
+    var index: usize = 3;
+    while (index < msg.param_count) : (index += 1) {
+        const field = msg.params[index];
+        const eq = std.mem.indexOfScalar(u8, field, '=') orelse return null;
+        if (eq == 0 or eq + 1 == field.len) return null;
+        if (std.ascii.eqlIgnoreCase(field[0..eq], "expires")) {
+            if (expires_at != null or field.len - eq - 1 > 16) return null;
+            expires_at = std.fmt.parseInt(u64, field[eq + 1 ..], 10) catch return null;
+        }
+    }
+    return .{ .kind = kind, .token = token, .expires_at = expires_at };
 }
 
 fn parseBody(raw: []const u8) ?Credential {
@@ -201,6 +212,10 @@ test "session credentials parse current notices and reject injection" {
     try std.testing.expectEqual(@as(?u64, 1800000000), mesh.expires_at);
     try std.testing.expect(parseCredential(message.parse(":srv NOTICE alex :SESSION TOKEN bad extra")) == null);
     try std.testing.expect(parseCredential(message.parse(":mallory!u@host NOTICE alex :SESSION TOKEN stolen")) == null);
+    const note = parseCredential(message.parse(":server.example NOTE SESSION MTOKEN meshcred expires=1800000000")).?;
+    try std.testing.expectEqual(Kind.mesh, note.kind);
+    try std.testing.expectEqualStrings("meshcred", note.token);
+    try std.testing.expectEqual(@as(?u64, 1800000000), note.expires_at);
 }
 
 test "session store prefers live mesh token and falls back to local" {

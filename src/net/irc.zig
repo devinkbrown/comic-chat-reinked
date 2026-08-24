@@ -101,9 +101,23 @@ pub fn writeUser(
 }
 
 pub fn writeJoin(out: *std.ArrayList(u8), gpa: std.mem.Allocator, channel: []const u8) !void {
+    return writeJoinWithKey(out, gpa, channel, "");
+}
+
+pub fn writeJoinWithKey(
+    out: *std.ArrayList(u8),
+    gpa: std.mem.Allocator,
+    channel: []const u8,
+    key: []const u8,
+) !void {
     var m = Message{ .command = "JOIN" };
     m.params[0] = channel;
-    m.param_count = 1;
+    if (key.len == 0) {
+        m.param_count = 1;
+    } else {
+        m.params[1] = key;
+        m.param_count = 2;
+    }
     try message.write(out, gpa, m);
 }
 
@@ -368,9 +382,10 @@ test "command builders emit individual CRLF-terminated commands" {
     defer out.deinit(gpa);
     try writeNick(&out, gpa, "anna");
     try writeJoin(&out, gpa, "#comics");
+    try writeJoinWithKey(&out, gpa, "#locked", "swordfish");
     try writePong(&out, gpa, "tok123");
     try std.testing.expectEqualStrings(
-        "NICK anna\r\n" ++ "JOIN #comics\r\n" ++ "PONG tok123\r\n",
+        "NICK anna\r\n" ++ "JOIN #comics\r\n" ++ "JOIN #locked swordfish\r\n" ++ "PONG tok123\r\n",
         out.items,
     );
 }

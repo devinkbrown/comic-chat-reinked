@@ -207,7 +207,14 @@ pub const State = struct {
         } else if (std.ascii.eqlIgnoreCase(msg.command, "SETNAME")) {
             try self.setIdentityField(source_nick, .realname, msg.param(0));
         } else if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
-            if (msg.param(0)) |new_nick| try self.renameIdentity(source_nick, new_nick);
+            if (msg.param(0)) |new_nick| {
+                try self.renameIdentity(source_nick, new_nick);
+                if (source_nick.len != 0 and std.ascii.eqlIgnoreCase(source_nick, self.self_nick)) {
+                    const owned = try self.gpa.dupe(u8, new_nick);
+                    self.gpa.free(self.self_nick);
+                    self.self_nick = owned;
+                }
+            }
         } else if (std.ascii.eqlIgnoreCase(msg.command, "JOIN") and msg.param_count >= 3) {
             const account = msg.param(1).?;
             try self.setIdentityField(source_nick, .account, if (std.mem.eql(u8, account, "*")) null else account);
@@ -820,6 +827,12 @@ test "echo dedupe, redaction tombstones, and labels are bounded owned state" {
     try state.recordEcho("#c", "hello");
     try std.testing.expect(try state.observe(&message.parse(":me!u@h PRIVMSG #c hello")));
     try std.testing.expect(!try state.observe(&message.parse(":me!u@h PRIVMSG #c hello")));
+
+    _ = try state.observe(&message.parse(":me!u@h NICK :renamed"));
+    try std.testing.expectEqualStrings("renamed", state.self_nick);
+    try state.recordEcho("#c", "after-nick");
+    try std.testing.expect(try state.observe(&message.parse(":renamed!u@h PRIVMSG #c after-nick")));
+    try std.testing.expect(!try state.observe(&message.parse(":renamed!u@h PRIVMSG #c after-nick")));
 
     _ = try state.observe(&message.parse(":op!u@h REDACT #c deadbeef :spam"));
     try std.testing.expect(try state.observe(&message.parse("@msgid=deadbeef :n!u@h PRIVMSG #c hidden")));

@@ -12,12 +12,24 @@ pub const Room = struct {
     editor: input.Editor,
     joined: bool = false,
     unread: u32 = 0,
+    /// Optional channel key for reconnect (`JOIN <room> <password>`).
+    join_key: ?[]u8 = null,
 
     fn deinit(self: *Room, gpa: std.mem.Allocator) void {
         self.transcript.deinit();
         self.editor.deinit();
         gpa.free(self.name);
+        if (self.join_key) |key| gpa.free(key);
         self.* = undefined;
+    }
+
+    pub fn setJoinKey(self: *Room, gpa: std.mem.Allocator, key: []const u8) !void {
+        if (self.join_key) |old| {
+            gpa.free(old);
+            self.join_key = null;
+        }
+        if (key.len == 0) return;
+        self.join_key = try gpa.dupe(u8, key);
     }
 };
 
@@ -134,6 +146,16 @@ test "workspace owns, activates, counts, and removes multiple rooms" {
     try std.testing.expectEqual(@as(u32, 0), workspace.rooms.items[onyx].unread);
     try std.testing.expect(workspace.remove(root));
     try std.testing.expectEqualStrings("#onyx", workspace.activeRoom().?.name);
+}
+
+test "workspace retains a room join key for reconnect" {
+    var workspace = try Workspace.init(std.testing.allocator, "alex");
+    defer workspace.deinit();
+    const index = try workspace.ensure("#locked");
+    try workspace.rooms.items[index].setJoinKey(workspace.gpa, "swordfish");
+    try std.testing.expectEqualStrings("swordfish", workspace.rooms.items[index].join_key.?);
+    try workspace.rooms.items[index].setJoinKey(workspace.gpa, "");
+    try std.testing.expect(workspace.rooms.items[index].join_key == null);
 }
 
 test "workspace uses RFC 1459 channel casemapping" {

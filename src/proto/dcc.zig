@@ -146,6 +146,19 @@ pub fn encodeSendOffer(gpa: std.mem.Allocator, offer: SendOffer) ![]u8 {
     return try out.toOwnedSlice(gpa);
 }
 
+/// Case-insensitive CTCP `DCC SEND` recognition. The consent path must use
+/// this instead of a literal `startsWith("\x01DCC SEND ")` so mixed-case
+/// offers still reach the approval dialog.
+pub fn looksLikeSendOffer(text: []const u8) bool {
+    if (text.len < 5 or !std.ascii.eqlIgnoreCase(text[0..4], "\x01DCC") or text[4] != ' ')
+        return false;
+    var rest = text[5..];
+    if (rest.len > 0 and rest[rest.len - 1] == 0x01)
+        rest = rest[0 .. rest.len - 1];
+    const send_tok = nextToken(rest) orelse return false;
+    return std.ascii.eqlIgnoreCase(send_tok.token, "SEND");
+}
+
 /// `ircsock.cpp:1718-1725` (the `\x01DCC ` marker) plus `ChatReceiveFile`
 /// (filesend.cpp:346-380). `text` is the full raw message, e.g. as it
 /// arrives in a PRIVMSG body. On success, `result.filename` is
@@ -156,7 +169,7 @@ pub fn encodeSendOffer(gpa: std.mem.Allocator, offer: SendOffer) ![]u8 {
 /// malformed numeric field here is rejected rather than truncated -
 /// stricter than the source, but only on already-malformed input.
 pub fn parseSendOffer(gpa: std.mem.Allocator, text: []const u8) !?SendOffer {
-    if (text.len < 5 or !std.ascii.eqlIgnoreCase(text[0..4], "\x01DCC") or text[4] != ' ')
+    if (!looksLikeSendOffer(text))
         return null;
     var rest = text[5..];
     if (rest.len > 0 and rest[rest.len - 1] == 0x01)
@@ -392,6 +405,12 @@ test "parseSendOffer accepts an omitted size field and rejects non-offers" {
     try std.testing.expect(try parseSendOffer(gpa, "ordinary message") == null);
     try std.testing.expect(try parseSendOffer(gpa, "\x01DCC CHAT chat 16777343 9000\x01") == null);
     try std.testing.expect(try parseSendOffer(gpa, "\x01ACTION waves\x01") == null);
+
+    try std.testing.expect(looksLikeSendOffer("\x01dcc send anna.avb 16777343 9000\x01"));
+    const mixed = (try parseSendOffer(gpa, "\x01dcc send anna.avb 16777343 9000\x01")).?;
+    defer gpa.free(mixed.filename);
+    try std.testing.expectEqualStrings("anna.avb", mixed.filename);
+    try std.testing.expect(!looksLikeSendOffer("\x01dcc chat chat 16777343 9000\x01"));
 }
 
 test "sendFile and receiveFile round-trip real bytes over a loopback TCP connection" {
