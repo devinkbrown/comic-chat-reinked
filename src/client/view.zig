@@ -2138,7 +2138,7 @@ fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, activ
     ui.drawTabStrip(c, rect);
     const status_w: i32 = 108;
     ui.drawStatusTab(c, rect, status_selected, status_hovered);
-    ui.drawStatusTabContent(c, rect);
+    ui.drawStatusTabContent(c, rect, status_selected);
     const viewport = tabViewport(layout, comic_mode);
     const first_x = rect.x + status_w + 6;
     const tab_w: i32 = 164;

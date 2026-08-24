@@ -23,11 +23,14 @@ visual contract.
   intensity puck, and a right-click Freeze/Character/Neutral menu.
 - Mood expressions use a newly drawn, high-contrast face set with consistent
   geometry rather than the original tiny pixel marks.
-- The conversation well is a printed 1:1 comic page: newsprint matte, an ink
-  frame, and source-faithful strip pixels inside. Chrome never redraws balloons
-  or figures. An empty conversation still routes through `strip.render` and
-  only overlays a caption. At minimum window sizes the caption collapses to a
-  compact instruction instead of overflowing the available buffer.
+- The conversation well is a printed 1:1 comic page: newsprint matte, a double
+  ink frame with vermillion corner ticks, and source-faithful strip pixels
+  inside. Chrome never redraws balloons or figures. An empty conversation still
+  routes through `strip.render` and only overlays a caption balloon. At minimum
+  window sizes the caption collapses to a compact instruction instead of
+  overflowing the available buffer.
+- Shell chrome is an ink masthead, paper tool rack, playbill inspector headers,
+  and a caption-box composer. Dialogs use the same masthead as the application.
 - Comic pages default to four panels across. The room strip exposes an
   accessible minus/plus stepper for live one-to-six-column density changes;
   rendered pages remain top-aligned as conversation history grows. Desktop
@@ -118,8 +121,8 @@ and disabled behavior. New screens should compose the existing primitives:
   `DialogLayout`
 - `drawTextSelection`, `drawTextCaret`, `drawTextOverflowMark`, and
   `drawBrowseButton` for editable field adornments
-- `drawBrandMark`, `drawPageWell`, `drawMemberRailSurface`, `drawStatusIdentity`, and
-  `drawPreviewChoiceCard` for shell identity, the printed page well, and compact client surfaces
+- `drawBrandMark`, `drawPageWell`, `drawInkChip`, `drawMemberRailSurface`, `drawStatusIdentity`, and
+  `drawPreviewChoiceCard` for shell identity, the printed page well, playbill chips, and compact client surfaces
 - `drawAppBrand`, `drawPaneCountHeader`, and `drawDismissHint` for stable
   shell identity, inspector headers, and temporary-popover keyboard guidance
 - `drawSegmentedChoice` for direct gallery-family selection without a long
