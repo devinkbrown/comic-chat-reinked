@@ -50,9 +50,9 @@ Onyx TLS IRC server, without redesigning desktop UI.
 
 - [x] Real correctness/reliability bugs in owned backend surfaces are fixed, not merely documented
 - [x] Focused tests pin each closed gap
-- [ ] `zig build test` passes
-- [ ] `zig build` linux/amd64 still builds
-- [ ] `git diff --check` clean
+- [x] `zig build test` passes
+- [x] `zig build` linux/amd64 still builds
+- [x] `git diff --check` clean
 - [ ] PR lists what was fixed and honest leftovers
 - [x] No desktop UI redesign
 

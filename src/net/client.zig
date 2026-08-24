@@ -2082,6 +2082,7 @@ test "reply reaction and typing commands are bounded tagged client messages" {
     _ = try client.registration.?.cap.handle(&client.out, message.parse(":irc CAP * ACK :batch draft/account-registration labeled-response message-tags draft/chathistory draft/search draft/message-editing draft/message-redaction draft/read-marker draft/metadata-2 onyx/topics draft/channel-context"));
     client.out.clearRetainingCapacity();
     defer {
+        if (client.restoration) |*restoration| restoration.deinit();
         client.registration.?.deinit();
         client.features.?.deinit();
         client.aggregator.deinit();
@@ -2219,6 +2220,7 @@ test "Onyx narrow tag capabilities and no-implicit-names alias work without mess
     _ = try client.registration.?.cap.handle(&client.out, message.parse(":irc CAP * ACK :draft/reply draft/react draft/typing draft/no-implicit-names onyx/topics draft/channel-context"));
     client.out.clearRetainingCapacity();
     defer {
+        if (client.restoration) |*restoration| restoration.deinit();
         client.registration.?.deinit();
         client.aggregator.deinit();
         client.tx.deinit();
@@ -2266,6 +2268,7 @@ test "channel context requires both its semantic and generic relay capabilities"
     _ = try client.registration.?.cap.handle(&client.out, message.parse(":irc CAP * ACK :message-tags"));
     client.out.clearRetainingCapacity();
     defer {
+        if (client.restoration) |*restoration| restoration.deinit();
         client.registration.?.deinit();
         client.aggregator.deinit();
         client.tx.deinit();
