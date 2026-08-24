@@ -877,7 +877,7 @@ fn renderTitlePanel(gpa: std.mem.Allocator, lines: []const Line, options: Render
         const star = plan.stars[star_index];
         drawTitleLabel(&canvas, star.label);
         if (avatarByName(people.items[star.participant_index].avatar)) |avatar| {
-            var icon = try bgb.decodeIcon(gpa, avatar);
+            var icon = try figure.titleStarIcon(gpa, avatar);
             defer icon.deinit(gpa);
             original_raster.blitImage(
                 &canvas,

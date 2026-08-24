@@ -96,7 +96,7 @@ pub const Error = bgb.Error || error{
     MissingImage,
 };
 
-pub const RasterOp = enum { merge_paint, src_and };
+pub const RasterOp = enum { merge_paint, merge_paint_sticker, src_and };
 
 /// Cross-platform equivalent of the source's `StretchDIBits` calls.  Sampling
 /// uses an area filter, preserving the coverage/color averaging expected from
@@ -124,6 +124,12 @@ pub fn stretchRop(canvas: *Canvas, source: Image, destination: Rect, flipped: bo
             canvas.px[index] = (old & 0xff000000) | switch (op) {
                 .src_and => (old & sampled) & 0x00ffffff,
                 .merge_paint => (old | ~sampled) & 0x00ffffff,
+                .merge_paint_sticker => blk: {
+                    const rgb = sampled & 0x00ffffff;
+                    const ink = (sampled >> 24) != 0 and rgb != 0x00ffffff;
+                    const sticker: u32 = if (ink) 0x00000000 else 0x00ffffff;
+                    break :blk (old | ~sticker) & 0x00ffffff;
+                },
             };
         }
     }
@@ -231,9 +237,7 @@ pub fn drawSingle(canvas: *Canvas, pose: PoseLayers, options: Options) Error!Geo
         .w = full_w,
         .h = full_h,
     };
-    if (options.draw_aura) {
-        if (pose.aura) |layer| try stretchRop(canvas, layer, full, options.flipped, .merge_paint);
-    }
+    try paintAura(canvas, pose, full, options.flipped, options.draw_aura);
     try stretchRop(canvas, pose.drawing, full, options.flipped, .src_and);
     return .{ .full = full, .head = null, .torso = full };
 }
@@ -286,9 +290,7 @@ pub fn drawSingleLogical(canvas: *Canvas, pose: PoseLayers, options: LogicalOpti
 
     const logical = try singleLogicalGeometry(pose.drawing, options);
     const device = try mapLogicalGeometry(logical, options.transform);
-    if (options.draw_aura) {
-        if (pose.aura) |layer| try stretchRop(canvas, layer, device.full, options.flipped, .merge_paint);
-    }
+    try paintAura(canvas, pose, device.full, options.flipped, options.draw_aura);
     try stretchRop(canvas, pose.drawing, device.full, options.flipped, .src_and);
     return .{ .logical = logical, .device = device };
 }
@@ -760,6 +762,32 @@ fn loadPose(
     return result;
 }
 
+fn drawingHasChromaticInk(image: Image) bool {
+    for (image.pixels) |pixel| {
+        if (pixel >> 24 == 0) continue;
+        const rgb = pixel & 0x00ffffff;
+        if (rgb == 0 or rgb == 0x00ffffff) continue;
+        const red: u8 = @truncate(pixel >> 16);
+        const green: u8 = @truncate(pixel >> 8);
+        const blue: u8 = @truncate(pixel);
+        if (red != green or green != blue) return true;
+    }
+    return false;
+}
+
+/// `CBodySingle::DrawBody` MERGEPAINTs an aura before SRCAND (`bodycam.cpp:602-609`).
+/// Color/HD packages have no authored aura; synthesize the 1-bit white sticker
+/// from chromatic ink so SRCAND does not AND those colors into the backdrop.
+fn paintAura(canvas: *Canvas, pose: PoseLayers, destination: Rect, flipped: bool, draw_aura: bool) Error!void {
+    if (!draw_aura) return;
+    if (pose.aura) |layer| {
+        try stretchRop(canvas, layer, destination, flipped, .merge_paint);
+        return;
+    }
+    if (!drawingHasChromaticInk(pose.drawing)) return;
+    try stretchRop(canvas, pose.drawing, destination, flipped, .merge_paint_sticker);
+}
+
 fn decodePlan(gpa: std.mem.Allocator, data: []const u8, plan: avb.PoseImagePlan) !Image {
     return switch (plan.component) {
         .whole => bgb.decodeImageRef(gpa, data, plan.image),
@@ -908,6 +936,36 @@ test "aura MERGEPAINT makes the source white sticker" {
     canvas.clear(0xff2468ac);
     _ = try drawSingle(&canvas, pose, .{ .client = .{ .x = 0, .y = 0, .w = 1, .h = 1 } });
     try std.testing.expectEqual(@as(u32, 0xffffffff), canvas.px[0]);
+}
+
+test "color DIB MERGEPAINT sticker keeps chromatic ink off a colored dest" {
+    const gpa = std.testing.allocator;
+    var red = [_]u32{0xffff0000};
+    const pose = PoseLayers{ .drawing = .{ .width = 1, .height = 1, .pixels = &red } };
+    var canvas = try Canvas.init(gpa, 1, 1);
+    defer canvas.deinit(gpa);
+    canvas.clear(0xff00ff00);
+    _ = try drawSingle(&canvas, pose, .{ .client = .{ .x = 0, .y = 0, .w = 1, .h = 1 } });
+    // Without the synthesized sticker, SRCAND is red & green = black.
+    try std.testing.expectEqual(@as(u32, 0xffff0000), canvas.px[0]);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var panel = try Canvas.init(gpa, 80, 120);
+    defer panel.deinit(gpa);
+    panel.clear(0xff00aa33);
+    _ = try drawForText(gpa, &panel, color, "", .{ .client = .{ .x = 0, .y = 0, .w = 80, .h = 120 } });
+    var colorful: usize = 0;
+    var and_black: usize = 0;
+    for (panel.px) |pixel| {
+        const rgb = pixel & 0x00ffffff;
+        if (rgb == 0) and_black += 1;
+        const red_ch: u8 = @truncate(pixel >> 16);
+        const green_ch: u8 = @truncate(pixel >> 8);
+        const blue_ch: u8 = @truncate(pixel);
+        if (red_ch != green_ch or green_ch != blue_ch) colorful += 1;
+    }
+    try std.testing.expect(colorful > 100);
+    try std.testing.expect(and_black < colorful);
 }
 
 test "negative StretchDIBits width is reproduced by horizontal flip" {

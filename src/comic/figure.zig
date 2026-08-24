@@ -445,8 +445,7 @@ pub fn keySrcAndMatte(image: Image) void {
 /// (`avatar.h:251`) — the authored `AK_ICON` mugshot — for roster and title
 /// stars. Generated HD packages smash the whole simple-avatar body into 64×64
 /// without preserving aspect; those fail `GetIconPose` and fall back to the
-/// `CBodySingle::GetDimInfo` head band (`ydim/2`). Color packages store a
-/// real portrait icon and keep it.
+/// silhouette mugshot. Authored simple icons keep other sizes.
 pub fn chromePortrait(gpa: std.mem.Allocator, avb_data: []const u8) !Image {
     const asset = try avb_asset.parse(avb_data);
     var icon = try bgb.decodeIcon(gpa, avb_data);
@@ -471,6 +470,33 @@ pub fn chromePortrait(gpa: std.mem.Allocator, avb_data: []const u8) !Image {
     const trimmed = trimTransparent(gpa, icon) catch return icon;
     icon.deinit(gpa);
     return trimmed;
+}
+
+/// Title-panel starring icon. `CBodyUnary` draws `m_icon` (`panel.cpp:1437`)
+/// through `CBodySingle::DrawBody`. Generated Color/HD packages store a
+/// smashed or pancake 64×64 `AK_ICON` on a much larger pose card; those
+/// stars reuse the chrome silhouette mugshot. Authored icons — including
+/// 64×64 simple-avatar mugshots whose pose stays near the icon — stay the
+/// decoded `AK_ICON` so legacy title goldens do not move.
+pub fn titleStarIcon(gpa: std.mem.Allocator, avb_data: []const u8) !Image {
+    var icon = try bgb.decodeIcon(gpa, avb_data);
+    const asset = try avb_asset.parse(avb_data);
+    if (asset.kind != .simple_avatar or icon.width != 64 or icon.height != 64)
+        return icon;
+
+    var pose = try assemble(gpa, avb_data, 0, 0);
+    defer pose.deinit(gpa);
+    if (!generatedCardIcon(icon, pose)) return icon;
+
+    icon.deinit(gpa);
+    return chromePortrait(gpa, avb_data);
+}
+
+/// Generated Color/HD cards are 240×280-class. Authored simple poses stay
+/// near their 64×64 `AK_ICON`, so `GetIconPose` remains a usable mugshot.
+fn generatedCardIcon(icon: Image, body: Image) bool {
+    if (icon.width != 64 or icon.height != 64) return false;
+    return body.width > icon.width * 2 or body.height > icon.height * 2;
 }
 
 /// Body-camera figure. `CBodyCam::DrawBody(..., FALSE)` (`bodycam.cpp:499`):
@@ -736,6 +762,47 @@ test "chrome portraits crop simple-avatar heads and key the SRCAND paper matte" 
     try std.testing.expect(mugshot.width > 0 and mugshot.height > 0);
     try std.testing.expect(mugshot.width <= icon.width);
     try std.testing.expect(mugshot.height <= icon.height);
+}
+
+test "title stars keep authored icons and replace smashed generated HD" {
+    const gpa = std.testing.allocator;
+    const anna = @embedFile("../assets/testdata/anna.avb");
+    var authored = try bgb.decodeIcon(gpa, anna);
+    defer authored.deinit(gpa);
+    var star = try titleStarIcon(gpa, anna);
+    defer star.deinit(gpa);
+    try std.testing.expectEqual(authored.width, star.width);
+    try std.testing.expectEqual(authored.height, star.height);
+    try std.testing.expectEqualSlices(u32, authored.pixels, star.pixels);
+
+    const hd = @embedFile("../assets/generated/anna-reimagined-hd-v1.avb");
+    var smashed = try bgb.decodeIcon(gpa, hd);
+    defer smashed.deinit(gpa);
+    var hd_star = try titleStarIcon(gpa, hd);
+    defer hd_star.deinit(gpa);
+    var portrait = try chromePortrait(gpa, hd);
+    defer portrait.deinit(gpa);
+    try std.testing.expectEqual(portrait.width, hd_star.width);
+    try std.testing.expectEqual(portrait.height, hd_star.height);
+    try std.testing.expect(hd_star.width != smashed.width or hd_star.height != smashed.height);
+
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var jordan_icon = try bgb.decodeIcon(gpa, jordan);
+    defer jordan_icon.deinit(gpa);
+    var jordan_star = try titleStarIcon(gpa, jordan);
+    defer jordan_star.deinit(gpa);
+    try std.testing.expectEqual(jordan_icon.width, jordan_star.width);
+    try std.testing.expectEqual(jordan_icon.height, jordan_star.height);
+    try std.testing.expectEqualSlices(u32, jordan_icon.pixels, jordan_star.pixels);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var color_star = try titleStarIcon(gpa, color);
+    defer color_star.deinit(gpa);
+    var color_portrait = try chromePortrait(gpa, color);
+    defer color_portrait.deinit(gpa);
+    try std.testing.expectEqual(color_portrait.width, color_star.width);
+    try std.testing.expectEqual(color_portrait.height, color_star.height);
+    try std.testing.expect(color_star.height >= 80);
 }
 
 fn countOpaque(image: Image) usize {
