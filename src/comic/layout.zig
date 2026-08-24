@@ -1,8 +1,9 @@
-//! Deterministic comic panel auto-layout.
+//! Prototype heuristic panel layout. This is not the shipped Comic Chat path.
 //!
-//! This module only computes data: panel breaks, grid cells, pixel rectangles,
-//! speech-balloon rectangles, balloon tail anchors, and horizontal character
-//! placement. Rendering code can consume the returned geometry directly.
+//! All product strip and panel rendering must go through `original_layout.zig`
+//! via `strip.zig`. This module stays compiled only so its unit tests remain a
+//! fence against accidentally reintroducing a second layout algorithm. Do not
+//! call it from `view`, `strip`, or any `original_*` renderer.
 
 const std = @import("std");
 

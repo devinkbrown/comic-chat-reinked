@@ -117,6 +117,36 @@ pub const device_interstice: u32 = sourceRoundU32(
         @as(f64, @floatFromInt(original_layout.default_unit_width)),
 );
 
+/// Source rectangle inside a composed strip page. Desktop views width-fit this
+/// crop so a tall transcript shows the latest panels instead of shrinking the
+/// entire page.
+pub const PageCrop = struct {
+    x: u32 = 0,
+    y: u32 = 0,
+    w: u32,
+    h: u32,
+};
+
+/// Choose the latest panels that fill `dest_w`×`dest_h` after a width-fit
+/// scale. Short pages return the whole image; tall pages crop from the bottom.
+/// Callers must still pass the full transcript prefix into `renderWithOptions`
+/// so AddLine / hysteresis / the shared CRT stream stay source-faithful.
+pub fn latestPageCrop(page_w: u32, page_h: u32, dest_w: u32, dest_h: u32) PageCrop {
+    if (page_w == 0 or page_h == 0) return .{ .w = page_w, .h = page_h };
+    if (dest_w == 0 or dest_h == 0) return .{ .w = page_w, .h = @min(page_h, panel_height) };
+    const visible_h: u32 = @intCast(@min(
+        @as(u64, page_h),
+        @divTrunc(@as(u64, dest_h) * page_w, dest_w),
+    ));
+    const crop_h = @max(@as(u32, 1), visible_h);
+    return .{
+        .x = 0,
+        .y = page_h - crop_h,
+        .w = page_w,
+        .h = crop_h,
+    };
+}
+
 const panel_rect = original_balloon.Rect{
     .left = 0,
     .top = 0,
@@ -1516,4 +1546,16 @@ test "long title wraps and participant names use source single-line ellipsis" {
     });
     defer repeated.deinit(gpa);
     try std.testing.expectEqualSlices(u32, wrapped.pixels, repeated.pixels);
+}
+
+test "latest page crop keeps a short page and crops a tall page from the bottom" {
+    const short = latestPageCrop(650, 315, 400, 400);
+    try std.testing.expectEqual(@as(u32, 0), short.y);
+    try std.testing.expectEqual(@as(u32, 650), short.w);
+    try std.testing.expectEqual(@as(u32, 315), short.h);
+
+    const tall = latestPageCrop(650, 2000, 325, 315);
+    try std.testing.expectEqual(@as(u32, 650), tall.w);
+    try std.testing.expectEqual(@as(u32, 630), tall.h);
+    try std.testing.expectEqual(@as(u32, 1370), tall.y);
 }

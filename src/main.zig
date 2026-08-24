@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (argc >= 1 and std.mem.eql(u8, argv[0], "render-strip")) {
-        try runRenderStrip(gpa, init.io);
+        try runRenderStrip(gpa, init.io, if (argc >= 2) argv[1] else "source", if (argc >= 3) argv[2] else "ppm");
         return;
     }
 
@@ -4199,8 +4199,8 @@ test "IRCX DATA transport requires numeric 800 enabled state" {
     try std.testing.expect(!ircxNumericEnabled(&advertisement));
 }
 
-fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {
-    const lines = [_]cc.comic.strip.Line{
+fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io, variant: []const u8, format: []const u8) !void {
+    const source_lines = [_]cc.comic.strip.Line{
         .{ .speaker = "anna", .text = "The title panel starts every comic." },
         .{ .speaker = "kevin", .text = "Different speakers may share a panel." },
         .{ .speaker = "anna", .text = "A repeated speaker starts a fresh panel." },
@@ -4208,9 +4208,29 @@ fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {
         .{ .speaker = "rebecca", .text = "Masks and backdrops follow the old draw order." },
         .{ .speaker = "xeno", .text = "The source renderer returns one complete page." },
     };
-    var strip = try cc.comic.strip.render(gpa, &lines);
-    defer strip.deinit(gpa);
-    try emitPpm(gpa, io, strip.pixels, strip.width, strip.height);
+    const color_lines = [_]cc.comic.strip.Line{
+        .{ .speaker = "anna color", .text = "The title panel starts every comic." },
+        .{ .speaker = "kevin color", .text = "Different speakers may share a panel." },
+        .{ .speaker = "anna color", .text = "A repeated speaker starts a fresh panel." },
+        .{ .speaker = "mike color", .text = "Two columns and source-sized interstices." },
+        .{ .speaker = "rebecca color", .text = "Masks and backdrops follow the old draw order." },
+        .{ .speaker = "xeno color", .text = "The source renderer returns one complete page." },
+    };
+    const lines: []const cc.comic.strip.Line = if (std.mem.eql(u8, variant, "empty"))
+        &.{}
+    else if (std.mem.eql(u8, variant, "color"))
+        &color_lines
+    else
+        &source_lines;
+    var image = try cc.comic.strip.render(gpa, lines);
+    defer image.deinit(gpa);
+    if (std.mem.eql(u8, format, "png")) {
+        const png = try cc.render.png.encode(gpa, image.pixels, image.width, image.height);
+        defer gpa.free(png);
+        try writeStdout(io, png);
+        return;
+    }
+    try emitPpm(gpa, io, image.pixels, image.width, image.height);
 }
 
 fn runToPng(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {

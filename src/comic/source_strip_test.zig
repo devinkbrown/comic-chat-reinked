@@ -309,3 +309,67 @@ test "fixed source strip pixel fixture" {
     try std.testing.expectEqual(@as(u32, 650), image.height);
     try std.testing.expectEqual(@as(u64, 0xa5f59c9cf450aa75), hash);
 }
+
+test "generated color avatars use the source page planner and stay deterministic" {
+    const gpa = std.testing.allocator;
+    const lines = [_]strip.Line{
+        .{ .speaker = "anna color", .text = "Hello from the color cast." },
+        .{ .speaker = "kevin color", .text = "The planner is shared." },
+        .{ .speaker = "anna color", .text = "A repeated speaker still starts fresh." },
+    };
+    var first = try strip.render(gpa, &lines);
+    defer first.deinit(gpa);
+    var second = try strip.render(gpa, &lines);
+    defer second.deinit(gpa);
+
+    try std.testing.expectEqual(@as(u32, 650), first.width);
+    try std.testing.expectEqual(@as(u32, 650), first.height);
+    try std.testing.expectEqualSlices(u32, first.pixels, second.pixels);
+    try std.testing.expectEqual(pixelHash(first.pixels), pixelHash(second.pixels));
+}
+
+test "later color-avatar lines do not relayout the established first panel" {
+    const gpa = std.testing.allocator;
+    const first_only = [_]strip.Line{.{ .speaker = "anna color", .text = "One." }};
+    const repeated = [_]strip.Line{
+        .{ .speaker = "anna color", .text = "One." },
+        .{ .speaker = "anna color", .text = "Two." },
+    };
+    var first = try strip.render(gpa, &first_only);
+    defer first.deinit(gpa);
+    var page = try strip.render(gpa, &repeated);
+    defer page.deinit(gpa);
+
+    try std.testing.expectEqualSlices(u32, first.pixels, page.pixels[0..first.pixels.len]);
+    const first_panel_hash = regionHash(first, strip.panel_width + strip.device_interstice, 0, strip.panel_width, strip.panel_height);
+    const mature_panel_hash = regionHash(page, 0, strip.panel_height + strip.device_interstice, strip.panel_width, strip.panel_height);
+    try std.testing.expect(first_panel_hash != mature_panel_hash);
+}
+
+test "a last-nine transcript window loses first-panel establishing geometry" {
+    const gpa = std.testing.allocator;
+    const full = [_]strip.Line{
+        .{ .speaker = "anna", .text = "One." },
+        .{ .speaker = "anna", .text = "Two." },
+        .{ .speaker = "anna", .text = "Three." },
+        .{ .speaker = "anna", .text = "Four." },
+        .{ .speaker = "anna", .text = "Five." },
+        .{ .speaker = "anna", .text = "Six." },
+        .{ .speaker = "anna", .text = "Seven." },
+        .{ .speaker = "anna", .text = "Eight." },
+        .{ .speaker = "anna", .text = "Nine." },
+        .{ .speaker = "anna", .text = "Ten." },
+    };
+    var prefix = try strip.render(gpa, &full);
+    defer prefix.deinit(gpa);
+    var windowed = try strip.render(gpa, full[1..]);
+    defer windowed.deinit(gpa);
+
+    // AddLine treats the first conversational panel as establishing. Dropping
+    // the first line makes "Two." the establishing shot and changes every
+    // later panel's seed and hysteresis.
+    try std.testing.expect(prefix.height > windowed.height);
+    const prefix_first = regionHash(prefix, strip.panel_width + strip.device_interstice, 0, strip.panel_width, strip.panel_height);
+    const windowed_first = regionHash(windowed, strip.panel_width + strip.device_interstice, 0, strip.panel_width, strip.panel_height);
+    try std.testing.expect(prefix_first != windowed_first);
+}

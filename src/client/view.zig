@@ -1379,23 +1379,33 @@ pub const View = struct {
     fn drawComicBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) !void {
         ui.drawContentSurface(&self.canvas, rect, true);
         if (rect.w <= 0 or rect.h <= 0) return;
-        if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "No messages yet - type below and press Enter", self.shell.comic_columns);
-            return;
-        }
+
+        const title_roster = try self.gpa.alloc(strip.TitleParticipant, transcript.roster.items.len);
+        defer self.gpa.free(title_roster);
+        for (transcript.roster.items, 0..) |member, index| title_roster[index] = .{
+            .identity = member.nick,
+            .display_name = member.nick,
+            .avatar = member.avatar,
+            .is_self = member.is_self,
+            .sends = member.sends,
+            .departed = member.departed,
+        };
 
         const all = transcript.lines.items;
         const range = self.shell.visibleRange(all.len, 9);
-        const visible = all[range.start..range.end];
-        const lines = try self.gpa.alloc(strip.Line, visible.len);
+        // AddLine/hysteresis/the CRT stream require the full prefix through
+        // range.end. A last-nine slice would make the first visible line an
+        // establishing shot. latestPageCrop then shows only the newest rows.
+        const prefix = all[0..range.end];
+        const lines = try self.gpa.alloc(strip.Line, prefix.len);
         defer self.gpa.free(lines);
-        const target_views = try self.gpa.alloc([]strip.Participant, visible.len);
+        const target_views = try self.gpa.alloc([]strip.Participant, prefix.len);
         var target_views_count: usize = 0;
         defer {
             for (target_views[0..target_views_count]) |targets| self.gpa.free(targets);
             self.gpa.free(target_views);
         }
-        for (visible, 0..) |line, i| {
+        for (prefix, 0..) |line, i| {
             const targets = try self.gpa.alloc(strip.Participant, line.talk_targets.len);
             target_views[i] = targets;
             target_views_count += 1;
@@ -1417,17 +1427,6 @@ pub const View = struct {
             };
         }
 
-        const title_roster = try self.gpa.alloc(strip.TitleParticipant, transcript.roster.items.len);
-        defer self.gpa.free(title_roster);
-        for (transcript.roster.items, 0..) |member, index| title_roster[index] = .{
-            .identity = member.nick,
-            .display_name = member.nick,
-            .avatar = member.avatar,
-            .is_self = member.is_self,
-            .sends = member.sends,
-            .departed = member.departed,
-        };
-
         const backdrop = dialogBackgroundByName(transcript.resolvedBackdrop()) orelse dialogBackgroundByName("field").?;
         var page = try strip.renderWithOptions(self.gpa, lines, .{
             .title_roster = title_roster,
@@ -1436,13 +1435,13 @@ pub const View = struct {
             .reserve_page_columns = true,
         });
         defer page.deinit(self.gpa);
-        blitFit(&self.canvas, page.pixels, page.width, page.height, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
+        blitSourcePage(&self.canvas, page.pixels, page.width, page.height, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
 
         if (self.shell.history_offset > 0) {
             const label = "Earlier messages - Page Down returns toward latest";
             ui.drawHistoryBanner(&self.canvas, rect, label);
         }
-        ui.drawVerticalScrollbar(&self.canvas, rect, all.len, 9, range.start);
+        if (all.len > 0) ui.drawVerticalScrollbar(&self.canvas, rect, all.len, 9, range.start);
     }
 
     fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) void {
@@ -2399,15 +2398,46 @@ fn drawTextEllipsized(c: *Canvas, text: []const u8, x: i32, y: i32, max_w: i32, 
 }
 
 fn blitFit(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
-    var fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
-    fit.y = y + @min(14, @max(0, max_h - fit.h));
+    const fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
+    blitNearest(c, src, sw, sh, 0, 0, sw, sh, fit.x, fit.y, fit.w, fit.h);
+}
+
+/// Width-fit the latest source page rows into the comic buffer. Top-aligned;
+/// no decorative vertical bias. The planner still receives the full prefix.
+fn blitSourcePage(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
+    if (sw == 0 or sh == 0 or max_w <= 0 or max_h <= 0) return;
+    const crop = strip.latestPageCrop(sw, sh, @intCast(max_w), @intCast(max_h));
+    const dest_w = max_w;
+    const dest_h = @min(max_h, @max(1, @as(i32, @intCast(@divTrunc(
+        @as(u64, crop.h) * @as(u32, @intCast(max_w)),
+        crop.w,
+    )))));
+    blitNearest(c, src, sw, sh, crop.x, crop.y, crop.w, crop.h, x, y, dest_w, dest_h);
+}
+
+fn blitNearest(
+    c: *Canvas,
+    src: []const u32,
+    sw: u32,
+    sh: u32,
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    dx: i32,
+    dy: i32,
+    dw: i32,
+    dh: i32,
+) void {
+    if (src_w == 0 or src_h == 0 or dw <= 0 or dh <= 0) return;
+    _ = sh;
     var oy: i32 = 0;
-    while (oy < fit.h) : (oy += 1) {
-        const sy: u32 = @intCast(@divTrunc(@as(i64, oy) * sh, fit.h));
+    while (oy < dh) : (oy += 1) {
+        const sy: u32 = src_y + @as(u32, @intCast(@divTrunc(@as(i64, oy) * src_h, dh)));
         var ox: i32 = 0;
-        while (ox < fit.w) : (ox += 1) {
-            const sx: u32 = @intCast(@divTrunc(@as(i64, ox) * sw, fit.w));
-            c.set(fit.x + ox, fit.y + oy, src[@as(usize, sy) * sw + sx]);
+        while (ox < dw) : (ox += 1) {
+            const sx: u32 = src_x + @as(u32, @intCast(@divTrunc(@as(i64, ox) * src_w, dw)));
+            c.set(dx + ox, dy + oy, src[@as(usize, sy) * sw + sx]);
         }
     }
 }
@@ -2835,6 +2865,24 @@ test "view renders modern empty buffer and ui.current.chrome" {
     const dial = ui.moodDialInterior(wheel);
     try std.testing.expectEqual(ui.current.accent, view.pixels()[@as(usize, @intCast(wheel.y + 13)) * 960 + @as(usize, @intCast(layout.body_camera.x + 20))]);
     try std.testing.expectEqual(ui.current.paper, view.pixels()[@as(usize, @intCast(dial.y + @divTrunc(dial.h, 2))) * 960 + @as(usize, @intCast(dial.x + @divTrunc(dial.w, 2) + 20))]);
+}
+
+test "empty comic buffer draws the source title panel" {
+    const gpa = std.testing.allocator;
+    var view = try View.init(gpa, 960, 720);
+    defer view.deinit();
+    var transcript = session.Transcript.init(gpa);
+    defer transcript.deinit();
+    try transcript.setSelf("anna");
+    try view.render("Comic Chat | #root | anna", "connected", &transcript, "", 0);
+
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const sample_x = layout.transcript.x + 24;
+    const sample_y = layout.transcript.y + 24;
+    try std.testing.expectEqual(
+        canvas_mod.white,
+        view.pixels()[@as(usize, @intCast(sample_y)) * 960 + @as(usize, @intCast(sample_x))],
+    );
 }
 
 test "emotion dial selects and drags only within its circular control" {

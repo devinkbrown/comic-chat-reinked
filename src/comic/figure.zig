@@ -20,6 +20,9 @@ pub const Rendered = struct {
     image: Image,
     /// Original `GetDimInfo` values in authored bitmap pixels.
     face_x: i32,
+    /// `CBodySingle::GetDimInfo` (`avatar.cpp:63`) uses `ydim/2` for simple
+    /// avatars. Complex bodies use the neck-assembled head band from
+    /// `CBodyDouble::GetDimInfo`.
     head_height: i32,
     /// `CBody::m_requested` is not visual, but it is part of the exact state
     /// installed by `SetIndices` and must survive the portable assembly path.
@@ -284,7 +287,7 @@ pub fn assembleDetailedForSourcePose(
         return .{
             .image = image,
             .face_x = record.face.x,
-            .head_height = @intCast(image.height / 2),
+            .head_height = simpleHeadHeight(image.height),
             .requested = selected.requested,
         };
     }
@@ -327,7 +330,7 @@ pub fn assembleDetailedAnalysis(gpa: std.mem.Allocator, avb_data: []const u8, an
         return .{
             .image = image,
             .face_x = record.face.x,
-            .head_height = @intCast(image.height / 2),
+            .head_height = simpleHeadHeight(image.height),
         };
     }
 
@@ -393,6 +396,13 @@ fn selectAvailable(
     return best;
 }
 
+/// `CBodySingle::GetDimInfo` at `avatar.cpp:63`:
+/// `headHeight = ydim/2; // for now, be conservative -- head = half body!`
+/// Authored `face.y` is unused for simple-avatar layout. Do not "improve" this.
+fn simpleHeadHeight(image_height: u32) i32 {
+    return @intCast(image_height / 2);
+}
+
 fn joinExact(gpa: std.mem.Allocator, anchors: bgb.NeckAnchors, head: Image, body: Image) !Image {
     const dx = anchors.body.x - anchors.head.x;
     const dy = anchors.body.y - anchors.head.y;
@@ -456,6 +466,22 @@ test "assemble produces a figure with transparent margins and opaque ink" {
         if (p >> 24 != 0) opaque_px += 1;
     }
     try std.testing.expect(opaque_px > 1000);
+}
+
+test "simple-avatar GetDimInfo keeps the source half-body head height" {
+    const gpa = std.testing.allocator;
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var simple = try assembleDetailedForText(gpa, jordan, "ordinary text");
+    defer simple.deinit(gpa);
+    try std.testing.expectEqual(simpleHeadHeight(simple.image.height), simple.head_height);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var generated = try assembleDetailedForText(gpa, color, "ordinary text");
+    defer generated.deinit(gpa);
+    try std.testing.expectEqual(avb_asset.Kind.simple_avatar, (try avb_asset.parse(color)).kind);
+    try std.testing.expectEqual(simpleHeadHeight(generated.image.height), generated.head_height);
+    // face.y is authored metadata, not the layout head band.
+    try std.testing.expect(generated.head_height != generated.image.height);
 }
 
 test "text rules select simple-avatar whole-body expressions" {
