@@ -1316,7 +1316,8 @@ const ChatState = struct {
     }
 
     fn discardPendingUdi(self: *ChatState, gpa: std.mem.Allocator, target: []const u8, nick: []const u8) void {
-        if (self.takeUdi(target, nick)) |*entry| entry.deinit(gpa);
+        var taken = self.takeUdi(target, nick);
+        if (taken) |*entry| entry.deinit(gpa);
     }
 
     fn takeUdi(self: *ChatState, target: []const u8, nick: []const u8) ?PendingUdi {

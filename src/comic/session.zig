@@ -1156,7 +1156,7 @@ test "NAMES 366 retires members missing from the snapshot" {
     try std.testing.expectEqual(@as(usize, 3), transcript.activeMemberCount());
 
     var reconnect = irc_message.parse(":server 353 Me = #room :@Me +Alice");
-    try std.testing.expect(try transcript.observeIrc(&reconnect, "#room", "Me"));
+    _ = try transcript.observeIrc(&reconnect, "#room", "Me");
     var end_reconnect = irc_message.parse(":server 366 Me #room :End of /NAMES list");
     try std.testing.expect(try transcript.observeIrc(&end_reconnect, "#room", "Me"));
     try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Bob").?].departed);

@@ -1769,6 +1769,7 @@ test "unsigned SCRAM 903 completes CAP instead of stalling registration" {
     registration.sasl_session.?.selected = .scram_sha_256;
     registration.sasl_session.?.phase = .awaiting_result;
     registration.cap.phase = .waiting_sasl;
+    registration.cap.registration_open = true;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     var upgrade: ?u16 = null;
