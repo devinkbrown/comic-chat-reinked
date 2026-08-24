@@ -1497,7 +1497,7 @@ pub const View = struct {
                 .y = rect.bottom() - caption_h - 12,
                 .w = caption_w,
                 .h = caption_h,
-            }, "Sunday page is open", "Ink a line and press Enter");
+            }, "Sunday page is open", "Ink the first balloon and press Enter");
         }
 
         if (self.shell.history_offset > 0) {
@@ -1509,7 +1509,7 @@ pub const View = struct {
     fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) void {
         ui.drawContentSurface(&self.canvas, rect, false);
         if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "Ink a line and press Enter", 1);
+            drawEmptyBuffer(&self.canvas, rect, "Ink the first balloon and press Enter", 1);
             return;
         }
         // The text view is a calm reading surface rather than a debug log:
@@ -1550,7 +1550,7 @@ pub const View = struct {
         ui.drawPaneCountHeader(&self.canvas, rect, "CAST", count);
         const content = Rect{ .x = rect.x, .y = rect.y + 30, .w = rect.w, .h = @max(0, rect.h - 30) };
         if (transcript.roster.items.len == 0) {
-            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "The playbill is empty", "People take a panel when they join");
+            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "The playbill is empty", "Join and take a panel");
             return;
         }
         const viewport = memberViewport(rect, icon_mode);
@@ -2364,8 +2364,11 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     ui.drawComposerEditor(c, editor_layout, focused, hovered, input.len > 0);
     const content_rect = editor_layout.content;
     if (input.len == 0) {
-        const placeholder_x = edit.x + 18 + placeholderGap(focused);
+        const mode = sayActionLabel(@intFromEnum(say_mode));
+        const mode_w: i32 = if (edit.w >= 280) Canvas.uiTextWidth(mode) + 18 else 0;
         const enter_w: i32 = if (edit.w >= 240) Canvas.uiTextWidth("Enter") + 20 else 0;
+        const placeholder_x = edit.x + 18 + placeholderGap(focused) + if (mode_w > 0) mode_w + 6 else 0;
+        if (mode_w > 0) ui.drawComposerModeChip(c, .{ .x = edit.x + 14, .y = edit.y + 13, .w = mode_w, .h = 18 }, mode, focused);
         drawTextEllipsized(c, "Ink the next balloon...", placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - enter_w, ui.current.secondary);
         if (enter_w > 0) {
             ui.drawInkPlate(c, edit.right() - enter_w - 10, edit.y + 13, enter_w, 18, 2, if (focused) ui.current.accent else ui.current.layer);
@@ -2713,6 +2716,12 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         },
     };
     ui.drawDialogSurface(c, rect, spec.title, group_text);
+    if (spec.id == .settings) {
+        const well_top = dialog_layout.body_y - 8;
+        const well_h = @max(0, dialog_layout.primary.y - well_top - 12);
+        ui.drawInkPlate(c, rect.x + 12, well_top, rect.w - 24, well_h, 2, ui.current.layer);
+        c.fillRect(rect.x + 14, well_top + 2, @max(0, rect.w - 28), 2, ui.current.accent);
+    }
     const fields = dialogs.fields(spec.id);
     for (fields, 0..) |field, index| {
         if (index < first_field) continue;
@@ -2721,7 +2730,10 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         const kicker = settingsKicker(spec.id, index);
         const kicker_w: i32 = if (kicker.len == 0) 0 else Canvas.uiTextWidth(kicker) + 18;
         ui.drawDialogFieldLabel(c, .{ .x = rect.x + 20, .y = row_y, .w = rect.w - 40 - kicker_w, .h = 17 }, field.label, index == active_field);
-        if (kicker_w > 0) ui.drawInkChip(c, .{ .x = rect.right() - kicker_w - 22, .y = row_y - 1, .w = kicker_w, .h = 18 }, kicker, true);
+        if (kicker_w > 0) {
+            if (index != 0) ui.drawSectionRule(c, rect.x + 20, row_y - 6, rect.w - 40);
+            ui.drawInkChip(c, .{ .x = rect.right() - kicker_w - 22, .y = row_y - 1, .w = kicker_w, .h = 18 }, kicker, true);
+        }
         var field_rect = dialog_layout.fieldRectScrolled(index, first_field);
         if (spec.id == .character and field.kind == .preview) field_rect = characterGalleryRect(dialog_layout, first_field);
         const field_y = field_rect.y;
