@@ -3,7 +3,7 @@
 //! The workspace geometry follows the established splitter composition:
 //! room tabs above an 80/20 conversation/member split, a fixed-height say
 //! window below the page/text view, and (in comic mode) a 30/70 member/bodycam
-//! split on the right. The skin is modernized, but the spatial contract is not.
+//! split on the right. Ink Sunday chrome frames a source-faithful page.
 
 const std = @import("std");
 const session = @import("../comic/session.zig");
@@ -112,6 +112,7 @@ pub const View = struct {
     focused_say_action: u8 = 0,
     hovered_composer: bool = false,
     hovered_status: bool = false,
+    hovered_status_tab: bool = false,
     hovered_status_action: ?StatusActionHover = null,
     hovered_column_control: ?ColumnControlHover = null,
     hovered_member: ?usize = null,
@@ -376,6 +377,7 @@ pub const View = struct {
         self.hovered_dialog_browse = null;
         self.hovered_say_action = null;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
         self.hovered_column_control = null;
         self.hovered_member = null;
         self.context_menu = null;
@@ -428,7 +430,7 @@ pub const View = struct {
                 if (ui.contains(dialogBrowseRect(dialog_layout.fieldRectScrolled(index, self.dialog_first_field)), pointer.x, pointer.y)) index else null
             else
                 null;
-            const changed = self.hovered_dialog_button != next or self.hovered_dialog_field != next_field or self.hovered_dialog_browse != next_browse or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_column_control != null or self.hovered_member != null;
+            const changed = self.hovered_dialog_button != next or self.hovered_dialog_field != next_field or self.hovered_dialog_browse != next_browse or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_column_control != null or self.hovered_member != null;
             self.hovered_dialog_button = next;
             self.hovered_dialog_field = next_field;
             self.hovered_dialog_browse = next_browse;
@@ -438,6 +440,7 @@ pub const View = struct {
             self.hovered_say_action = null;
             self.hovered_composer = false;
             self.hovered_status = false;
+            self.hovered_status_tab = false;
             self.hovered_column_control = null;
             self.hovered_member = null;
             return changed;
@@ -465,24 +468,26 @@ pub const View = struct {
             const target = hit_test.shell(layout, self.shell.content_mode == .comic, self.shell.member_view == .icons, pointer.x, pointer.y, member_count);
             if (target == .menu) {
                 const next_menu = target.menu;
-                const changed = self.active_menu != next_menu or self.hovered_menu != next_menu or self.hovered_menu_item != null or self.hovered_say_action != null or self.hovered_status or self.hovered_column_control != null or self.hovered_member != null;
+                const changed = self.active_menu != next_menu or self.hovered_menu != next_menu or self.hovered_menu_item != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_column_control != null or self.hovered_member != null;
                 self.active_menu = next_menu;
                 self.hovered_menu = next_menu;
                 self.hovered_menu_item = null;
                 self.hovered_toolbar = null;
                 self.hovered_say_action = null;
                 self.hovered_status = false;
+                self.hovered_status_tab = false;
                 self.hovered_column_control = null;
                 self.hovered_member = null;
                 return changed;
             }
             const item = menuPopupItem(self.canvas.width, menu, pointer.x, pointer.y);
-            const changed = self.hovered_menu_item != item or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_status or self.hovered_column_control != null or self.hovered_member != null;
+            const changed = self.hovered_menu_item != item or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_column_control != null or self.hovered_member != null;
             self.hovered_menu_item = item;
             self.hovered_menu = null;
             self.hovered_toolbar = null;
             self.hovered_say_action = null;
             self.hovered_status = false;
+            self.hovered_status_tab = false;
             self.hovered_column_control = null;
             self.hovered_member = null;
             return changed;
@@ -502,7 +507,8 @@ pub const View = struct {
             .toolbar => |index| self.setHover(null, index),
             .say_action => |index| self.setContentHover(index, null, null),
             .composer => self.setComposerHover(),
-            .status_window, .connection_status => self.setStatusHover(),
+            .status_window => self.setStatusTabHover(),
+            .connection_status => self.setStatusHover(),
             .comic_columns_decrease => self.setContentHover(null, .decrease, null),
             .comic_columns_increase => self.setContentHover(null, .increase, null),
             .member => |index| self.setContentHover(null, null, index),
@@ -511,13 +517,14 @@ pub const View = struct {
     }
 
     fn setHover(self: *View, menu: ?u8, toolbar: ?u8) bool {
-        const changed = self.hovered_menu != menu or self.hovered_menu_item != null or self.hovered_toolbar != toolbar or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != menu or self.hovered_menu_item != null or self.hovered_toolbar != toolbar or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = menu;
         self.hovered_menu_item = null;
         self.hovered_toolbar = toolbar;
         self.hovered_say_action = null;
         self.hovered_composer = false;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -525,13 +532,14 @@ pub const View = struct {
     }
 
     fn setContentHover(self: *View, say_action: ?u8, column_control: ?ColumnControlHover, member: ?usize) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != say_action or self.hovered_composer or self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != column_control or self.hovered_member != member;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != say_action or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_status_action != null or self.hovered_column_control != column_control or self.hovered_member != member;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = say_action;
         self.hovered_composer = false;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
         self.hovered_status_action = null;
         self.hovered_column_control = column_control;
         self.hovered_member = member;
@@ -539,13 +547,14 @@ pub const View = struct {
     }
 
     fn setComposerHover(self: *View) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or !self.hovered_composer or self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or !self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = null;
         self.hovered_composer = true;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -553,13 +562,29 @@ pub const View = struct {
     }
 
     fn setStatusHover(self: *View) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or !self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or !self.hovered_status or self.hovered_status_tab or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = null;
         self.hovered_composer = false;
         self.hovered_status = true;
+        self.hovered_status_tab = false;
+        self.hovered_status_action = null;
+        self.hovered_column_control = null;
+        self.hovered_member = null;
+        return changed;
+    }
+
+    fn setStatusTabHover(self: *View) bool {
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or !self.hovered_status_tab or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        self.hovered_menu = null;
+        self.hovered_menu_item = null;
+        self.hovered_toolbar = null;
+        self.hovered_say_action = null;
+        self.hovered_composer = false;
+        self.hovered_status = false;
+        self.hovered_status_tab = true;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -567,13 +592,14 @@ pub const View = struct {
     }
 
     fn setStatusActionHover(self: *View, action: ?StatusActionHover) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_action != action or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_status_action != action or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = null;
         self.hovered_composer = false;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
         self.hovered_status_action = action;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -1204,7 +1230,7 @@ pub const View = struct {
 
         drawMenuBar(&self.canvas, layout.menu, self.active_menu, self.hovered_menu);
         drawToolBar(&self.canvas, layout.toolbar, comic_mode, self.hovered_toolbar, if (self.shell.focus == .toolbar) self.focused_toolbar else null);
-        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control);
+        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab);
         drawSplitters(&self.canvas, layout, comic_mode);
 
         if (comic_mode) {
@@ -1240,7 +1266,7 @@ pub const View = struct {
         const comic_mode = self.shell.content_mode == .comic;
         const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
         var snapshot: accessibility.Snapshot = .{ .status = status };
-        snapshot.append(.{ .id = "reinked", .role = .window, .bounds = .{ .x = 0, .y = 0, .w = @intCast(self.canvas.width), .h = @intCast(self.canvas.height) }, .label = "Reinked" });
+        snapshot.append(.{ .id = "comic-chat", .role = .window, .bounds = .{ .x = 0, .y = 0, .w = @intCast(self.canvas.width), .h = @intCast(self.canvas.height) }, .label = "Comic Chat" });
         snapshot.append(.{ .id = "menu", .role = .menu_bar, .bounds = layout.menu, .label = "Application menu", .focused = self.shell.focus == .navigation });
         snapshot.append(.{ .id = "toolbar", .role = .toolbar, .bounds = layout.toolbar, .label = "Application tools", .focused = self.shell.focus == .toolbar });
         const toolbar_layout = ui.ToolbarLayout.init(layout.toolbar);
@@ -1282,6 +1308,7 @@ pub const View = struct {
             .selected = @as(i32, @intFromEnum(self.shell.say_mode)) == action_index,
             .focused = self.shell.focus == .say_actions and self.focused_say_action == action_index,
         });
+        snapshot.append(.{ .id = "status-tab", .role = .button, .bounds = .{ .x = layout.tabs.x, .y = layout.tabs.y, .w = 108, .h = layout.tabs.h }, .label = "Status", .selected = self.status_panel_open, .focused = self.hovered_status_tab });
         snapshot.append(.{ .id = "status", .role = .button, .bounds = layout.status, .label = status, .focused = self.hovered_status });
         if (self.status_panel_open) snapshot.append(.{ .id = "status-panel", .role = .dialog, .bounds = statusPanelRect(self.canvas.width, self.canvas.height, self.status_detailed), .label = "Connection and activity status", .focused = true });
         if (self.active_menu) |menu| {
@@ -1379,23 +1406,21 @@ pub const View = struct {
     fn drawComicBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) !void {
         ui.drawContentSurface(&self.canvas, rect, true);
         if (rect.w <= 0 or rect.h <= 0) return;
-        if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "No messages yet - type below and press Enter", self.shell.comic_columns);
-            return;
-        }
 
         const all = transcript.lines.items;
         const range = self.shell.visibleRange(all.len, 9);
-        const visible = all[range.start..range.end];
-        const lines = try self.gpa.alloc(strip.Line, visible.len);
+        // Source AddLine/hysteresis/RNG consume the whole prefix. A 9-line
+        // slice would replan those panels as a new first page.
+        const prefix = all[0..range.end];
+        const lines = try self.gpa.alloc(strip.Line, prefix.len);
         defer self.gpa.free(lines);
-        const target_views = try self.gpa.alloc([]strip.Participant, visible.len);
+        const target_views = try self.gpa.alloc([]strip.Participant, prefix.len);
         var target_views_count: usize = 0;
         defer {
             for (target_views[0..target_views_count]) |targets| self.gpa.free(targets);
             self.gpa.free(target_views);
         }
-        for (visible, 0..) |line, i| {
+        for (prefix, 0..) |line, i| {
             const targets = try self.gpa.alloc(strip.Participant, line.talk_targets.len);
             target_views[i] = targets;
             target_views_count += 1;
@@ -1436,11 +1461,21 @@ pub const View = struct {
             .reserve_page_columns = true,
         });
         defer page.deinit(self.gpa);
-        blitFit(&self.canvas, page.pixels, page.width, page.height, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
+        blitSourcePage(&self.canvas, page.pixels, page.width, page.height, rect.x + 8, rect.y + 8, rect.w - 16, rect.h - 16);
+
+        if (all.len == 0) {
+            const caption_w = @min(400, @max(220, rect.w - 40));
+            const caption_h: i32 = 72;
+            ui.drawEmptyCaption(&self.canvas, .{
+                .x = rect.x + @divTrunc(rect.w - caption_w, 2),
+                .y = rect.bottom() - caption_h - 12,
+                .w = caption_w,
+                .h = caption_h,
+            }, "The page is open", "Write a line and press Enter");
+        }
 
         if (self.shell.history_offset > 0) {
-            const label = "Earlier messages - Page Down returns toward latest";
-            ui.drawHistoryBanner(&self.canvas, rect, label);
+            ui.drawHistoryBanner(&self.canvas, rect, "Earlier page — Page Down returns to the latest panels");
         }
         ui.drawVerticalScrollbar(&self.canvas, rect, all.len, 9, range.start);
     }
@@ -1448,7 +1483,7 @@ pub const View = struct {
     fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) void {
         ui.drawContentSurface(&self.canvas, rect, false);
         if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "No messages yet - type below and press Enter", 1);
+            drawEmptyBuffer(&self.canvas, rect, "Write a line and press Enter", 1);
             return;
         }
         // The text view is a calm reading surface rather than a debug log:
@@ -1486,7 +1521,7 @@ pub const View = struct {
         if (rect.h <= 0) return;
         var count_buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buf, "{d}", .{transcript.activeMemberCount()}) catch "0";
-        ui.drawPaneCountHeader(&self.canvas, rect, "In this room", count);
+        ui.drawPaneCountHeader(&self.canvas, rect, "Cast", count);
         const content = Rect{ .x = rect.x, .y = rect.y + 30, .w = rect.w, .h = @max(0, rect.h - 30) };
         if (transcript.roster.items.len == 0) {
             ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 40 }, "No members yet", "People appear here when they join");
@@ -1772,7 +1807,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             4 => "Rule sets",
             5 => "Logon notifications",
             6 => "Online notification users",
-            else => "About Reinked",
+            else => "About Comic Chat",
         },
         else => "Settings",
     };
@@ -1801,7 +1836,7 @@ fn menuPopupItem(canvas_width: u32, menu: u8, x: i32, y: i32) ?u8 {
 
 fn drawMenuBar(c: *Canvas, rect: Rect, active: ?u8, hovered: ?u8) void {
     ui.drawMenuBarSurface(c, rect);
-    ui.drawAppBrand(c, rect, "Reinked");
+    ui.drawAppBrand(c, rect, "Comic Chat");
     var x = rect.x + 170;
     for (menu_labels, 0..) |item, raw_index| {
         const index: u8 = @intCast(raw_index);
@@ -2012,7 +2047,7 @@ fn toolbarLabel(index: u8) []const u8 {
         21 => "Underline",
         22 => "Fixed-width text",
         23 => "Insert symbol",
-        else => "Reinked tool",
+        else => "Comic Chat tool",
     };
 }
 
@@ -2098,11 +2133,11 @@ fn updateTabViewport(self: *View, layout: geometry.Layout, comic_mode: bool, cou
     self.room_tab_first = @min(self.room_tab_first, count - capacity);
 }
 
-fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover) void {
+fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover, status_selected: bool, status_hovered: bool) void {
     const rect = layout.tabs;
     ui.drawTabStrip(c, rect);
     const status_w: i32 = 108;
-    ui.drawStatusTab(c, rect);
+    ui.drawStatusTab(c, rect, status_selected, status_hovered);
     ui.drawStatusTabContent(c, rect);
     const viewport = tabViewport(layout, comic_mode);
     const first_x = rect.x + status_w + 6;
@@ -2291,7 +2326,7 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     const content_rect = editor_layout.content;
     if (input.len == 0) {
         const placeholder_x = edit.x + 18 + placeholderGap(focused);
-        drawTextEllipsized(c, "Write a message...", placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18, ui.current.secondary);
+        drawTextEllipsized(c, "Write the next balloon...", placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18, ui.current.secondary);
     } else {
         const viewport = composerViewport(input, cursor, content_rect.w);
         for (viewport.rows[0..viewport.count], 0..) |row, row_index| {
@@ -2326,7 +2361,6 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
         if (focused_action == @as(u8, @intCast(index))) ui.drawFocusRing(c, .{ .x = x, .y = layout.say_actions.y, .w = layout.say_action_size, .h = layout.say_actions.h });
         x += layout.say_action_size;
     }
-    if (focused) drawFocus(c, layout.say);
 }
 
 fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
@@ -2353,7 +2387,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     ui.drawAnchoredPopoverSurface(c, panel, panel.x + 30);
     const tone = ui.statusTone(status);
     ui.drawStatusIdentity(c, .{ .x = panel.x + 16, .y = panel.y + 15, .w = 34, .h = 34 }, tone);
-    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, "Connection & activity", status);
+    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, "On the wire", status);
     ui.drawSectionRule(c, panel.x + 16, panel.y + 60, panel.w - 32);
 
     var members_buf: [32]u8 = undefined;
@@ -2364,18 +2398,23 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     const metric_w = @divTrunc(panel.w - 36 - metric_gap, 2);
     const first_metric_y = panel.y + 69;
     if (panel_layout.show_metrics) {
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = first_metric_y, .w = metric_w, .h = 38 }, "ROOM", members);
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = first_metric_y, .w = metric_w, .h = 38 }, "VIEW", if (shell.content_mode == .comic) panels else "Text transcript");
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = first_metric_y, .w = metric_w, .h = 38 }, "CAST", members);
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = first_metric_y, .w = metric_w, .h = 38 }, "PAGE", if (shell.content_mode == .comic) panels else "Text transcript");
     }
     if (show_details) {
         const detail_y = first_metric_y + 40;
         ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = detail_y, .w = metric_w, .h = 38 }, "MEMBERS", if (!shell.show_members) "Pane hidden" else if (shell.member_view == .icons) "Portrait cards" else "Compact list");
         const theme_label = switch (appearance.accent) {
-            .cobalt => "Cobalt",
+            .cobalt => "Vermillion",
             .violet => "Violet",
             .forest => "Forest",
         };
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = detail_y, .w = metric_w, .h = 38 }, "STUDIO", if (appearance.mode == .dark) "Dark studio" else theme_label);
+        var studio_buf: [32]u8 = undefined;
+        const studio = if (appearance.mode == .dark)
+            std.fmt.bufPrint(&studio_buf, "Dark · {s}", .{theme_label}) catch "Dark studio"
+        else
+            theme_label;
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = detail_y, .w = metric_w, .h = 38 }, "INK", studio);
     }
     if (panel_layout.show_actions) {
         const connection = panel_layout.connection;
@@ -2399,15 +2438,29 @@ fn drawTextEllipsized(c: *Canvas, text: []const u8, x: i32, y: i32, max_w: i32, 
 }
 
 fn blitFit(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
-    var fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
-    fit.y = y + @min(14, @max(0, max_h - fit.h));
+    blitSourcePage(c, src, sw, sh, x, y, max_w, max_h);
+}
+
+/// Fit a source-rasterized page into the well without shifting it off the
+/// top-left origin. The 14px vertical bias used to invent extra mat.
+fn blitSourcePage(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
+    const fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
+    const stride = strip.panel_height + strip.device_interstice;
+    const rows: u32 = if (sh == 0 or stride == 0) 0 else (sh + strip.device_interstice) / stride;
+    const max_rows: u32 = 3;
+    const show_rows = if (rows == 0) 0 else @min(rows, max_rows);
+    const first_row = rows - show_rows;
+    const src_y = first_row * stride;
+    const src_h = if (sh > src_y) sh - src_y else sh;
+    if (src_h == 0) return;
+    const crop = fitRect(sw, src_h, x, y, max_w, max_h) orelse fit;
     var oy: i32 = 0;
-    while (oy < fit.h) : (oy += 1) {
-        const sy: u32 = @intCast(@divTrunc(@as(i64, oy) * sh, fit.h));
+    while (oy < crop.h) : (oy += 1) {
+        const sy: u32 = src_y + @as(u32, @intCast(@divTrunc(@as(i64, oy) * src_h, crop.h)));
         var ox: i32 = 0;
-        while (ox < fit.w) : (ox += 1) {
-            const sx: u32 = @intCast(@divTrunc(@as(i64, ox) * sw, fit.w));
-            c.set(fit.x + ox, fit.y + oy, src[@as(usize, sy) * sw + sx]);
+        while (ox < crop.w) : (ox += 1) {
+            const sx: u32 = @intCast(@divTrunc(@as(i64, ox) * sw, crop.w));
+            c.set(crop.x + ox, crop.y + oy, src[@as(usize, sy) * sw + sx]);
         }
     }
 }
@@ -2589,11 +2642,14 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
     const dialog_layout = dialogLayout(c.width, c.height, spec);
     const rect = dialog_layout.rect;
     const group_text = switch (spec.id) {
-        .settings => "Theme, layout, members, and status",
-        .character => "Browse the cast and preview an expression",
+        .settings => "Ink, page density, and the cast",
+        .character => "Choose who stands on the page",
+        .background => "The paper behind every panel",
         .setup, .servers => "Server and transport security",
         .password => "Secure account sign-in",
         .sound => "Choose a sound and message",
+        .comics_view => "How the page is arranged",
+        .about => "Portable Ink Sunday client",
         else => switch (spec.group) {
             .application => "Application preferences",
             .connection => "Connection, identity, and appearance",
@@ -2828,8 +2884,8 @@ test "view renders modern empty buffer and ui.current.chrome" {
     try view.render("Comic Chat | #root | anna", "connected", &transcript, "hello", 3);
     const layout = geometry.Layout.compute(960, 720, true, true);
     try std.testing.expectEqual(ui.current.navigation, view.pixels()[0]);
-    try std.testing.expectEqual(ui.current.divider, view.pixels()[@as(usize, @intCast(layout.tabs.bottom() - 1)) * 960]);
-    try std.testing.expectEqual(ui.current.chrome, view.pixels()[@as(usize, @intCast(layout.say.y + 2)) * 960 + 2]);
+    try std.testing.expectEqual(ui.current.ink, view.pixels()[@as(usize, @intCast(layout.tabs.bottom() - 1)) * 960]);
+    try std.testing.expectEqual(ui.current.ink, view.pixels()[@as(usize, @intCast(layout.say.y + 1)) * 960 + 2]);
 
     const wheel = emotionWheelRect(layout);
     const dial = ui.moodDialInterior(wheel);
@@ -3006,6 +3062,18 @@ test "status and connect toolbar expose a prefilled connection workflow" {
     try std.testing.expectEqualStrings("eshmaki.me", view.dialogValueAt(0));
     try std.testing.expectEqualStrings("6697", view.dialogValueAt(1));
     try std.testing.expectEqualStrings("Verified TLS", view.dialogValueAt(2));
+}
+
+test "status tab hover is independent of the bottom status bar" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = layout.tabs.x + 20, .y = layout.tabs.y + 10 }, 0));
+    try std.testing.expect(view.hovered_status_tab);
+    try std.testing.expect(!view.hovered_status);
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = layout.status.x + 24, .y = layout.status.y + 10 }, 0));
+    try std.testing.expect(view.hovered_status);
+    try std.testing.expect(!view.hovered_status_tab);
 }
 
 test "settings menu opens application preferences instead of connection setup" {

@@ -1653,9 +1653,9 @@ fn runInteractivePollBackend(
     const posix = std.posix;
 
     const win = if (comptime @hasDecl(Backend.Window, "openWithDisplay"))
-        try Backend.Window.openWithDisplay(gpa, 960, 720, "Reinked", display orelse return error.DisplayUnset)
+        try Backend.Window.openWithDisplay(gpa, 960, 720, "Comic Chat", display orelse return error.DisplayUnset)
     else
-        try Backend.Window.open(gpa, 960, 720, "Reinked");
+        try Backend.Window.open(gpa, 960, 720, "Comic Chat");
     defer win.deinit();
     var view = try cc.client.view.View.init(gpa, win.width, win.height);
     defer view.deinit();
@@ -1767,7 +1767,7 @@ fn runInteractivePollBackend(
 fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick: []const u8, channel: []const u8, startup_document: ?[]const u8, runtime: *ConnectionRuntime, io: std.Io) !void {
     const Win32 = cc.platform.win32;
 
-    const win = try Win32.Window.open(gpa, 960, 720, "Reinked");
+    const win = try Win32.Window.open(gpa, 960, 720, "Comic Chat");
     defer win.deinit();
     var view = try cc.client.view.View.init(gpa, win.width, win.height);
     defer view.deinit();
@@ -3675,7 +3675,7 @@ fn deliverDesktopNotification(window: anytype, gpa: std.mem.Allocator, state: *C
     const message = state.desktop_notification orelse return;
     defer gpa.free(message);
     state.desktop_notification = null;
-    if (comptime @hasDecl(@TypeOf(window.*), "notify")) window.notify(gpa, "Reinked", message) catch {};
+    if (comptime @hasDecl(@TypeOf(window.*), "notify")) window.notify(gpa, "Comic Chat", message) catch {};
 }
 
 fn containsIgnoreCase(items: []const []u8, needle: []const u8) bool {
@@ -3804,6 +3804,11 @@ fn presentWorkspace(
         .unread = item.unread,
     };
     try view.renderTabs(status, &room.transcript, room.editor.text(), room.editor.cursor, room.editor.selection(), tabs[0..workspace.rooms.items.len], workspace.active.?);
+    if (comptime @hasDecl(@TypeOf(win.*), "setTitle")) {
+        var title_buf: [96]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buf, "Comic Chat — {s}", .{room.name}) catch "Comic Chat";
+        win.setTitle(title) catch {};
+    }
     try win.present(view.pixels(), view.width(), view.height());
 }
 

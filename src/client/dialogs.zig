@@ -79,7 +79,7 @@ pub const FieldKind = enum { text, password, choice, list, preview, readonly };
 pub const Field = struct { label: []const u8, hint: []const u8 = "", kind: FieldKind = .text };
 
 pub const specs = [_]Spec{
-    .{ .id = .about, .resource = "IDD_ABOUTBOX", .title = "About Reinked", .group = .files, .source_w = 279, .source_h = 137 },
+    .{ .id = .about, .resource = "IDD_ABOUTBOX", .title = "About Comic Chat", .group = .files, .source_w = 279, .source_h = 137 },
     .{ .id = .room_list, .resource = "IDD_ROOMLIST", .title = "Room List", .group = .rooms, .source_w = 400, .source_h = 255 },
     .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Settings", .group = .application, .source_w = 360, .source_h = 300 },
     .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "Personal Profile", .group = .connection, .source_w = 252, .source_h = 218 },
@@ -233,7 +233,7 @@ pub fn fields(id: Id) []const Field {
         .connection_features => &.{ .{ .label = "Transport", .kind = .readonly }, .{ .label = "Authentication", .kind = .readonly }, .{ .label = "IRCX", .kind = .readonly }, .{ .label = "Enabled IRCv3 capabilities", .kind = .readonly } },
         .motd => &.{.{ .label = "Message of the day", .hint = "Server supplied", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room" }, .{ .label = "Invitation note" } },
-        .about => &.{ .{ .label = "Reinked", .hint = "Portable Zig client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later", .kind = .readonly } },
+        .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Channel", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "For example TOPIC,ONJOIN" }, .{ .label = "Value", .hint = "Empty deletes when setting" }, .{ .label = "Action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Nickname mask", .hint = "*!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
         .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "CHANNEL, MEMBER, SERVER, CONNECTION, SOCKET or USER" }, .{ .label = "Mask", .hint = "Optional" } },
