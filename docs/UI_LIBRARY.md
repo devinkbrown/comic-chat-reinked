@@ -28,7 +28,9 @@ visual contract.
   inside. Chrome never redraws balloons or figures. An empty conversation still
   routes through `strip.render` and only overlays a caption balloon. At minimum
   window sizes the caption collapses to a compact instruction instead of
-  overflowing the available buffer.
+  overflowing the available buffer. Structural chrome strokes stay at least
+  two framebuffer pixels (`ui.stroke`) so nearest-neighbour 2x/3x HiDPI scale
+  keeps masthead rules, page ticks, and plate frames readable.
 - Shell chrome is an ink masthead, paper tool rack, playbill inspector headers,
   and a caption-box composer. Dialogs use the same masthead as the application.
 - Comic pages default to four panels across. The room strip exposes an
@@ -121,7 +123,7 @@ and disabled behavior. New screens should compose the existing primitives:
   `DialogLayout`
 - `drawTextSelection`, `drawTextCaret`, `drawTextOverflowMark`, and
   `drawBrowseButton` for editable field adornments
-- `drawBrandMark`, `drawPageWell`, `drawInkChip`, `drawMemberRailSurface`, `drawStatusIdentity`, and
+- `drawBrandMark`, `drawPageWell`, `drawInkChip`, `drawInkPlate`, `drawInkRule`, `drawMemberRailSurface`, `drawStatusIdentity`, and
   `drawPreviewChoiceCard` for shell identity, the printed page well, playbill chips, and compact client surfaces
 - `drawAppBrand`, `drawPaneCountHeader`, and `drawDismissHint` for stable
   shell identity, inspector headers, and temporary-popover keyboard guidance

@@ -174,14 +174,14 @@ pub fn fields(id: Id) []const Field {
     return switch (id) {
         .setup, .servers => &.{ .{ .label = "Server", .hint = "Secure IRC endpoint" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "Security", .hint = "Verified TLS", .kind = .choice } },
         .settings => &.{
-            .{ .label = "Color theme", .kind = .choice },
-            .{ .label = "Accent color", .kind = .choice },
-            .{ .label = "Contrast", .kind = .choice },
-            .{ .label = "Conversation view", .kind = .choice },
-            .{ .label = "Panels across", .kind = .choice },
-            .{ .label = "Member pane", .kind = .choice },
-            .{ .label = "Member layout", .kind = .choice },
-            .{ .label = "Status details", .kind = .choice },
+            .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
+            .{ .label = "Accent color", .hint = "Vermillion, violet, or forest", .kind = .choice },
+            .{ .label = "Contrast", .hint = "Ink weight on chrome", .kind = .choice },
+            .{ .label = "Conversation view", .hint = "Sunday page or transcript", .kind = .choice },
+            .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
+            .{ .label = "Member pane", .hint = "CAST rail visibility", .kind = .choice },
+            .{ .label = "Member layout", .hint = "Portraits or compact list", .kind = .choice },
+            .{ .label = "Status details", .hint = "Activity panel density", .kind = .choice },
         },
         .personal => &.{ .{ .label = "Profile text" }, .{ .label = "Display name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
         .character => &.{
