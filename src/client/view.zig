@@ -24,34 +24,12 @@ const Canvas = canvas_mod.Canvas;
 const Rect = geometry.Rect;
 const TextSelection = input_mod.Editor.Selection;
 
-/// The desktop presentation defaults to the generated HD avatar family. The
-/// source-faithful comic pipeline still resolves its historical asset names in
-/// `strip`, so this boundary never alters source raster behavior.
+/// The desktop presentation defaults to the generated Color avatar family.
+/// `strip.avatarByName("anna")` stays on testdata for Microsoft goldens;
+/// this boundary remaps leftover bare names so CAST / bodycam / the live
+/// comic page are never 1-bit ink.
 fn displayAvatarByName(name: []const u8) ?[]const u8 {
-    const eql = std.ascii.eqlIgnoreCase;
-    if (eql(name, "anna")) return strip.avatarByName("anna hd");
-    if (eql(name, "armando")) return strip.avatarByName("armando hd");
-    if (eql(name, "bolo")) return strip.avatarByName("bolo hd");
-    if (eql(name, "cro")) return strip.avatarByName("cro hd");
-    if (eql(name, "dan")) return strip.avatarByName("dan hd");
-    if (eql(name, "denise")) return strip.avatarByName("denise hd");
-    if (eql(name, "hugh")) return strip.avatarByName("hugh hd");
-    if (eql(name, "jordan")) return strip.avatarByName("jordan hd");
-    if (eql(name, "kevin")) return strip.avatarByName("kevin hd");
-    if (eql(name, "kwensa")) return strip.avatarByName("kwensa hd");
-    if (eql(name, "lance")) return strip.avatarByName("lance hd");
-    if (eql(name, "lynnea")) return strip.avatarByName("lynnea hd");
-    if (eql(name, "margaret")) return strip.avatarByName("margaret hd");
-    if (eql(name, "maynard")) return strip.avatarByName("maynard hd");
-    if (eql(name, "mike")) return strip.avatarByName("mike hd");
-    if (eql(name, "rebecca")) return strip.avatarByName("rebecca hd");
-    if (eql(name, "sage")) return strip.avatarByName("sage hd");
-    if (eql(name, "scotty")) return strip.avatarByName("scotty hd");
-    if (eql(name, "susan")) return strip.avatarByName("susan hd");
-    if (eql(name, "tiki")) return strip.avatarByName("tiki hd");
-    if (eql(name, "tongtyed")) return strip.avatarByName("tongtyed hd");
-    if (eql(name, "xeno")) return strip.avatarByName("xeno hd");
-    return strip.avatarByName(name);
+    return strip.avatarByName(session.colorCounterpart(name));
 }
 
 pub const min_width: u32 = 640;
@@ -1345,8 +1323,8 @@ pub const View = struct {
                 const gallery = characterGalleryRect(dialog_layout, self.dialog_first_field);
                 const family = characterFamilyRect(gallery);
                 const cards = characterGalleryCardsRect(gallery);
-                const family_labels = [_][]const u8{ "HD characters", "Color characters", "Original characters" };
-                const family_ids = [_][]const u8{ "dialog-character-family-hd", "dialog-character-family-color", "dialog-character-family-original" };
+                const family_labels = [_][]const u8{ "Color characters", "HD characters", "Original characters" };
+                const family_ids = [_][]const u8{ "dialog-character-family-color", "dialog-character-family-hd", "dialog-character-family-original" };
                 if (family.h > 0) for (family_labels, 0..) |label, index| snapshot.append(.{
                     .id = family_ids[index],
                     .role = .button,
@@ -1385,7 +1363,7 @@ pub const View = struct {
         for (transcript.roster.items, 0..) |member, index| title_roster[index] = .{
             .identity = member.nick,
             .display_name = member.nick,
-            .avatar = member.avatar,
+            .avatar = session.colorCounterpart(member.avatar),
             .is_self = member.is_self,
             .sends = member.sends,
             .departed = member.departed,
@@ -1412,12 +1390,12 @@ pub const View = struct {
             for (line.talk_targets, 0..) |target, target_index| targets[target_index] = .{
                 .identity = target.nick,
                 .display_name = target.nick,
-                .avatar = target.avatar,
+                .avatar = session.colorCounterpart(target.avatar),
             };
             lines[i] = .{
                 .identity = line.nick,
                 .display_name = line.nick,
-                .avatar = line.avatar,
+                .avatar = session.colorCounterpart(line.avatar),
                 .text = line.text,
                 .formatting = line.formatting,
                 .pose_text = line.pose_text,
@@ -1427,7 +1405,7 @@ pub const View = struct {
             };
         }
 
-        const backdrop = dialogBackgroundByName(transcript.resolvedBackdrop()) orelse dialogBackgroundByName("field").?;
+        const backdrop = dialogBackgroundByName(transcript.resolvedBackdrop()) orelse dialogBackgroundByName("color apartment").?;
         var page = try strip.renderWithOptions(self.gpa, lines, .{
             .title_roster = title_roster,
             .backdrop = backdrop,
@@ -2811,7 +2789,7 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
             const family_start = @divTrunc(selected_index, family_len) * family_len;
             const family_index = selected_index - family_start;
             const family_rect = characterFamilyRect(rect);
-            if (family_rect.h > 0) ui.drawSegmentedChoice(c, family_rect, &.{ "HD", "Color", "Original" }, @divTrunc(selected_index, family_len));
+            if (family_rect.h > 0) ui.drawSegmentedChoice(c, family_rect, &.{ "Color", "HD", "Original" }, @divTrunc(selected_index, family_len));
             const indices = [_]usize{
                 family_start + (family_index + family_len - 1) % family_len,
                 selected_index,
@@ -2834,7 +2812,7 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
             }
         },
         .background => {
-            const name = if (selected.len == 0) "Field" else selected;
+            const name = if (selected.len == 0) "Color Apartment" else selected;
             const data = dialogBackgroundByName(name) orelse return;
             var image = bgb.decodeBackground(std.heap.page_allocator, data) catch return;
             defer image.deinit(std.heap.page_allocator);
@@ -3167,12 +3145,12 @@ test "character gallery browses adjacent cast members and previews expression" {
     var view = try View.init(std.testing.allocator, 960, 720);
     defer view.deinit();
     view.openDialog(.character);
-    try std.testing.expectEqualStrings("Anna HD", view.dialogValueAt(0));
+    try std.testing.expectEqualStrings("Anna Color", view.dialogValueAt(0));
     const layout = dialogLayout(view.width(), view.height(), dialogs.get(.character));
     const gallery = characterGalleryRect(layout, 0);
     const cards = characterGalleryCardsRect(gallery);
     _ = view.handlePointer(.{ .kind = .down, .x = cards.right() - 8, .y = cards.y + 12, .button = .primary }, 0, 0);
-    try std.testing.expectEqualStrings("Armando HD", view.dialogValueAt(0));
+    try std.testing.expectEqualStrings("Armando Color", view.dialogValueAt(0));
     const family = characterFamilyRect(gallery);
     _ = view.handlePointer(.{ .kind = .down, .x = family.x + @divTrunc(family.w * 2, 3) + 8, .y = family.y + 10, .button = .primary }, 0, 0);
     try std.testing.expectEqualStrings("Armando Original", view.dialogValueAt(0));
@@ -3459,6 +3437,16 @@ test "contain-center portrait blit keeps a wide mugshot off the card footer" {
     try std.testing.expectEqual(ui.current.layer, canvas.px[0]);
     try std.testing.expectEqual(ui.current.layer, canvas.px[8 * 8 - 1]);
     try std.testing.expect(canvas.px[8 * 3 + 3] != ui.current.layer);
+}
+
+test "bare historical names remap to Color for chrome and stay testdata in strip" {
+    const testdata = strip.avatarByName("anna").?;
+    const color = strip.avatarByName("anna color").?;
+    const remapped = displayAvatarByName("anna").?;
+    try std.testing.expect(testdata.ptr != color.ptr);
+    try std.testing.expectEqual(color.ptr, remapped.ptr);
+    try std.testing.expectEqualStrings("anna color", session.colorCounterpart("anna"));
+    try std.testing.expectEqualStrings("anna original", session.colorCounterpart("anna original"));
 }
 
 test "every selectable color avatar decodes to a visibly colored gallery portrait" {

@@ -162,7 +162,7 @@ test "conversation archive round trips visible text, avatar, and balloon mode" {
     defer decoded.deinit();
     try std.testing.expectEqualStrings("hello\nworld", decoded.lines.items[0].text);
     try std.testing.expectEqual(udi.bm_think, decoded.lines.items[0].modes);
-    try std.testing.expectEqualStrings("anna", decoded.roster.items[0].avatar);
+    try std.testing.expectEqualStrings("anna color", decoded.roster.items[0].avatar);
 }
 
 test "locator codec keeps source document separation" {

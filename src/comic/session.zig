@@ -68,9 +68,12 @@ pub fn ctcpAwayMessage(text: []const u8) ?[]const u8 {
 }
 
 /// Return the canonical bundled avatar name used by the renderer.
+/// Bare historical names (`anna`) resolve to the Color family so the live
+/// client is never stuck on 1-bit testdata. Explicit `hd` / `color` /
+/// `original` suffixes stay as selected.
 pub fn bundledAvatarByName(name: []const u8) ?[]const u8 {
-    for (avatars) |avatar| {
-        if (std.ascii.eqlIgnoreCase(avatar, name)) return avatar;
+    for (avatars, 0..) |avatar, index| {
+        if (std.ascii.eqlIgnoreCase(avatar, name)) return default_avatars[index];
     }
     // The live source control is a compact token (`AnnaColor.`), while the
     // portable renderer keeps family display names readable (`anna color`).
@@ -96,6 +99,12 @@ pub fn bundledAvatarByName(name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Visible default for chrome and the live comic page. Bare testdata names
+/// become Color; family suffixes are unchanged.
+pub fn colorCounterpart(name: []const u8) []const u8 {
+    return bundledAvatarByName(name) orelse name;
+}
+
 /// Return the source-era avatar token suitable for `# Appears as ...`.
 ///
 /// Generated families intentionally use display names such as `anna color`,
@@ -112,6 +121,10 @@ test "generated avatar families announce their legacy-compatible base name" {
     try std.testing.expectEqualStrings("Tiki HD", avatarAnnouncementName("Tiki HD").?);
     try std.testing.expectEqualStrings("xeno original", avatarAnnouncementName("xeno original").?);
     try std.testing.expectEqualStrings("anna color", bundledAvatarByName("AnnaColor").?);
+    try std.testing.expectEqualStrings("anna color", bundledAvatarByName("anna").?);
+    try std.testing.expectEqualStrings("anna color", colorCounterpart("anna"));
+    try std.testing.expectEqualStrings("anna original", colorCounterpart("anna original"));
+    try std.testing.expectEqualStrings("anna hd", colorCounterpart("anna hd"));
     try std.testing.expect(avatarAnnouncementName("not a bundled avatar") == null);
 }
 
@@ -892,17 +905,17 @@ test "avatarForNick is deterministic, case-insensitive, and always valid" {
 
 test "avatar announcement parser is strict and canonicalizes bundled names" {
     try std.testing.expectEqualStrings(
-        "anna",
+        "anna color",
         parseAvatarAnnouncement("# Appears as AnNa").avatar,
     );
     try std.testing.expectEqualStrings(
-        "xeno",
+        "xeno color",
         parseAvatarAnnouncement("# Appears as XENO.https://example.invalid/xeno.avb").avatar,
     );
     try std.testing.expectEqualStrings("Anna HD", parseAvatarAnnouncement("# Appears as Anna HD").avatar);
     try std.testing.expectEqualStrings("Xeno Color", parseAvatarAnnouncement("# Appears as Xeno Color").avatar);
     try std.testing.expectEqualStrings("Tiki Original", parseAvatarAnnouncement("# Appears as Tiki Original").avatar);
-    try std.testing.expectEqualStrings("anna", parseAvatarAnnouncement("# Appears as Anna.").avatar);
+    try std.testing.expectEqualStrings("anna color", parseAvatarAnnouncement("# Appears as Anna.").avatar);
     try std.testing.expectEqualStrings("anna color", parseAvatarAnnouncement("# Appears as AnnaColor.").avatar);
     try std.testing.expect(parseAvatarAnnouncement("# Appears as none") == .none);
     try std.testing.expect(parseAvatarAnnouncement("hello") == .not_control);
@@ -920,11 +933,11 @@ test "transcript consumes announcements and resolves speakers and talk targets" 
 
     try transcript.add("Bob", "before announcement");
     const historical_avatar = transcript.lines.items[0].avatar;
-    const announcement = if (std.mem.eql(u8, historical_avatar, "xeno"))
+    const announcement = if (std.mem.eql(u8, historical_avatar, "xeno color"))
         "# Appears as ANNA"
     else
         "# Appears as XENO";
-    const selected_avatar: []const u8 = if (std.mem.eql(u8, historical_avatar, "xeno")) "anna" else "xeno";
+    const selected_avatar: []const u8 = if (std.mem.eql(u8, historical_avatar, "xeno color")) "anna color" else "xeno color";
     var mutable_nick = [_]u8{ 'B', 'o', 'b' };
     try std.testing.expect(try transcript.consumeAvatarAnnouncement(&mutable_nick, announcement));
     @memset(&mutable_nick, 'x');
@@ -1030,7 +1043,7 @@ test "live roster follows NAMES membership speech and current avatars" {
 
     const first_avatar = transcript.resolvedAvatar("Alice");
     try transcript.add("Alice", "before");
-    const replacement: []const u8 = if (std.mem.eql(u8, first_avatar, "anna")) "xeno" else "anna";
+    const replacement: []const u8 = if (std.mem.eql(u8, first_avatar, "anna color")) "xeno color" else "anna color";
     var announcement_buf: [64]u8 = undefined;
     const announcement = try std.fmt.bufPrint(
         &announcement_buf,
