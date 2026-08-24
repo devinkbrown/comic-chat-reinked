@@ -48,13 +48,20 @@ Onyx TLS IRC server, without redesigning desktop UI.
 
 ## Acceptance criteria
 
-- [ ] Real correctness/reliability bugs in owned backend surfaces are fixed, not merely documented
-- [ ] Focused tests pin each closed gap
+- [x] Real correctness/reliability bugs in owned backend surfaces are fixed, not merely documented
+- [x] Focused tests pin each closed gap
 - [ ] `zig build test` passes
 - [ ] `zig build` linux/amd64 still builds
 - [ ] `git diff --check` clean
 - [ ] PR lists what was fixed and honest leftovers
-- [ ] No desktop UI redesign
+- [x] No desktop UI redesign
+
+## Wave 2 leftovers in scope
+
+- Client-owned Restoration snapshot survives reconnect (`take`/`adopt` + 001 replay)
+- LIST vs LISTX atoms, PROP lists, ACCESS levels/duration/mask
+- Case-insensitive SOUND/ACTION, BDrop2/legacy skip, HeresInfo request gate
+- Incoming 818/PROP CLIENT `bk` applies bundled backdrop
 
 ## Verification
 

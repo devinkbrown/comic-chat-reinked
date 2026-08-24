@@ -322,6 +322,7 @@ pub const Client = struct {
     logical_line: ?[]u8 = null,
     sts_upgrade_port: ?u16 = null,
     typing_targets: std.ArrayList(TypingTarget) = .empty,
+    restoration: ?policy.Restoration = null,
     rx: [8192]u8 = undefined,
 
     pub fn connect(gpa: std.mem.Allocator, host: []const u8, port: u16) !Client {
@@ -372,6 +373,7 @@ pub const Client = struct {
             registration.deinit();
         }
         if (self.features) |*state| state.deinit();
+        if (self.restoration) |*restoration| restoration.deinit();
         self.aggregator.deinit();
         self.tx.deinit();
         for (self.typing_targets.items) |entry| self.gpa.free(entry.target);
@@ -473,6 +475,7 @@ pub const Client = struct {
             try self.appendCommand("JOIN", &.{ channel, key });
         if (self.capabilityEnabled("no-implicit-names") or self.capabilityEnabled("draft/no-implicit-names"))
             try self.appendCommand("NAMES", &.{channel});
+        try self.ownedRestoration().rememberJoin(channel, key, null);
         try self.queueOut(.interactive, true, false);
     }
 
@@ -489,11 +492,13 @@ pub const Client = struct {
             count += 1;
         }
         try self.appendCommand("CREATE", params[0..count]);
+        try self.ownedRestoration().rememberJoin(channel, key, null);
         try self.queueOut(.interactive, true, false);
     }
 
     pub fn part(self: *Client, channel: []const u8) !void {
         try self.appendCommand("PART", &.{channel});
+        if (self.restoration) |*restoration| restoration.forget(channel);
         try self.queueOut(.interactive, true, false);
     }
 
@@ -682,27 +687,34 @@ pub const Client = struct {
     }
 
     /// Microsoft uses LISTX for the extended room browser when IRCX is live.
+    /// Ordinary LIST never accepts invented LISTX query atoms (`N=`, `>10`).
     pub fn listRooms(self: *Client, filter: []const u8, limit: []const u8, ircx_data: bool) !void {
-        const command = if (ircx_data) "LISTX" else "LIST";
         if (!ircx_data) {
-            if (filter.len == 0) try self.appendCommand(command, &.{}) else try self.appendCommand(command, &.{filter});
+            if (filter.len != 0 and !validListMask(filter)) return error.InvalidIrcParameter;
+            if (filter.len == 0) try self.appendCommand("LIST", &.{}) else try self.appendCommand("LIST", &.{filter});
         } else if (filter.len == 0 and limit.len == 0) {
-            try self.appendCommand(command, &.{});
+            try self.appendCommand("LISTX", &.{});
+        } else if (filter.len == 0) {
+            if (!validListxLimit(limit)) return error.InvalidIrcParameter;
+            try self.appendCommand("LISTX", &.{limit});
         } else if (limit.len == 0) {
-            try self.appendCommand(command, &.{filter});
+            if (!validListxQuery(filter)) return error.InvalidIrcParameter;
+            try self.appendCommand("LISTX", &.{filter});
         } else {
-            try self.appendCommand(command, &.{ filter, limit });
+            if (!validListxQuery(filter) or !validListxLimit(limit)) return error.InvalidIrcParameter;
+            try self.appendCommand("LISTX", &.{ filter, limit });
         }
         try self.queueOut(.interactive, true, false);
     }
 
     pub fn queryProperty(self: *Client, entity: []const u8, property: []const u8) !void {
-        if (property.len == 0) return error.InvalidIrcParameter;
+        if (!validPropertyList(property)) return error.InvalidIrcParameter;
         try self.appendCommand("PROP", &.{ entity, property });
         try self.queueOut(.interactive, true, false);
     }
 
     pub fn setProperty(self: *Client, entity: []const u8, property: []const u8, value: []const u8) !void {
+        if (!validPropertyList(property)) return error.InvalidIrcParameter;
         try self.appendCommandTrailing("PROP", &.{ entity, property, value });
         try self.queueOut(.interactive, true, false);
     }
@@ -716,6 +728,7 @@ pub const Client = struct {
         // IRCX draft 04 §5.1 names the removal operation `DELETE` (not the
         // convenient but non-standard abbreviation `DEL`). Keep this exact so
         // draft-conforming servers do not reject an otherwise valid ACL edit.
+        if (!validAccessLevel(level) or !validAccessMask(mask)) return error.InvalidIrcParameter;
         try self.appendCommand("ACCESS", &.{ channel, "DELETE", level, mask });
         try self.queueOut(.interactive, true, false);
     }
@@ -724,6 +737,7 @@ pub const Client = struct {
         var params: [3][]const u8 = .{ channel, "CLEAR", "" };
         var count: usize = 2;
         if (level.len != 0) {
+            if (!validAccessLevel(level)) return error.InvalidIrcParameter;
             params[count] = level;
             count += 1;
         }
@@ -732,6 +746,8 @@ pub const Client = struct {
     }
 
     pub fn accessAdd(self: *Client, channel: []const u8, level: []const u8, mask: []const u8, duration: []const u8, reason: []const u8) !void {
+        if (!validAccessLevel(level) or !validAccessMask(mask) or !validAccessDuration(duration))
+            return error.InvalidIrcParameter;
         var params: [7][]const u8 = .{ channel, "ADD", level, mask, "", "", "" };
         var count: usize = 4;
         if (duration.len != 0) {
@@ -1298,6 +1314,57 @@ pub const Client = struct {
         return false;
     }
 
+    pub fn hasRestorationTargets(self: *const Client) bool {
+        return if (self.restoration) |restoration| restoration.targetCount() != 0 else false;
+    }
+
+    pub fn takeRestoration(self: *Client, dest: *policy.Restoration) void {
+        if (self.restoration) |*restoration| restoration.moveTo(dest);
+    }
+
+    pub fn adoptRestoration(self: *Client, source: *policy.Restoration) void {
+        if (source.targetCount() == 0) return;
+        self.ownedRestoration().moveFrom(source);
+    }
+
+    fn ownedRestoration(self: *Client) *policy.Restoration {
+        if (self.restoration == null) self.restoration = policy.Restoration.init(self.gpa);
+        return &self.restoration.?;
+    }
+
+    fn queueRestoration(self: *Client) !void {
+        const restoration = if (self.restoration) |*value| value else return;
+        if (restoration.targetCount() == 0) return;
+        const history_limit: u16 = if (self.capabilityEnabled("draft/chathistory")) 100 else 0;
+        try restoration.appendCommands(&self.out, self.gpa, history_limit);
+        try self.queueOut(.interactive, true, false);
+    }
+
+    fn noteHistoryCursor(self: *Client, msg: *const Message) void {
+        const restoration = if (self.restoration) |*value| value else return;
+        if (restoration.targetCount() == 0) return;
+        if (!std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") and !std.ascii.eqlIgnoreCase(msg.command, "NOTICE"))
+            return;
+        const target = msg.param(0) orelse return;
+        var found = false;
+        for (restoration.targets.items) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.channel, target)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return;
+        var buffer: [520]u8 = undefined;
+        const reference = if (msg.tag("msgid")) |tag| blk: {
+            const raw = tag.raw_value orelse return;
+            break :blk std.fmt.bufPrint(&buffer, "msgid={s}", .{raw}) catch return;
+        } else if (msg.tag("time")) |tag| blk: {
+            const raw = tag.raw_value orelse return;
+            break :blk std.fmt.bufPrint(&buffer, "timestamp={s}", .{raw}) catch return;
+        } else return;
+        restoration.remember(target, reference) catch {};
+    }
+
     fn requireCapability(self: *const Client, name: []const u8) !void {
         if (!self.capabilityEnabled(name)) return error.CapabilityNotEnabled;
     }
@@ -1515,9 +1582,13 @@ pub const Client = struct {
                     continue;
                 }
                 try registration.observeSessionCredential(msg);
-                if (std.mem.eql(u8, msg.command, "001") and try registration.sendSessionCommands(&self.out))
-                    try self.queueOut(.control, false, true);
+                if (std.mem.eql(u8, msg.command, "001")) {
+                    if (try registration.sendSessionCommands(&self.out))
+                        try self.queueOut(.control, false, true);
+                    try self.queueRestoration();
+                }
             }
+            self.noteHistoryCursor(&msg);
 
             if (try self.aggregator.ingest(line)) {
                 while (self.aggregator.takeCompletedLabel()) |label| {
@@ -1575,6 +1646,63 @@ fn validIrcxDataTag(tag: []const u8) bool {
 
 fn validIrcAtom(value: []const u8) bool {
     return value.len != 0 and std.mem.indexOfAny(u8, value, " \r\n\x00:") == null;
+}
+
+/// Ordinary LIST accepts a channel mask, not invented LISTX query atoms.
+fn validListMask(value: []const u8) bool {
+    if (value.len == 0 or std.mem.indexOfAny(u8, value, " \r\n\x00") != null) return false;
+    if (std.mem.indexOfScalar(u8, value, '=') != null) return false;
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        if (part[0] == '>' or part[0] == '<') return false;
+    }
+    return true;
+}
+
+fn validListxQuery(value: []const u8) bool {
+    return value.len != 0 and value.len <= 510 and std.mem.indexOfAny(u8, value, " \r\n\x00") == null;
+}
+
+fn validListxLimit(value: []const u8) bool {
+    if (value.len == 0 or value.len > 10) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
+}
+
+fn validPropertyList(value: []const u8) bool {
+    if (value.len == 0 or value.len > 510) return false;
+    if (std.mem.eql(u8, value, "*")) return true;
+    if (std.mem.indexOfAny(u8, value, " \r\n\x00") != null) return false;
+    var parts = std.mem.splitScalar(u8, value, ',');
+    var seen = false;
+    while (parts.next()) |part| {
+        if (part.len == 0 or part.len > 64) return false;
+        for (part) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-' and byte != '.') return false;
+        }
+        seen = true;
+    }
+    return seen;
+}
+
+fn validAccessLevel(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "DENY") or
+        std.ascii.eqlIgnoreCase(value, "GRANT") or
+        std.ascii.eqlIgnoreCase(value, "VOICE") or
+        std.ascii.eqlIgnoreCase(value, "HOST") or
+        std.ascii.eqlIgnoreCase(value, "OWNER");
+}
+
+fn validAccessMask(value: []const u8) bool {
+    return value.len != 0 and value.len <= 256 and std.mem.indexOfAny(u8, value, " \r\n\x00") == null;
+}
+
+fn validAccessDuration(value: []const u8) bool {
+    if (value.len == 0) return true;
+    if (value.len > 10) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
 }
 
 fn validIrcxAuthSequence(value: []const u8) bool {
@@ -2204,6 +2332,7 @@ test "Microsoft comment controls retain the source PRIVMSG form on IRCX" {
         .aggregator = features_mod.Aggregator.init(gpa, .{}),
     };
     defer {
+        if (client.restoration) |*restoration| restoration.deinit();
         client.aggregator.deinit();
         client.tx.deinit();
         client.framer.deinit();
@@ -2307,6 +2436,7 @@ test "IRCX workflow commands follow the draft wire grammar" {
         .aggregator = features_mod.Aggregator.init(gpa, .{}),
     };
     defer {
+        if (client.restoration) |*restoration| restoration.deinit();
         client.aggregator.deinit();
         client.tx.deinit();
         client.framer.deinit();
@@ -2347,6 +2477,100 @@ test "IRCX workflow commands follow the draft wire grammar" {
     };
     try std.testing.expectEqual(expected.len, client.tx.items.items.len);
     for (expected, client.tx.items.items) |wire, item| try std.testing.expectEqualStrings(wire, item.bytes);
+}
+
+test "LIST ACCESS and PROP reject invented or invalid atoms" {
+    const gpa = std.testing.allocator;
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = irc.LineFramer.init(gpa),
+        .tx = policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = policy.Deadlines.init(0, .{}),
+        .aggregator = features_mod.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    try std.testing.expectError(error.InvalidIrcParameter, client.listRooms("N=#root", "", false));
+    try std.testing.expectError(error.InvalidIrcParameter, client.listRooms("#root,>10", "", false));
+    try client.listRooms("#root,#lobby", "", false);
+    try client.listRooms("", "25", true);
+    try std.testing.expectError(error.InvalidIrcParameter, client.listRooms("", "nope", true));
+    try std.testing.expectError(error.InvalidIrcParameter, client.queryProperty("#root", "TOPIC ONJOIN"));
+    try std.testing.expectError(error.InvalidIrcParameter, client.setProperty("#root", "TOPIC TOPIC", "x"));
+    try client.queryProperty("#root", "*");
+    try std.testing.expectError(error.InvalidIrcParameter, client.accessAdd("#root", "FOUNDER", "anna!*@*", "", ""));
+    try std.testing.expectError(error.InvalidIrcParameter, client.accessAdd("#root", "HOST", "anna !*@*", "", ""));
+    try std.testing.expectError(error.InvalidIrcParameter, client.accessAdd("#root", "HOST", "anna!*@*", "soon", ""));
+    try client.accessAdd("#root", "grant", "anna!*@*", "15", "");
+    try std.testing.expectEqualStrings("LIST #root,#lobby\r\n", client.tx.items.items[0].bytes);
+    try std.testing.expectEqualStrings("LISTX 25\r\n", client.tx.items.items[1].bytes);
+    try std.testing.expectEqualStrings("PROP #root *\r\n", client.tx.items.items[2].bytes);
+    try std.testing.expectEqualStrings("ACCESS #root ADD grant anna!*@* 15\r\n", client.tx.items.items[3].bytes);
+}
+
+test "join and create remember restoration and replay JOIN without chat" {
+    const gpa = std.testing.allocator;
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = irc.LineFramer.init(gpa),
+        .tx = policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = policy.Deadlines.init(0, .{}),
+        .aggregator = features_mod.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    try client.joinWithKey("#locked", "swordfish");
+    try client.create("#new", "+nt", "42", "secret");
+    try std.testing.expect(client.hasRestorationTargets());
+    client.noteHistoryCursor(&message.parse("@msgid=abc :alice PRIVMSG #locked :hello"));
+    try client.part("#new");
+    try std.testing.expect(client.hasRestorationTargets());
+
+    var held = policy.Restoration.init(gpa);
+    defer held.deinit();
+    client.takeRestoration(&held);
+    try std.testing.expect(!client.hasRestorationTargets());
+    try std.testing.expectEqual(@as(usize, 1), held.targetCount());
+    try std.testing.expectEqualStrings("msgid=abc", held.targets.items[0].after.?);
+
+    var replay: std.ArrayList(u8) = .empty;
+    defer replay.deinit(gpa);
+    try held.appendCommands(&replay, gpa, 0);
+    try std.testing.expect(std.mem.indexOf(u8, replay.items, "JOIN #locked swordfish") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replay.items, "NAMES #locked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replay.items, "CHATHISTORY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, replay.items, "PRIVMSG") == null);
+
+    client.adoptRestoration(&held);
+    try std.testing.expect(client.hasRestorationTargets());
+    try client.queueRestoration();
+    const queued = client.tx.items.items[client.tx.items.items.len - 1].bytes;
+    try std.testing.expect(std.mem.indexOf(u8, queued, "JOIN #locked swordfish") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queued, "CHATHISTORY") == null);
 }
 
 test "IRCX tagged data rejects malformed draft tags" {

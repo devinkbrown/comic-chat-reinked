@@ -32,10 +32,7 @@ pub const ctcp_away_prefix = "\x01AWAY";
 /// Unwrap the conventional CTCP ACTION payload emitted by `SlashMeOrThink`.
 /// The slice still borrows from the UDI-stripped wire message.
 pub fn ctcpActionText(text: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, text, ctcp_action_prefix) or
-        text.len <= ctcp_action_prefix.len or text[text.len - 1] != 0x01)
-        return null;
-    return text[ctcp_action_prefix.len .. text.len - 1];
+    return ctcpCommandPayload(text, "ACTION");
 }
 
 pub const SoundControl = struct {
@@ -44,15 +41,36 @@ pub const SoundControl = struct {
 };
 
 pub fn ctcpSound(text: []const u8) ?SoundControl {
-    if (!std.mem.startsWith(u8, text, ctcp_sound_prefix) or text.len <= ctcp_sound_prefix.len or text[text.len - 1] != 0x01)
-        return null;
-    const payload = text[ctcp_sound_prefix.len .. text.len - 1];
-    const separator = std.mem.indexOfScalar(u8, payload, ' ') orelse payload.len;
+    const payload = ctcpCommandPayload(text, "SOUND") orelse return null;
+    const separator = firstUnquotedCtcpSpace(payload) orelse payload.len;
     if (separator == 0) return null;
     return .{
         .name = payload[0..separator],
         .message = if (separator < payload.len) payload[separator + 1 ..] else "",
     };
+}
+
+fn ctcpCommandPayload(text: []const u8, command: []const u8) ?[]const u8 {
+    if (text.len < 2 or text[0] != 0x01 or text[text.len - 1] != 0x01) return null;
+    const body = text[1 .. text.len - 1];
+    if (body.len < command.len or !std.ascii.eqlIgnoreCase(body[0..command.len], command)) return null;
+    if (body.len == command.len) return null;
+    if (body[command.len] != ' ') return null;
+    return body[command.len + 1 ..];
+}
+
+/// Split SOUND on the first raw space. CTCP-quoted spaces are `\x10@` and
+/// must stay inside the filename token until `ctcpUnquote`.
+fn firstUnquotedCtcpSpace(payload: []const u8) ?usize {
+    var index: usize = 0;
+    while (index < payload.len) : (index += 1) {
+        if (payload[index] == 0x10) {
+            if (index + 1 < payload.len) index += 1;
+            continue;
+        }
+        if (payload[index] == ' ') return index;
+    }
+    return null;
 }
 
 /// Microsoft broadcasts `\x01AWAY [message]\x01` to each joined room after
@@ -218,8 +236,8 @@ pub const BackdropControl = union(enum) {
     /// ` BDrop: name` - the legacy compat form sent second by
     /// `ChatSyncBackDrop` for old clients (protsupp.cpp:964-983). The
     /// source applies it only when `name` differs case-insensitively from
-    /// the last BDrop2 base name; this pure parser leaves that comparison
-    /// to the caller.
+    /// the last BDrop2 base name; `Transcript.applyBackdropControl` owns
+    /// that comparison.
     legacy: []const u8,
 };
 
@@ -351,6 +369,7 @@ pub const Transcript = struct {
     lines: std.ArrayList(Line) = .empty,
     roster: std.ArrayList(RosterEntry) = .empty,
     backdrop_storage: ?[]u8 = null,
+    last_bdrop2_base: ?[]u8 = null,
     names_generation: u32 = 0,
     names_sync_active: bool = false,
 
@@ -364,6 +383,7 @@ pub const Transcript = struct {
         for (self.roster.items) |entry| self.gpa.free(entry.nick);
         self.roster.deinit(self.gpa);
         if (self.backdrop_storage) |name| self.gpa.free(name);
+        if (self.last_bdrop2_base) |name| self.gpa.free(name);
     }
 
     pub fn setBackdrop(self: *Transcript, name: []const u8) !void {
@@ -375,6 +395,30 @@ pub const Transcript = struct {
 
     pub fn resolvedBackdrop(self: *const Transcript) []const u8 {
         return self.backdrop_storage orelse "color apartment";
+    }
+
+    /// Consume a parsed `# BDrop2` / `# BDrop` control. A legacy BDrop whose
+    /// name matches the last BDrop2 base is ignored, matching
+    /// `g_szLastBackdropName` in `protsupp.cpp:964-1017`.
+    pub fn applyBackdropControl(self: *Transcript, control: BackdropControl) !bool {
+        switch (control) {
+            .not_control => return false,
+            .empty => return true,
+            .sync => |announcement| {
+                const replacement = try self.gpa.dupe(u8, announcement.base_name);
+                if (self.last_bdrop2_base) |old| self.gpa.free(old);
+                self.last_bdrop2_base = replacement;
+                if (bundledBackdropByName(announcement.base_name)) |name| try self.setBackdrop(name);
+                return true;
+            },
+            .legacy => |name| {
+                if (self.last_bdrop2_base) |base| {
+                    if (std.ascii.eqlIgnoreCase(name, base)) return true;
+                }
+                if (bundledBackdropByName(name)) |bundled| try self.setBackdrop(bundled);
+                return true;
+            },
+        }
     }
 
     /// Resolve a participant through their most recent source announcement,
@@ -1359,6 +1403,24 @@ test "source SOUND control becomes an action box with sender and filename" {
 
     try transcript.addWireMessage("Cro", "\x01SOUND Door\x10@bell.wav come in\x01", false, null);
     try std.testing.expectEqualStrings("Cro come in (Door bell.wav)", transcript.lines.items[2].text);
+
+    try transcript.addWireMessage("Dan", "\x01sound chime quietly\x01", false, null);
+    try std.testing.expectEqualStrings("Dan quietly (chime)", transcript.lines.items[3].text);
+    try transcript.addWireMessage("Eve", "\x01action waves\x01", false, null);
+    try std.testing.expectEqualStrings("Eve waves", transcript.lines.items[4].text);
+    try std.testing.expectEqual(original_page.bm_action, transcript.lines.items[4].modes);
+}
+
+test "legacy BDrop matching the last BDrop2 base does not replace the backdrop" {
+    var transcript = Transcript.init(std.testing.allocator);
+    defer transcript.deinit();
+
+    try std.testing.expect(try transcript.applyBackdropControl(parseBackdropControl(" BDrop2: Volcano.bgb,")));
+    try std.testing.expectEqualStrings("volcano", transcript.resolvedBackdrop());
+    try std.testing.expect(try transcript.applyBackdropControl(parseBackdropControl(" BDrop:  Volcano")));
+    try std.testing.expectEqualStrings("volcano", transcript.resolvedBackdrop());
+    try std.testing.expect(try transcript.applyBackdropControl(parseBackdropControl(" BDrop:  room")));
+    try std.testing.expectEqualStrings("room", transcript.resolvedBackdrop());
 }
 
 test "source AWAY control updates roster without adding a comic line" {

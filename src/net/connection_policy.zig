@@ -331,11 +331,7 @@ pub const Restoration = struct {
     }
 
     pub fn deinit(self: *Restoration) void {
-        for (self.targets.items) |target| {
-            self.gpa.free(target.channel);
-            if (target.key) |value| self.gpa.free(value);
-            if (target.after) |value| self.gpa.free(value);
-        }
+        self.clear();
         self.targets.deinit(self.gpa);
         self.* = undefined;
     }
@@ -387,10 +383,34 @@ pub const Restoration = struct {
         }
     }
 
-    /// Idempotent restoration only: JOIN, explicit NAMES, then bounded history
-    /// catch-up. Pending PRIVMSG content is intentionally absent.
+    pub fn targetCount(self: *const Restoration) usize {
+        return self.targets.items.len;
+    }
+
+    /// Move remembered JOIN/history atoms into `dest`, leaving this store empty.
+    pub fn moveTo(self: *Restoration, dest: *Restoration) void {
+        dest.clear();
+        dest.targets = self.targets;
+        self.targets = .empty;
+    }
+
+    pub fn moveFrom(self: *Restoration, source: *Restoration) void {
+        source.moveTo(self);
+    }
+
+    pub fn clear(self: *Restoration) void {
+        for (self.targets.items) |target| {
+            self.gpa.free(target.channel);
+            if (target.key) |value| self.gpa.free(value);
+            if (target.after) |value| self.gpa.free(value);
+        }
+        self.targets.clearRetainingCapacity();
+    }
+
+    /// Idempotent restoration only: JOIN, explicit NAMES, then optional bounded
+    /// history catch-up. `history_limit == 0` skips CHATHISTORY. Pending
+    /// PRIVMSG content is intentionally absent.
     pub fn appendCommands(self: *const Restoration, out: *std.ArrayList(u8), gpa: std.mem.Allocator, history_limit: u16) !void {
-        if (history_limit == 0) return error.InvalidHistoryLimit;
         for (self.targets.items) |target| {
             var join = message.Message{ .command = "JOIN" };
             join.params[0] = target.channel;
@@ -405,7 +425,7 @@ pub const Restoration = struct {
             names.params[0] = target.channel;
             names.param_count = 1;
             try message.write(out, gpa, names);
-            if (target.after) |after| {
+            if (history_limit != 0) if (target.after) |after| {
                 var limit_buffer: [8]u8 = undefined;
                 const limit = try std.fmt.bufPrint(&limit_buffer, "{d}", .{history_limit});
                 var history = message.Message{ .command = "CHATHISTORY" };
@@ -415,7 +435,7 @@ pub const Restoration = struct {
                 history.params[3] = limit;
                 history.param_count = 4;
                 try message.write(out, gpa, history);
-            }
+            };
         }
     }
 };
@@ -577,8 +597,14 @@ test "reconnect jitter, happy eyeballs, restore, and proxy codecs" {
     try std.testing.expect(std.mem.indexOf(u8, commands.items, "JOIN #locked swordfish") != null);
     restore.forget("#locked");
     commands.clearRetainingCapacity();
-    try restore.appendCommands(&commands, gpa, 100);
+    try restore.appendCommands(&commands, gpa, 0);
     try std.testing.expect(std.mem.indexOf(u8, commands.items, "JOIN #locked") == null);
+    try std.testing.expect(std.mem.indexOf(u8, commands.items, "CHATHISTORY") == null);
+    var moved = Restoration.init(gpa);
+    defer moved.deinit();
+    restore.moveTo(&moved);
+    try std.testing.expectEqual(@as(usize, 0), restore.targetCount());
+    try std.testing.expectEqual(@as(usize, 1), moved.targetCount());
 
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(gpa);

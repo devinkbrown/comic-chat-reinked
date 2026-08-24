@@ -1025,7 +1025,7 @@ fn runChatComic(
             const wire = msg.param(2) orelse continue;
             if (!std.ascii.eqlIgnoreCase(target, channel) or !std.mem.eql(u8, kind, "CCUDI1")) continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, &client, &transcript, who, wire, nick, target, metadata_state.ircx_data, null)) continue;
+            if (try processComicControl(io, &client, &transcript, who, wire, nick, target, metadata_state.ircx_data, null, &metadata_state)) continue;
             _ = cc.proto.udi.parseAnnotation(wire) catch continue;
             try metadata_state.rememberUdi(gpa, target, who, wire);
         } else if (std.mem.eql(u8, msg.command, "PRIVMSG")) {
@@ -1033,7 +1033,7 @@ fn runChatComic(
             if (!std.ascii.eqlIgnoreCase(target, channel)) continue;
             const text = msg.param(1) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
-            if (try processComicControl(io, &client, &transcript, who, text, nick, target, metadata_state.ircx_data, null)) {
+            if (try processComicControl(io, &client, &transcript, who, text, nick, target, metadata_state.ircx_data, null, &metadata_state)) {
                 metadata_state.discardPendingUdi(gpa, target, who);
                 continue;
             }
@@ -1271,6 +1271,7 @@ const ChatState = struct {
     avatar_announced: bool = false,
     ircx_data: bool = false,
     pending_udi: std.ArrayList(PendingUdi) = .empty,
+    pending_profiles: std.ArrayList([]u8) = .empty,
     pending_dcc: ?PendingDcc = null,
     transfer: ?DccTransfer = null,
     last_notification_poll_ms: u64 = 0,
@@ -1284,6 +1285,8 @@ const ChatState = struct {
     fn deinit(self: *ChatState, gpa: std.mem.Allocator) void {
         for (self.pending_udi.items) |*entry| entry.deinit(gpa);
         self.pending_udi.deinit(gpa);
+        for (self.pending_profiles.items) |nick| gpa.free(nick);
+        self.pending_profiles.deinit(gpa);
         if (self.pending_dcc) |*offer| offer.deinit(gpa);
         if (self.transfer) |*transfer| transfer.deinit();
         freeStringList(gpa, &self.notification_current);
@@ -1326,6 +1329,26 @@ const ChatState = struct {
                 return self.pending_udi.orderedRemove(index);
         }
         return null;
+    }
+
+    fn rememberProfileRequest(self: *ChatState, gpa: std.mem.Allocator, nick: []const u8) !void {
+        if (nick.len == 0) return;
+        for (self.pending_profiles.items) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, nick)) return;
+        }
+        if (self.pending_profiles.items.len >= 64) {
+            gpa.free(self.pending_profiles.orderedRemove(0));
+        }
+        try self.pending_profiles.append(gpa, try gpa.dupe(u8, nick));
+    }
+
+    fn takeProfileRequest(self: *ChatState, gpa: std.mem.Allocator, nick: []const u8) bool {
+        for (self.pending_profiles.items, 0..) |existing, index| {
+            if (!std.ascii.eqlIgnoreCase(existing, nick)) continue;
+            gpa.free(self.pending_profiles.orderedRemove(index));
+            return true;
+        }
+        return false;
     }
 
     fn setConnectionFailure(self: *ChatState, err: anyerror) void {
@@ -1407,6 +1430,7 @@ const AsyncNetwork = struct {
     reconnect: cc.net.connection_policy.ReconnectController,
     connector: ?*cc.net.transport.Connector = null,
     client: ?cc.net.client.Client = null,
+    held_restoration: cc.net.connection_policy.Restoration,
 
     fn init(
         gpa: std.mem.Allocator,
@@ -1424,6 +1448,7 @@ const AsyncNetwork = struct {
             .base_options = runtime.connect_options,
             .runtime = runtime,
             .reconnect = .init(port, 0x434f4d4943434841),
+            .held_restoration = .init(gpa),
         };
         _ = self.reconnect.start();
         try self.startConnector();
@@ -1432,6 +1457,7 @@ const AsyncNetwork = struct {
 
     fn deinit(self: *AsyncNetwork) void {
         self.stop();
+        self.held_restoration.deinit();
         self.gpa.free(self.host);
         self.* = undefined;
     }
@@ -1446,6 +1472,7 @@ const AsyncNetwork = struct {
             client.deinit();
             self.client = null;
         }
+        self.held_restoration.clear();
     }
 
     fn reconfigure(self: *AsyncNetwork, host: []const u8, port: u16, security: cc.net.client.Security, now_ms: u64) !void {
@@ -1510,6 +1537,7 @@ const AsyncNetwork = struct {
                 self.reconnect.disconnected(now_ms);
                 return .{ .retry_scheduled = err };
             };
+            client.adoptRestoration(&self.held_restoration);
             var owns_client = true;
             defer if (owns_client) client.deinit();
             const registration_options = self.runtime.registrationOptionsForAttempt() catch |err| {
@@ -1543,6 +1571,7 @@ const AsyncNetwork = struct {
         var upgrade_port: ?u16 = null;
         if (self.client) |*client| {
             upgrade_port = client.takeStsUpgradePort();
+            client.takeRestoration(&self.held_restoration);
             client.deinit();
             self.client = null;
         }
@@ -1596,6 +1625,8 @@ fn resetChatConnectionState(state: *ChatState, gpa: std.mem.Allocator) void {
     state.last_notification_poll_ms = 0;
     for (state.pending_udi.items) |*entry| entry.deinit(gpa);
     state.pending_udi.clearRetainingCapacity();
+    for (state.pending_profiles.items) |nick| gpa.free(nick);
+    state.pending_profiles.clearRetainingCapacity();
 }
 
 fn tickBackgroundFeatures(
@@ -2908,6 +2939,7 @@ fn applyDialogAction(
                 view.setDialogNotice("That member is not in the current room.");
                 return;
             }
+            try state.rememberProfileRequest(gpa, value);
             try client.requestProfile(value, state.ircx_data);
             try room.transcript.addWithOptions("Profile", "Profile request sent; the reply will appear here.", .{ .modes = cc.proto.udi.bm_action });
         },
@@ -3513,6 +3545,7 @@ fn processWorkspaceMessages(
             continue;
         }
         if (isVisibleServerWorkflowReply(msg.command)) {
+            if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
             if (workspace.activeRoom()) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
             redraw = true;
             continue;
@@ -3520,7 +3553,9 @@ fn processWorkspaceMessages(
         if (ircxNumericEnabled(&msg)) {
             state.ircx_data = true;
         } else if (!state.join_requested and std.mem.eql(u8, msg.command, "001")) {
-            if (workspace.rooms.items.len == 0) {
+            if (client.hasRestorationTargets()) {
+                for (workspace.rooms.items) |*room| room.joined = false;
+            } else if (workspace.rooms.items.len == 0) {
                 try client.join(channel);
             } else for (workspace.rooms.items) |*room| {
                 room.joined = false;
@@ -3560,7 +3595,7 @@ fn processWorkspaceMessages(
             if (!std.mem.eql(u8, kind, "CCUDI1")) continue;
             const room_index = workspace.find(target) orelse if (std.ascii.eqlIgnoreCase(target, nick)) workspace.active orelse continue else continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, nick, target, state.ircx_data, preferences)) {
+            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, nick, target, state.ircx_data, preferences, state)) {
                 redraw = true;
                 continue;
             }
@@ -3604,7 +3639,7 @@ fn processWorkspaceMessages(
                 redraw = true;
                 continue;
             }
-            if (try processComicControl(io, client, transcript, who, text, nick, target, state.ircx_data, preferences)) {
+            if (try processComicControl(io, client, transcript, who, text, nick, target, state.ircx_data, preferences, state)) {
                 state.discardPendingUdi(workspace.gpa, target, who);
                 redraw = true;
                 continue;
@@ -3647,6 +3682,33 @@ fn appendServerWorkflowReply(transcript: *cc.comic.session.Transcript, msg: *con
         try text.appendSlice(transcript.gpa, param);
     }
     try transcript.addWithOptions("Server", text.items, .{ .modes = cc.proto.udi.bm_action });
+}
+
+const ClientPropertyReply = struct {
+    object: []const u8,
+    value: []const u8,
+};
+
+fn clientPropertyReply(msg: *const cc.net.message.Message) ?ClientPropertyReply {
+    if (std.mem.eql(u8, msg.command, "818") and msg.param_count >= 4) {
+        if (!std.ascii.eqlIgnoreCase(msg.params[2], "CLIENT")) return null;
+        return .{ .object = msg.params[1], .value = msg.params[3] };
+    }
+    if (std.ascii.eqlIgnoreCase(msg.command, "PROP") and msg.param_count >= 3) {
+        if (!std.ascii.eqlIgnoreCase(msg.params[1], "CLIENT")) return null;
+        return .{ .object = msg.params[0], .value = msg.params[2] };
+    }
+    return null;
+}
+
+fn applyClientPropertyBackdrop(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const reply = clientPropertyReply(msg) orelse return false;
+    const backdrop = cc.proto.keystring.getValue(reply.value, "bk") orelse return false;
+    if (backdrop.len == 0) return false;
+    const room_index = workspace.find(reply.object) orelse workspace.active orelse return false;
+    const bundled = cc.comic.session.bundledBackdropByName(backdrop) orelse return false;
+    try workspace.rooms.items[room_index].transcript.setBackdrop(bundled);
+    return true;
 }
 
 fn collectNotificationWho(
@@ -3971,6 +4033,7 @@ fn processComicControl(
     reply_target: []const u8,
     ircx_data: bool,
     preferences: ?*cc.client.preferences.Store,
+    state: ?*ChatState,
 ) !bool {
     if (try transcript.consumeAvatarAnnouncement(who, wire)) return true;
     if (try transcript.consumeAwayControl(who, wire)) return true;
@@ -3995,6 +4058,9 @@ fn processComicControl(
             return true;
         },
         .heres_info => |profile| {
+            if (state) |chat| {
+                if (!chat.takeProfileRequest(transcript.gpa, who)) return true;
+            }
             var display: std.ArrayList(u8) = .empty;
             defer display.deinit(transcript.gpa);
             try display.appendSlice(transcript.gpa, "Profile: ");
@@ -4003,18 +4069,7 @@ fn processComicControl(
             return true;
         },
     }
-    switch (cc.comic.session.parseBackdropControl(comment)) {
-        .not_control => return false,
-        .empty => return true,
-        .sync => |announcement| {
-            if (cc.comic.session.bundledBackdropByName(announcement.base_name)) |name| try transcript.setBackdrop(name);
-            return true;
-        },
-        .legacy => |name| {
-            if (cc.comic.session.bundledBackdropByName(name)) |bundled| try transcript.setBackdrop(bundled);
-            return true;
-        },
-    }
+    return transcript.applyBackdropControl(cc.comic.session.parseBackdropControl(comment));
 }
 
 /// Handle the source's private CTCP request/reply surface. Email and homepage
@@ -4244,6 +4299,36 @@ test "comic action wire keeps source raw text and selected talk-to metadata" {
     try appendSourceComicText(&readable, gpa, "waves");
     try std.testing.expectEqualStrings("waves", readable.items);
     try std.testing.expect(std.mem.indexOf(u8, readable.items, cc.comic.session.ctcp_action_prefix) == null);
+}
+
+test "HeresInfo displays only after a matching profile request" {
+    const gpa = std.testing.allocator;
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try std.testing.expect(!state.takeProfileRequest(gpa, "Alice"));
+    try state.rememberProfileRequest(gpa, "Alice");
+    try state.rememberProfileRequest(gpa, "alice");
+    try std.testing.expectEqual(@as(usize, 1), state.pending_profiles.items.len);
+    try std.testing.expect(state.takeProfileRequest(gpa, "ALICE"));
+    try std.testing.expect(!state.takeProfileRequest(gpa, "Alice"));
+    try state.rememberProfileRequest(gpa, "Bob");
+    resetChatConnectionState(&state, gpa);
+    try std.testing.expect(!state.takeProfileRequest(gpa, "Bob"));
+}
+
+test "IRCX CLIENT property bk updates the matching room backdrop" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const listed = cc.net.message.parse(":server 818 me #root CLIENT :ln=en;bk=Volcano.bgb");
+    try std.testing.expect(try applyClientPropertyBackdrop(&workspace, &listed));
+    try std.testing.expectEqualStrings("volcano", workspace.rooms.items[0].transcript.resolvedBackdrop());
+    const changed = cc.net.message.parse(":owner PROP #root CLIENT :bk=room;");
+    try std.testing.expect(try applyClientPropertyBackdrop(&workspace, &changed));
+    try std.testing.expectEqualStrings("room", workspace.rooms.items[0].transcript.resolvedBackdrop());
+    const topic = cc.net.message.parse(":server 818 me #root TOPIC :hello");
+    try std.testing.expect(!try applyClientPropertyBackdrop(&workspace, &topic));
 }
 
 test "IRCX DATA transport requires numeric 800 enabled state" {
