@@ -583,6 +583,29 @@ pub const Transcript = struct {
             return self.markDeparted(nickFromPrefix(prefix));
         }
 
+        if (std.ascii.eqlIgnoreCase(msg.command, "AWAY")) {
+            const prefix = msg.prefix orelse return false;
+            const nick = nickFromPrefix(prefix);
+            if (nick.len == 0) return false;
+            const index = try self.ensureParticipant(nick, std.ascii.eqlIgnoreCase(nick, self_nick));
+            const away = if (msg.param(0)) |text| text.len != 0 else false;
+            if (self.roster.items[index].away == away) return false;
+            self.roster.items[index].away = away;
+            return true;
+        }
+
+        if (std.ascii.eqlIgnoreCase(msg.command, "KILL")) {
+            return self.markDeparted(msg.param(0) orelse return false);
+        }
+
+        if (std.mem.eql(u8, msg.command, "301")) {
+            const nick = msg.param(1) orelse return false;
+            const index = try self.ensureParticipant(nick, std.ascii.eqlIgnoreCase(nick, self_nick));
+            if (self.roster.items[index].away) return false;
+            self.roster.items[index].away = true;
+            return true;
+        }
+
         if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
             const prefix = msg.prefix orelse return false;
             const old_nick = nickFromPrefix(prefix);
@@ -601,6 +624,7 @@ pub const Transcript = struct {
                     // still in the room. A departed ghost must not evict an
                     // active homonym during a nick collision merge.
                     target.departed = target.departed and old.departed;
+                    target.away = target.away or old.away;
                     target.role = highestRole(target.role, old.role);
                     target.status_modes |= old.status_modes;
                     target.sends = saturatingAdd(target.sends, old.sends);
@@ -818,8 +842,14 @@ pub const Transcript = struct {
     /// bubble. Returns false for any other message.
     pub fn consumeAwayControl(self: *Transcript, nick: []const u8, wire: []const u8) !bool {
         const message_text = ctcpAwayMessage(wire) orelse return false;
+        _ = try self.setAway(nick, message_text.len != 0);
+        return true;
+    }
+
+    pub fn setAway(self: *Transcript, nick: []const u8, away: bool) !bool {
         const index = try self.ensureParticipant(nick, false);
-        self.roster.items[index].away = message_text.len != 0;
+        if (self.roster.items[index].away == away) return false;
+        self.roster.items[index].away = away;
         return true;
     }
 
@@ -1233,6 +1263,7 @@ test "nick collision merge keeps an active member present" {
     try transcript.setSelf("Me");
     var names = irc_message.parse(":server 353 Me = #room :Me Old Alice");
     try std.testing.expect(try transcript.observeIrc(&names, "#room", "Me"));
+    try std.testing.expect(try transcript.setAway("Alice", true));
     var part = irc_message.parse(":Old!u@h PART #room");
     try std.testing.expect(try transcript.observeIrc(&part, "#room", "Me"));
     try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Old").?].departed);
@@ -1240,6 +1271,7 @@ test "nick collision merge keeps an active member present" {
     try std.testing.expect(try transcript.observeIrc(&rename, "#room", "Me"));
     try std.testing.expect(transcript.findRosterIndex("Old") == null);
     try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alice").?].departed);
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alice").?].away);
 }
 
 test "page break insertion and selected line removal preserve ownership and tallies" {
@@ -1434,5 +1466,21 @@ test "source AWAY control updates roster without adding a comic line" {
 
     try std.testing.expect(try transcript.consumeAwayControl("Alice", "\x01AWAY\x01"));
     try std.testing.expect(!transcript.roster.items[alice].away);
+
+    var away_notify = irc_message.parse(":Alice!u@h AWAY :afk");
+    try std.testing.expect(try transcript.observeIrc(&away_notify, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[alice].away);
+    var back = irc_message.parse(":Alice!u@h AWAY");
+    try std.testing.expect(try transcript.observeIrc(&back, "#room", "Me"));
+    try std.testing.expect(!transcript.roster.items[alice].away);
+
+    var rpl_away = irc_message.parse(":server 301 Me Bob :gone fishing");
+    try std.testing.expect(try transcript.observeIrc(&rpl_away, "#room", "Me"));
+    const bob = transcript.findRosterIndex("Bob").?;
+    try std.testing.expect(transcript.roster.items[bob].away);
+
+    var kill = irc_message.parse(":oper!u@h KILL Bob :banned");
+    try std.testing.expect(try transcript.observeIrc(&kill, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[bob].departed);
     try std.testing.expect(!try transcript.consumeAwayControl("Alice", "ordinary text"));
 }

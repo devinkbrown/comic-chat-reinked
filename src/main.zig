@@ -1424,7 +1424,7 @@ const NetworkEvent = union(enum) {
 const AsyncNetwork = struct {
     gpa: std.mem.Allocator,
     host: []u8,
-    nick: []const u8,
+    nick: []u8,
     base_options: cc.net.client.ConnectOptions,
     runtime: *ConnectionRuntime,
     reconnect: cc.net.connection_policy.ReconnectController,
@@ -1441,10 +1441,12 @@ const AsyncNetwork = struct {
     ) !AsyncNetwork {
         const owned_host = try gpa.dupe(u8, host);
         errdefer gpa.free(owned_host);
+        const owned_nick = try gpa.dupe(u8, nick);
+        errdefer gpa.free(owned_nick);
         var self = AsyncNetwork{
             .gpa = gpa,
             .host = owned_host,
-            .nick = nick,
+            .nick = owned_nick,
             .base_options = runtime.connect_options,
             .runtime = runtime,
             .reconnect = .init(port, 0x434f4d4943434841),
@@ -1459,7 +1461,16 @@ const AsyncNetwork = struct {
         self.stop();
         self.held_restoration.deinit();
         self.gpa.free(self.host);
+        self.gpa.free(self.nick);
         self.* = undefined;
+    }
+
+    fn adoptNick(self: *AsyncNetwork, nick: []const u8) !void {
+        if (nick.len == 0) return error.InvalidIdentityEvent;
+        if (std.mem.eql(u8, self.nick, nick)) return;
+        const owned = try self.gpa.dupe(u8, nick);
+        self.gpa.free(self.nick);
+        self.nick = owned;
     }
 
     fn stop(self: *AsyncNetwork) void {
@@ -1762,7 +1773,7 @@ fn runInteractivePollBackend(
                 &network,
                 &state,
                 &workspace,
-                nick,
+                workspace.self_nick,
                 channel,
             );
             if (!event_result.keep_running) return;
@@ -1779,7 +1790,7 @@ fn runInteractivePollBackend(
                     &network,
                     &state,
                     &workspace,
-                    nick,
+                    workspace.self_nick,
                     channel,
                 );
                 if (!event_result.keep_running) return;
@@ -1798,7 +1809,7 @@ fn runInteractivePollBackend(
                     redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, gpa) or redraw;
                     poll_fds[1].fd = -1;
                 } else if (network.clientPtr()) |active| {
-                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, nick, channel, &state) catch |err| failed: {
+                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, &network, channel, &state) catch |err| failed: {
                         redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
                         poll_fds[1].fd = -1;
                         break :failed false;
@@ -1852,7 +1863,7 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
                 &network,
                 &state,
                 &workspace,
-                nick,
+                workspace.self_nick,
                 channel,
             );
             if (!event_result.keep_running) return;
@@ -1868,7 +1879,7 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
                 if (!received) {
                     redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, gpa) or redraw;
                 } else if (network.clientPtr()) |active| {
-                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, nick, channel, &state) catch |err| failed: {
+                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, &network, channel, &state) catch |err| failed: {
                         redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
                         break :failed false;
                     };
@@ -2592,7 +2603,10 @@ fn applyDialogAction(
             try room.transcript.setBackdrop(selected);
             try preferences.setBackdrop(selected);
             try preferences.saveFile(io, network.runtime.preferences_path);
-            if (maybe_client) |client| try client.syncBackdrop(room.name, selected, null, state.ircx_data);
+            if (maybe_client) |client| {
+                try client.syncBackdrop(room.name, selected, null, state.ircx_data);
+                if (state.ircx_data) try publishClientBackdrop(client, room, gpa, selected);
+            }
         },
         .personal => {
             if (hasWireControl(value) or hasWireControl(view.dialogValueAt(1)) or hasWireControl(view.dialogValueAt(2)) or hasWireControl(view.dialogValueAt(3))) {
@@ -3511,13 +3525,20 @@ fn processWorkspaceMessages(
     view: *cc.client.view.View,
     preferences: *cc.client.preferences.Store,
     workspace: *cc.client.workspace.Workspace,
-    nick: []const u8,
+    network: *AsyncNetwork,
     channel: []const u8,
     state: *ChatState,
 ) !bool {
     var redraw = false;
     while (try client.bufferedNext()) |msg| {
-        if (std.ascii.eqlIgnoreCase(msg.command, "QUIT") or std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
+        if (std.ascii.eqlIgnoreCase(msg.command, "ERROR")) return error.IrcServerError;
+        const nick = workspace.self_nick;
+        if (std.ascii.eqlIgnoreCase(msg.command, "QUIT") or
+            std.ascii.eqlIgnoreCase(msg.command, "NICK") or
+            std.ascii.eqlIgnoreCase(msg.command, "AWAY") or
+            std.ascii.eqlIgnoreCase(msg.command, "KILL") or
+            std.mem.eql(u8, msg.command, "301"))
+        {
             for (workspace.rooms.items) |*room| redraw = (try room.transcript.observeIrc(&msg, room.name, nick)) or redraw;
         } else if (messageRoom(&msg)) |room_name| {
             if (room_name.len > 1 and (room_name[0] == '#' or room_name[0] == '&')) {
@@ -3535,6 +3556,20 @@ fn processWorkspaceMessages(
             if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Kick", who, room_name, msg.param(2) orelse "");
         } else if (std.ascii.eqlIgnoreCase(msg.command, "INVITE")) {
             if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, &active_room.transcript, preferences, "Invitation", if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "", msg.param(1) orelse "", "");
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "RENAME")) {
+            const old_name = msg.param(0) orelse "";
+            const new_name = msg.param(1) orelse "";
+            if (try workspace.rename(old_name, new_name)) {
+                client.renameRestoration(old_name, new_name);
+                redraw = true;
+            }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or std.mem.eql(u8, msg.command, "332")) {
+            redraw = (try appendTopicLine(workspace, &msg)) or redraw;
+        } else if (std.mem.eql(u8, msg.command, "305") or std.mem.eql(u8, msg.command, "306")) {
+            const away = std.mem.eql(u8, msg.command, "306");
+            for (workspace.rooms.items) |*room| {
+                if (try room.transcript.setAway(nick, away)) redraw = true;
+            }
         }
         if (std.mem.eql(u8, msg.command, "352")) {
             try collectNotificationWho(workspace.gpa, state, preferences, &msg, client.host);
@@ -3553,6 +3588,10 @@ fn processWorkspaceMessages(
         if (ircxNumericEnabled(&msg)) {
             state.ircx_data = true;
         } else if (!state.join_requested and std.mem.eql(u8, msg.command, "001")) {
+            if (msg.param(0)) |assigned| {
+                try workspace.setSelfNick(assigned);
+                try network.adoptNick(assigned);
+            }
             if (client.hasRestorationTargets()) {
                 for (workspace.rooms.items) |*room| room.joined = false;
             } else if (workspace.rooms.items.len == 0) {
@@ -3564,10 +3603,16 @@ fn processWorkspaceMessages(
             state.join_requested = true;
             state.status = "joining";
             redraw = true;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
+            const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+            if (std.ascii.eqlIgnoreCase(who, nick)) if (msg.param(0)) |assigned| {
+                try workspace.setSelfNick(assigned);
+                try network.adoptNick(assigned);
+            };
         } else if (std.mem.eql(u8, msg.command, "JOIN")) {
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "";
             const joined_channel = msg.param(0) orelse "";
-            if (std.ascii.eqlIgnoreCase(who, nick)) {
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick)) {
                 const room_index = try workspace.ensure(joined_channel);
                 var room = &workspace.rooms.items[room_index];
                 room.joined = true;
@@ -3610,6 +3655,11 @@ fn processWorkspaceMessages(
             const text = msg.param(2) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             var room = &workspace.rooms.items[room_index];
+            if (try processComicControl(io, client, &room.transcript, who, text, workspace.self_nick, target, state.ircx_data, preferences, state)) {
+                state.discardPendingUdi(workspace.gpa, target, who);
+                redraw = true;
+                continue;
+            }
             var pending = state.takeUdi(target, who);
             defer if (pending) |*entry| entry.deinit(room.transcript.gpa);
             try room.transcript.addWireMessage(who, text, true, if (pending) |entry| entry.wire else null);
@@ -3703,12 +3753,39 @@ fn clientPropertyReply(msg: *const cc.net.message.Message) ?ClientPropertyReply 
 
 fn applyClientPropertyBackdrop(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
     const reply = clientPropertyReply(msg) orelse return false;
+    const room_index = workspace.find(reply.object) orelse workspace.active orelse return false;
+    try workspace.rooms.items[room_index].setClientData(workspace.gpa, reply.value);
     const backdrop = cc.proto.keystring.getValue(reply.value, "bk") orelse return false;
     if (backdrop.len == 0) return false;
-    const room_index = workspace.find(reply.object) orelse workspace.active orelse return false;
     const bundled = cc.comic.session.bundledBackdropByName(backdrop) orelse return false;
     try workspace.rooms.items[room_index].transcript.setBackdrop(bundled);
     return true;
+}
+
+fn appendTopicLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const channel = if (std.mem.eql(u8, msg.command, "332")) msg.param(1) else msg.param(0);
+    const topic = if (std.mem.eql(u8, msg.command, "332")) msg.param(2) else msg.param(1);
+    const room_name = channel orelse return false;
+    const text = topic orelse return false;
+    const room_index = workspace.find(room_name) orelse return false;
+    var display: std.ArrayList(u8) = .empty;
+    defer display.deinit(workspace.gpa);
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "Topic";
+    if (who.len != 0 and !std.mem.eql(u8, msg.command, "332")) {
+        try display.appendSlice(workspace.gpa, "Topic from ");
+        try display.appendSlice(workspace.gpa, who);
+        try display.appendSlice(workspace.gpa, ": ");
+    } else try display.appendSlice(workspace.gpa, "Topic: ");
+    try display.appendSlice(workspace.gpa, text);
+    try workspace.rooms.items[room_index].transcript.addWithOptions("Topic", display.items, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn publishClientBackdrop(client: *cc.net.client.Client, room: *cc.client.workspace.Room, gpa: std.mem.Allocator, backdrop: []const u8) !void {
+    const updated = try cc.proto.keystring.changeProperty(gpa, room.client_data orelse "", "bk", backdrop);
+    defer gpa.free(updated);
+    try client.setProperty(room.name, "CLIENT", updated);
+    try room.setClientData(gpa, updated);
 }
 
 fn collectNotificationWho(
@@ -3869,8 +3946,13 @@ fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(msg.command, "366")) return msg.param(1) orelse msg.param(0);
     if (std.ascii.eqlIgnoreCase(msg.command, "JOIN") or
         std.ascii.eqlIgnoreCase(msg.command, "PART") or
+        std.ascii.eqlIgnoreCase(msg.command, "KICK") or
+        std.ascii.eqlIgnoreCase(msg.command, "MODE") or
+        std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or
         std.ascii.eqlIgnoreCase(msg.command, "DATA") or
-        std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG")) return msg.param(0);
+        std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
+        std.ascii.eqlIgnoreCase(msg.command, "WHISPER")) return msg.param(0);
+    if (std.mem.eql(u8, msg.command, "332")) return msg.param(1);
     return null;
 }
 
@@ -4324,11 +4406,34 @@ test "IRCX CLIENT property bk updates the matching room backdrop" {
     const listed = cc.net.message.parse(":server 818 me #root CLIENT :ln=en;bk=Volcano.bgb");
     try std.testing.expect(try applyClientPropertyBackdrop(&workspace, &listed));
     try std.testing.expectEqualStrings("volcano", workspace.rooms.items[0].transcript.resolvedBackdrop());
+    try std.testing.expectEqualStrings("ln=en;bk=Volcano.bgb", workspace.rooms.items[0].client_data.?);
     const changed = cc.net.message.parse(":owner PROP #root CLIENT :bk=room;");
     try std.testing.expect(try applyClientPropertyBackdrop(&workspace, &changed));
     try std.testing.expectEqualStrings("room", workspace.rooms.items[0].transcript.resolvedBackdrop());
     const topic = cc.net.message.parse(":server 818 me #root TOPIC :hello");
     try std.testing.expect(!try applyClientPropertyBackdrop(&workspace, &topic));
+}
+
+test "topic replies land in the matching room" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const listed = cc.net.message.parse(":server 332 me #root :Welcome");
+    try std.testing.expect(try appendTopicLine(&workspace, &listed));
+    try std.testing.expectEqualStrings("Topic: Welcome", workspace.rooms.items[0].transcript.lines.items[0].text);
+    const changed = cc.net.message.parse(":alice!u@h TOPIC #root :New topic");
+    try std.testing.expect(try appendTopicLine(&workspace, &changed));
+    try std.testing.expectEqualStrings("Topic from alice: New topic", workspace.rooms.items[0].transcript.lines.items[1].text);
+}
+
+test "live roster room lookup includes MODE KICK and topic numerics" {
+    const kick = cc.net.message.parse(":op!u@h KICK #root alice :out");
+    const mode = cc.net.message.parse(":op!u@h MODE #root +o alice");
+    const topic = cc.net.message.parse(":server 332 me #root :hi");
+    try std.testing.expectEqualStrings("#root", messageRoom(&kick).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&mode).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&topic).?);
 }
 
 test "IRCX DATA transport requires numeric 800 enabled state" {

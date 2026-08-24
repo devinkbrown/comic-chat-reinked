@@ -3,6 +3,7 @@
 const std = @import("std");
 const session = @import("../comic/session.zig");
 const input = @import("input.zig");
+const irc_message = @import("../net/message.zig");
 
 pub const max_rooms: usize = 64;
 
@@ -14,12 +15,15 @@ pub const Room = struct {
     unread: u32 = 0,
     /// Optional channel key for reconnect (`JOIN <room> <password>`).
     join_key: ?[]u8 = null,
+    /// Last IRCX CLIENT keystring observed for this room (`bk=...;...`).
+    client_data: ?[]u8 = null,
 
     fn deinit(self: *Room, gpa: std.mem.Allocator) void {
         self.transcript.deinit();
         self.editor.deinit();
         gpa.free(self.name);
         if (self.join_key) |key| gpa.free(key);
+        if (self.client_data) |value| gpa.free(value);
         self.* = undefined;
     }
 
@@ -30,6 +34,12 @@ pub const Room = struct {
         }
         if (key.len == 0) return;
         self.join_key = try gpa.dupe(u8, key);
+    }
+
+    pub fn setClientData(self: *Room, gpa: std.mem.Allocator, value: []const u8) !void {
+        const replacement = try gpa.dupe(u8, value);
+        if (self.client_data) |old| gpa.free(old);
+        self.client_data = replacement;
     }
 };
 
@@ -95,6 +105,34 @@ pub const Workspace = struct {
         return &self.rooms.items[index];
     }
 
+    pub fn setSelfNick(self: *Workspace, nick: []const u8) !void {
+        if (nick.len == 0) return error.InvalidIdentityEvent;
+        if (std.mem.eql(u8, self.self_nick, nick)) return;
+        var line_buf: [260]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, ":{s} NICK :{s}", .{ self.self_nick, nick }) catch return error.InvalidIdentityEvent;
+        const nick_change = irc_message.parse(line);
+        for (self.rooms.items) |*room| {
+            _ = try room.transcript.observeIrc(&nick_change, room.name, nick);
+            try room.transcript.setSelf(nick);
+        }
+        const owned = try self.gpa.dupe(u8, nick);
+        self.gpa.free(self.self_nick);
+        self.self_nick = owned;
+    }
+
+    pub fn rename(self: *Workspace, old_name: []const u8, new_name: []const u8) !bool {
+        const index = self.find(old_name) orelse return false;
+        if (!validRoomName(new_name)) return error.InvalidRoomName;
+        if (self.find(new_name)) |existing| {
+            if (existing == index) return false;
+            return false;
+        }
+        const owned = try self.gpa.dupe(u8, new_name);
+        self.gpa.free(self.rooms.items[index].name);
+        self.rooms.items[index].name = owned;
+        return true;
+    }
+
     pub fn observeMessage(self: *Workspace, room_name: []const u8, nick: []const u8, text: []const u8) !void {
         const index = try self.ensure(room_name);
         try self.rooms.items[index].transcript.add(nick, text);
@@ -156,6 +194,20 @@ test "workspace retains a room join key for reconnect" {
     try std.testing.expectEqualStrings("swordfish", workspace.rooms.items[index].join_key.?);
     try workspace.rooms.items[index].setJoinKey(workspace.gpa, "");
     try std.testing.expect(workspace.rooms.items[index].join_key == null);
+}
+
+test "workspace renames a room and updates the local nick" {
+    var workspace = try Workspace.init(std.testing.allocator, "alex");
+    defer workspace.deinit();
+    const index = try workspace.ensure("#old");
+    try workspace.rooms.items[index].setJoinKey(workspace.gpa, "secret");
+    try std.testing.expect(try workspace.rename("#OLD", "#new"));
+    try std.testing.expectEqualStrings("#new", workspace.rooms.items[index].name);
+    try std.testing.expectEqualStrings("secret", workspace.rooms.items[index].join_key.?);
+    try std.testing.expect(!try workspace.rename("#missing", "#other"));
+    try workspace.setSelfNick("Alexa");
+    try std.testing.expectEqualStrings("Alexa", workspace.self_nick);
+    try std.testing.expect(workspace.rooms.items[index].transcript.roster.items[0].is_self);
 }
 
 test "workspace uses RFC 1459 channel casemapping" {

@@ -1327,6 +1327,30 @@ pub const Client = struct {
         self.ownedRestoration().moveFrom(source);
     }
 
+    pub fn renameRestoration(self: *Client, old_channel: []const u8, new_channel: []const u8) void {
+        const restoration = if (self.restoration) |*value| value else return;
+        var key_storage: [512]u8 = undefined;
+        var after_storage: [520]u8 = undefined;
+        var key: []const u8 = "";
+        var after: ?[]const u8 = null;
+        for (restoration.targets.items) |entry| {
+            if (!std.ascii.eqlIgnoreCase(entry.channel, old_channel)) continue;
+            if (entry.key) |value| {
+                if (value.len > key_storage.len) return;
+                @memcpy(key_storage[0..value.len], value);
+                key = key_storage[0..value.len];
+            }
+            if (entry.after) |value| {
+                if (value.len > after_storage.len) return;
+                @memcpy(after_storage[0..value.len], value);
+                after = after_storage[0..value.len];
+            }
+            break;
+        }
+        restoration.forget(old_channel);
+        restoration.rememberJoin(new_channel, key, after) catch {};
+    }
+
     fn ownedRestoration(self: *Client) *policy.Restoration {
         if (self.restoration == null) self.restoration = policy.Restoration.init(self.gpa);
         return &self.restoration.?;
@@ -2570,9 +2594,11 @@ test "join and create remember restoration and replay JOIN without chat" {
 
     client.adoptRestoration(&held);
     try std.testing.expect(client.hasRestorationTargets());
+    client.renameRestoration("#locked", "#vault");
+    try std.testing.expect(client.hasRestorationTargets());
     try client.queueRestoration();
     const queued = client.tx.items.items[client.tx.items.items.len - 1].bytes;
-    try std.testing.expect(std.mem.indexOf(u8, queued, "JOIN #locked swordfish") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queued, "JOIN #vault swordfish") != null);
     try std.testing.expect(std.mem.indexOf(u8, queued, "CHATHISTORY") == null);
 }
 
