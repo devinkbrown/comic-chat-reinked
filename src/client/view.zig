@@ -1527,9 +1527,9 @@ pub const View = struct {
             const selected = if (self.shell.selected_member) |selected_index| selected_index == index else member.is_self;
             ui.drawMemberCard(&self.canvas, cell, selected, member.departed, member.away, self.hovered_member == index);
             const avatar = displayAvatarByName(member.avatar) orelse continue;
-            var icon = bgb.decodeIcon(self.gpa, avatar) catch continue;
+            var icon = figure.chromePortrait(self.gpa, avatar) catch continue;
             defer icon.deinit(self.gpa);
-            blitHeightBottomAlphaSmooth(&self.canvas, icon.pixels, icon.width, icon.height, cell.x + @divTrunc(cell.w - 52, 2), cell.y + 6, 52, 52);
+            blitContainCenterAlphaSmooth(&self.canvas, icon.pixels, icon.width, icon.height, cell.x + @divTrunc(cell.w - 52, 2), cell.y + 6, 52, 52);
             if (member.role.badge().len != 0) ui.drawPill(&self.canvas, .{ .x = cell.right() - 25, .y = cell.y + 5, .w = 20, .h = 18 }, member.role.badge(), true);
             const name_w = Canvas.uiTextWidth(member.nick);
             drawTextEllipsized(
@@ -1582,10 +1582,9 @@ pub const View = struct {
         const avb_data = displayAvatarByName(avatar_name) orelse return;
         var rendered = selected: {
             const selected_emotion = self.shell.selectedEmotion();
-            if (selected_emotion == .neutral) break :selected figure.assembleForText(self.gpa, avb_data, "") catch return;
+            if (selected_emotion == .neutral) break :selected figure.chromeBody(self.gpa, avb_data, "") catch return;
             const pose = figure.poseStateForEmotion(self.gpa, avb_data, selected_emotion, self.shell.selectedEmotionIntensity()) catch return;
-            const detailed = figure.assembleDetailedForSourcePose(self.gpa, avb_data, pose) catch return;
-            break :selected detailed.image;
+            break :selected figure.chromeBodyForSourcePose(self.gpa, avb_data, pose) catch return;
         };
         defer rendered.deinit(self.gpa);
         blitHeightBottomAlphaSmooth(
@@ -2443,6 +2442,29 @@ fn blitNearest(
 }
 
 fn blitHeightBottomAlphaSmooth(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, area_w: i32, area_h: i32) void {
+    blitContainAlphaSmooth(c, src, sw, sh, x, y, area_w, area_h, .bottom);
+}
+
+/// Member icons and CAST portraits: contain-fit and center. Bodycam uses
+/// `GetBodyBox`'s bottom alignment; mugshots must not sit in the footer of
+/// the slot.
+fn blitContainCenterAlphaSmooth(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, area_w: i32, area_h: i32) void {
+    blitContainAlphaSmooth(c, src, sw, sh, x, y, area_w, area_h, .center);
+}
+
+const ContainAlign = enum { center, bottom };
+
+fn blitContainAlphaSmooth(
+    c: *Canvas,
+    src: []const u32,
+    sw: u32,
+    sh: u32,
+    x: i32,
+    y: i32,
+    area_w: i32,
+    area_h: i32,
+    align_v: ContainAlign,
+) void {
     if (sw == 0 or sh == 0 or area_w <= 0 or area_h <= 0) return;
     var draw_h = area_h;
     var draw_w: i32 = @max(1, @as(i32, @intCast(@divTrunc(@as(i64, sw) * draw_h, sh))));
@@ -2451,7 +2473,10 @@ fn blitHeightBottomAlphaSmooth(c: *Canvas, src: []const u32, sw: u32, sh: u32, x
         draw_h = @max(1, @as(i32, @intCast(@divTrunc(@as(i64, sh) * draw_w, sw))));
     }
     const draw_x = x + @divTrunc(area_w - draw_w, 2);
-    const draw_y = y + area_h - draw_h;
+    const draw_y = switch (align_v) {
+        .center => y + @divTrunc(area_h - draw_h, 2),
+        .bottom => y + area_h - draw_h,
+    };
     var oy: i32 = 0;
     while (oy < draw_h) : (oy += 1) {
         const sy_fp: u64 = if (draw_h <= 1 or sh <= 1) 0 else @intCast(@divTrunc(@as(i64, oy) * (@as(i64, sh) - 1) * 65536, draw_h - 1));
@@ -2802,9 +2827,9 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
                 const preview = ui.AssetPreviewLayout.card(.{ .x = x, .y = cards_rect.y + 4, .w = card_w - 6, .h = cards_rect.h - 8 });
                 ui.drawAssetPreviewFrame(c, preview, active);
                 const avatar = displayAvatarByName(name) orelse continue;
-                var icon = bgb.decodeIcon(std.heap.page_allocator, avatar) catch continue;
+                var icon = figure.chromePortrait(std.heap.page_allocator, avatar) catch continue;
                 defer icon.deinit(std.heap.page_allocator);
-                blitHeightBottomAlphaSmooth(c, icon.pixels, icon.width, icon.height, preview.artwork.x, preview.artwork.y, preview.artwork.w, preview.artwork.h);
+                blitContainCenterAlphaSmooth(c, icon.pixels, icon.width, icon.height, preview.artwork.x, preview.artwork.y, preview.artwork.w, preview.artwork.h);
                 if (preview.label.h > 0) drawTextEllipsized(c, name, preview.label.x, preview.label.y, preview.label.w, if (active) ui.current.accent else ui.current.secondary);
             }
         },
@@ -3374,11 +3399,11 @@ test "every bundled avatar produces a visible mugshot and full figure" {
     defer canvas.deinit(std.testing.allocator);
     for (names) |name| {
         const data = strip.avatarByName(name) orelse return error.TestUnexpectedResult;
-        var icon = try bgb.decodeIcon(std.testing.allocator, data);
+        var icon = try figure.chromePortrait(std.testing.allocator, data);
         defer icon.deinit(std.testing.allocator);
         try std.testing.expect(icon.width > 0 and icon.height > 0);
         canvas.clear(ui.current.layer);
-        blitHeightBottomAlphaSmooth(&canvas, icon.pixels, icon.width, icon.height, 30, 10, 60, 60);
+        blitContainCenterAlphaSmooth(&canvas, icon.pixels, icon.width, icon.height, 30, 10, 60, 60);
         var visible_icon = false;
         for (canvas.px) |pixel| if (pixel != ui.current.layer) {
             visible_icon = true;
@@ -3386,7 +3411,7 @@ test "every bundled avatar produces a visible mugshot and full figure" {
         };
         try std.testing.expect(visible_icon);
 
-        var full = try figure.assembleForText(std.testing.allocator, data, "");
+        var full = try figure.chromeBody(std.testing.allocator, data, "");
         defer full.deinit(std.testing.allocator);
         try std.testing.expect(full.width > 0 and full.height > 0);
         canvas.clear(ui.current.layer);
@@ -3401,11 +3426,45 @@ test "every bundled avatar produces a visible mugshot and full figure" {
     }
 }
 
+test "color and HD chrome portraits are heads with a keyed paper matte" {
+    const names = [_][]const u8{ "anna hd", "anna color", "kevin color", "jordan", "xeno color" };
+    var canvas = try Canvas.init(std.testing.allocator, 80, 80);
+    defer canvas.deinit(std.testing.allocator);
+    for (names) |name| {
+        const data = strip.avatarByName(name) orelse return error.TestUnexpectedResult;
+        var portrait = try figure.chromePortrait(std.testing.allocator, data);
+        defer portrait.deinit(std.testing.allocator);
+        var body = try figure.chromeBody(std.testing.allocator, data, "");
+        defer body.deinit(std.testing.allocator);
+        try std.testing.expect(portrait.height < body.height);
+        canvas.clear(ui.current.layer);
+        blitContainCenterAlphaSmooth(&canvas, portrait.pixels, portrait.width, portrait.height, 10, 10, 60, 60);
+        try std.testing.expectEqual(ui.current.layer, canvas.px[0]);
+        var visible = false;
+        for (canvas.px) |pixel| if (pixel != ui.current.layer) {
+            visible = true;
+            break;
+        };
+        try std.testing.expect(visible);
+    }
+}
+
+test "contain-center portrait blit keeps a wide mugshot off the card footer" {
+    var canvas = try Canvas.init(std.testing.allocator, 8, 8);
+    defer canvas.deinit(std.testing.allocator);
+    canvas.clear(ui.current.layer);
+    const src = [_]u32{ 0xff00ff00, 0xff00ff00, 0xff00ff00, 0xff00ff00 };
+    blitContainCenterAlphaSmooth(&canvas, src[0..], 4, 1, 0, 0, 8, 8);
+    try std.testing.expectEqual(ui.current.layer, canvas.px[0]);
+    try std.testing.expectEqual(ui.current.layer, canvas.px[8 * 8 - 1]);
+    try std.testing.expect(canvas.px[8 * 3 + 3] != ui.current.layer);
+}
+
 test "every selectable color avatar decodes to a visibly colored gallery portrait" {
     for (dialogs.choiceOptions(.character, 0)) |name| {
         if (!std.mem.endsWith(u8, name, "Color")) continue;
         const data = strip.avatarByName(name) orelse return error.TestUnexpectedResult;
-        var icon = try bgb.decodeIcon(std.testing.allocator, data);
+        var icon = try figure.chromePortrait(std.testing.allocator, data);
         defer icon.deinit(std.testing.allocator);
         var colorful = false;
         for (icon.pixels) |pixel| {

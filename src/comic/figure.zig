@@ -276,6 +276,15 @@ pub fn assembleDetailedForSourcePose(
     avb_data: []const u8,
     pose: udi.PoseState,
 ) !Rendered {
+    return assembleDetailedForSourcePoseInner(gpa, avb_data, pose, false);
+}
+
+fn assembleDetailedForSourcePoseInner(
+    gpa: std.mem.Allocator,
+    avb_data: []const u8,
+    pose: udi.PoseState,
+    srcand: bool,
+) !Rendered {
     const asset = try avb_asset.parse(avb_data);
     var table = try avb_asset.parsePoseTable(gpa, avb_data);
     defer table.deinit(gpa);
@@ -284,6 +293,7 @@ pub fn assembleDetailedForSourcePose(
     if (asset.kind == .simple_avatar) {
         const record = selected.body orelse return error.PoseNotFound;
         const image = try bgb.decodeImageRef(gpa, avb_data, record.images[0]);
+        if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
             .face_x = record.face.x,
@@ -298,6 +308,10 @@ pub fn assembleDetailedForSourcePose(
     defer head.deinit(gpa);
     var body = try bgb.decodeImageRef(gpa, avb_data, torso_record.images[0]);
     defer body.deinit(gpa);
+    if (srcand) {
+        keySrcAndMatte(head);
+        keySrcAndMatte(body);
+    }
     const anchors = bgb.NeckAnchors{
         .head = .{
             .x = @as(i32, face_record.center.x) - face_record.delta.x,
@@ -319,6 +333,15 @@ pub fn assembleDetailedForSourcePose(
 }
 
 pub fn assembleDetailedAnalysis(gpa: std.mem.Allocator, avb_data: []const u8, analysis: *const emotion_mod.TextAnalysis) !Rendered {
+    return assembleDetailedAnalysisInner(gpa, avb_data, analysis, false);
+}
+
+fn assembleDetailedAnalysisInner(
+    gpa: std.mem.Allocator,
+    avb_data: []const u8,
+    analysis: *const emotion_mod.TextAnalysis,
+    srcand: bool,
+) !Rendered {
     const asset = try avb_asset.parse(avb_data);
     var table = try avb_asset.parsePoseTable(gpa, avb_data);
     defer table.deinit(gpa);
@@ -327,6 +350,7 @@ pub fn assembleDetailedAnalysis(gpa: std.mem.Allocator, avb_data: []const u8, an
         const record = bgb.selectPose(table.records, .body, choice.emotion.assetIndex(), choice.intensity) orelse
             return error.PoseNotFound;
         const image = try bgb.decodePoseForEmotion(gpa, avb_data, .body, choice.emotion.assetIndex(), choice.intensity);
+        if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
             .face_x = record.face.x,
@@ -356,6 +380,10 @@ pub fn assembleDetailedAnalysis(gpa: std.mem.Allocator, avb_data: []const u8, an
         torso_choice.intensity,
     );
     defer body.deinit(gpa);
+    if (srcand) {
+        keySrcAndMatte(head);
+        keySrcAndMatte(body);
+    }
     const anchors = bgb.NeckAnchors{
         .head = .{
             .x = @as(i32, face_record.center.x) - face_record.delta.x,
@@ -401,6 +429,205 @@ fn selectAvailable(
 /// Authored `face.y` is unused for simple-avatar layout. Do not "improve" this.
 fn simpleHeadHeight(image_height: u32) i32 {
     return @intCast(image_height / 2);
+}
+
+/// `CBodyCam::DrawBody` calls `DrawBody(..., FALSE)` and `CBodySingle` uses
+/// `SRCAND`. Exact white is the paper matte: it leaves the destination
+/// unchanged. Chrome RGBA blits must key that matte or the figure becomes a
+/// white rectangle on the roster / body camera.
+pub fn keySrcAndMatte(image: Image) void {
+    for (image.pixels) |*pixel| {
+        if (pixel.* & 0x00ffffff == 0x00ffffff) pixel.* = 0x00000000;
+    }
+}
+
+/// Member-list / CAST portrait. Microsoft uses `CAvatarX::GetIconPose`
+/// (`avatar.h:251`) — the authored `AK_ICON` mugshot — for roster and title
+/// stars. Generated HD packages smash the whole simple-avatar body into 64×64
+/// without preserving aspect; those fail `GetIconPose` and fall back to the
+/// `CBodySingle::GetDimInfo` head band (`ydim/2`). Color packages store a
+/// real portrait icon and keep it.
+pub fn chromePortrait(gpa: std.mem.Allocator, avb_data: []const u8) !Image {
+    const asset = try avb_asset.parse(avb_data);
+    var icon = try bgb.decodeIcon(gpa, avb_data);
+    errdefer icon.deinit(gpa);
+    keySrcAndMatte(icon);
+
+    if (asset.kind == .simple_avatar) {
+        const analysis = emotion_mod.analyzeText("");
+        var rendered = try assembleDetailedAnalysisInner(gpa, avb_data, &analysis, true);
+        defer rendered.deinit(gpa);
+        // Generated Color/HD packages always store a 64×64 AK_ICON. HD smashes
+        // the whole body; Color portraits can still be a hair pancake. Both
+        // read better as a silhouette mugshot. Authored simple icons keep
+        // other sizes and stay on GetIconPose.
+        if (icon.width == 64 and icon.height == 64) {
+            const portrait = try cropHeadPortrait(gpa, rendered.image, rendered.head_height);
+            icon.deinit(gpa);
+            return portrait;
+        }
+    }
+
+    const trimmed = trimTransparent(gpa, icon) catch return icon;
+    icon.deinit(gpa);
+    return trimmed;
+}
+
+/// Body-camera figure. `CBodyCam::DrawBody(..., FALSE)` (`bodycam.cpp:499`):
+/// full body, no aura/nimbus, `SRCAND` paper (white leaves dest). Layers are
+/// keyed before the neck join so a head DIB's white sticker cannot cut the
+/// torso — the same ROP as `CBodyDouble::DrawBody`.
+pub fn chromeBody(gpa: std.mem.Allocator, avb_data: []const u8, text: []const u8) !Image {
+    const analysis = emotion_mod.analyzeText(text);
+    var rendered = try assembleDetailedAnalysisInner(gpa, avb_data, &analysis, true);
+    return takeTrimmed(gpa, &rendered.image);
+}
+
+/// Body-camera figure for an explicit cooked UDI / mood-dial pose.
+pub fn chromeBodyForSourcePose(gpa: std.mem.Allocator, avb_data: []const u8, pose: udi.PoseState) !Image {
+    var rendered = try assembleDetailedForSourcePoseInner(gpa, avb_data, pose, true);
+    return takeTrimmed(gpa, &rendered.image);
+}
+
+fn takeTrimmed(gpa: std.mem.Allocator, image: *Image) !Image {
+    const trimmed = trimTransparent(gpa, image.*) catch return image.*;
+    image.deinit(gpa);
+    return trimmed;
+}
+
+/// Generated HD icons are `resize((64, 64))` of the neutral pose. Authored
+/// mugshots and Color `--portrait-icon` crops do not track that stretch.
+fn iconLooksLikeStretchedBody(icon: Image, body: Image) bool {
+    if (icon.width == 0 or icon.height == 0 or body.width == 0 or body.height == 0) return false;
+    if (icon.width != 64 or icon.height != 64) return false;
+    if (body.height <= icon.height * 2 and body.width <= icon.width * 2) return false;
+
+    var opaque_icon: usize = 0;
+    var matches: usize = 0;
+    var samples: usize = 0;
+    var y: u32 = 0;
+    while (y < icon.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < icon.width) : (x += 1) {
+            const icon_opaque = icon.pixels[y * icon.width + x] >> 24 != 0;
+            if (icon_opaque) opaque_icon += 1;
+            const bx = @min(body.width - 1, @as(u32, @intCast(@divTrunc(@as(u64, x) * body.width, icon.width))));
+            const by = @min(body.height - 1, @as(u32, @intCast(@divTrunc(@as(u64, y) * body.height, icon.height))));
+            const body_opaque = body.pixels[by * body.width + bx] >> 24 != 0;
+            samples += 1;
+            if (icon_opaque == body_opaque) matches += 1;
+        }
+    }
+    const coverage = opaque_icon * 100 / (@as(usize, icon.width) * icon.height);
+    const agreement = matches * 100 / samples;
+    return coverage >= 25 and agreement >= 80;
+}
+
+fn cropHeadPortrait(gpa: std.mem.Allocator, image: Image, head_height: i32) !Image {
+    // Generated poses sit below leftover card padding, so `ydim/2` from y=0
+    // can be only hair. Microsoft `GetDimInfo` still owns strip layout
+    // (`headHeight = ydim/2`); chrome mugshots follow the Color packager:
+    // upper 3/5 of the opaque silhouette, tightened to a 5:4 head frame.
+    _ = head_height;
+    const bbox = opaqueBounds(image) orelse return copyRect(gpa, image, 0, 0, image.width, image.height);
+    const crop_h = @min(bbox.h, @max(@as(u32, 64), bbox.h * 3 / 5));
+    const band = opaqueBoundsIn(image, bbox.x, bbox.y, bbox.w, crop_h) orelse bbox;
+    const crop_w = if (band.w > (band.h * 5 + 3) / 4)
+        @min(band.w, (band.h * 5 + 3) / 4)
+    else
+        band.w;
+    const crop_x = if (crop_w >= band.w) band.x else blk: {
+        const center = opaqueCenterX(image, band.x, band.y, band.w, band.h) orelse band.x + band.w / 2;
+        const raw: i32 = @as(i32, @intCast(center)) - @as(i32, @intCast(crop_w / 2));
+        const min_x: i32 = @intCast(band.x);
+        const max_x: i32 = @intCast(band.x + band.w - crop_w);
+        break :blk @as(u32, @intCast(std.math.clamp(raw, min_x, max_x)));
+    };
+    var head = try copyRect(gpa, image, crop_x, band.y, crop_w, band.h);
+    const trimmed = trimTransparent(gpa, head) catch return head;
+    head.deinit(gpa);
+    return trimmed;
+}
+
+const Bounds = struct { x: u32, y: u32, w: u32, h: u32 };
+
+fn opaqueBounds(image: Image) ?Bounds {
+    return opaqueBoundsIn(image, 0, 0, image.width, image.height);
+}
+
+fn opaquePixel(image: Image, x: u32, y: u32) bool {
+    if (x >= image.width or y >= image.height) return false;
+    return image.pixels[y * image.width + x] >> 24 != 0;
+}
+
+fn hasOpaqueNeighbor(image: Image, x: u32, y: u32) bool {
+    const x0 = if (x == 0) 0 else x - 1;
+    const y0 = if (y == 0) 0 else y - 1;
+    const x1 = @min(image.width - 1, x + 1);
+    const y1 = @min(image.height - 1, y + 1);
+    var row = y0;
+    while (row <= y1) : (row += 1) {
+        var col = x0;
+        while (col <= x1) : (col += 1) {
+            if (col == x and row == y) continue;
+            if (opaquePixel(image, col, row)) return true;
+        }
+    }
+    return false;
+}
+
+fn opaqueBoundsIn(image: Image, x: u32, y: u32, w: u32, h: u32) ?Bounds {
+    var min_x: u32 = image.width;
+    var min_y: u32 = image.height;
+    var max_x: u32 = 0;
+    var max_y: u32 = 0;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            const px = x + col;
+            const py = y + row;
+            if (!opaquePixel(image, px, py) or !hasOpaqueNeighbor(image, px, py)) continue;
+            min_x = @min(min_x, px);
+            min_y = @min(min_y, py);
+            max_x = @max(max_x, px + 1);
+            max_y = @max(max_y, py + 1);
+        }
+    }
+    if (min_x >= max_x or min_y >= max_y) return null;
+    return .{ .x = min_x, .y = min_y, .w = max_x - min_x, .h = max_y - min_y };
+}
+
+fn opaqueCenterX(image: Image, x: u32, y: u32, w: u32, h: u32) ?u32 {
+    var weighted: u64 = 0;
+    var mass: u64 = 0;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            if (image.pixels[(y + row) * image.width + (x + col)] >> 24 == 0) continue;
+            weighted += x + col;
+            mass += 1;
+        }
+    }
+    if (mass == 0) return null;
+    return @intCast(weighted / mass);
+}
+
+fn copyRect(gpa: std.mem.Allocator, image: Image, x: u32, y: u32, w: u32, h: u32) !Image {
+    const pixels = try gpa.alloc(u32, @as(usize, w) * h);
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        const src = (y + row) * image.width + x;
+        const dst = row * w;
+        @memcpy(pixels[dst .. dst + w], image.pixels[src .. src + w]);
+    }
+    return .{ .width = w, .height = h, .pixels = pixels };
+}
+
+fn trimTransparent(gpa: std.mem.Allocator, image: Image) !Image {
+    const bbox = opaqueBounds(image) orelse return error.PoseNotFound;
+    return copyRect(gpa, image, bbox.x, bbox.y, bbox.w, bbox.h);
 }
 
 fn joinExact(gpa: std.mem.Allocator, anchors: bgb.NeckAnchors, head: Image, body: Image) !Image {
@@ -466,6 +693,116 @@ test "assemble produces a figure with transparent margins and opaque ink" {
         if (p >> 24 != 0) opaque_px += 1;
     }
     try std.testing.expect(opaque_px > 1000);
+}
+
+test "chrome portraits crop simple-avatar heads and key the SRCAND paper matte" {
+    const gpa = std.testing.allocator;
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var body = try assembleDetailedForText(gpa, jordan, "");
+    defer body.deinit(gpa);
+    var portrait = try chromePortrait(gpa, jordan);
+    defer portrait.deinit(gpa);
+    try std.testing.expect(portrait.height <= @as(u32, @intCast(body.head_height)));
+    try std.testing.expect(portrait.height < body.image.height);
+    try std.testing.expect(portrait.width > 0);
+    for (portrait.pixels) |pixel| try std.testing.expect(pixel & 0x00ffffff != 0x00ffffff);
+
+    const hd = @embedFile("../assets/generated/anna-reimagined-hd-v1.avb");
+    var smashed = try bgb.decodeIcon(gpa, hd);
+    defer smashed.deinit(gpa);
+    var hd_portrait = try chromePortrait(gpa, hd);
+    defer hd_portrait.deinit(gpa);
+    try std.testing.expect(hd_portrait.height > smashed.height or hd_portrait.width != smashed.width);
+    for (hd_portrait.pixels) |pixel| try std.testing.expect(pixel & 0x00ffffff != 0x00ffffff);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var color_portrait = try chromePortrait(gpa, color);
+    defer color_portrait.deinit(gpa);
+    var colorful = false;
+    for (color_portrait.pixels) |pixel| {
+        if (pixel >> 24 == 0) continue;
+        const red: u8 = @truncate(pixel >> 16);
+        const green: u8 = @truncate(pixel >> 8);
+        const blue: u8 = @truncate(pixel);
+        if (red != green or green != blue) colorful = true;
+    }
+    try std.testing.expect(colorful);
+
+    const anna = @embedFile("../assets/testdata/anna.avb");
+    var icon = try bgb.decodeIcon(gpa, anna);
+    defer icon.deinit(gpa);
+    var mugshot = try chromePortrait(gpa, anna);
+    defer mugshot.deinit(gpa);
+    try std.testing.expect(mugshot.width > 0 and mugshot.height > 0);
+    try std.testing.expect(mugshot.width <= icon.width);
+    try std.testing.expect(mugshot.height <= icon.height);
+}
+
+fn countOpaque(image: Image) usize {
+    var count: usize = 0;
+    for (image.pixels) |pixel| {
+        if (pixel >> 24 != 0) count += 1;
+    }
+    return count;
+}
+
+test "chrome body SRCAND keeps torso ink under the head paper" {
+    const gpa = std.testing.allocator;
+    const anna = @embedFile("../assets/testdata/anna.avb");
+    var punched = try assembleForText(gpa, anna, "");
+    defer punched.deinit(gpa);
+    keySrcAndMatte(punched);
+    var chrome = try chromeBody(gpa, anna, "");
+    defer chrome.deinit(gpa);
+    try std.testing.expect(countOpaque(chrome) > countOpaque(punched));
+}
+
+test "HD chrome portraits reject smashed 64x64 bodies and Color keeps the mugshot" {
+    const gpa = std.testing.allocator;
+    const hd = @embedFile("../assets/generated/anna-reimagined-hd-v1.avb");
+    var smashed = try bgb.decodeIcon(gpa, hd);
+    defer smashed.deinit(gpa);
+    keySrcAndMatte(smashed);
+    var hd_pose = try assembleDetailedForText(gpa, hd, "");
+    defer hd_pose.deinit(gpa);
+    keySrcAndMatte(hd_pose.image);
+    try std.testing.expect(iconLooksLikeStretchedBody(smashed, hd_pose.image));
+    var hd_body = try chromeBody(gpa, hd, "");
+    defer hd_body.deinit(gpa);
+    var hd_portrait = try chromePortrait(gpa, hd);
+    defer hd_portrait.deinit(gpa);
+    try std.testing.expect(hd_portrait.height != smashed.height or hd_portrait.width != smashed.width);
+    try std.testing.expect(hd_portrait.height >= 80);
+    try std.testing.expect(hd_portrait.height * 2 >= hd_portrait.width);
+    try std.testing.expect(countOpaque(hd_portrait) * 4 >= @as(usize, hd_portrait.width) * hd_portrait.height);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var color_icon = try bgb.decodeIcon(gpa, color);
+    defer color_icon.deinit(gpa);
+    keySrcAndMatte(color_icon);
+    var color_body = try chromeBody(gpa, color, "");
+    defer color_body.deinit(gpa);
+    try std.testing.expect(!iconLooksLikeStretchedBody(color_icon, color_body));
+    var color_portrait = try chromePortrait(gpa, color);
+    defer color_portrait.deinit(gpa);
+    try std.testing.expect(color_portrait.height < color_body.height);
+    try std.testing.expect(color_portrait.height * 2 >= color_portrait.width);
+}
+
+test "chrome body keeps the full simple-avatar figure after keying white" {
+    const gpa = std.testing.allocator;
+    const color = @embedFile("../assets/generated/kevin-color-hd-v1.avb");
+    var portrait = try chromePortrait(gpa, color);
+    defer portrait.deinit(gpa);
+    var body = try chromeBody(gpa, color, "");
+    defer body.deinit(gpa);
+    try std.testing.expect(body.height > portrait.height);
+    var transparent = false;
+    for (body.pixels) |pixel| if (pixel >> 24 == 0) {
+        transparent = true;
+        break;
+    };
+    try std.testing.expect(transparent);
 }
 
 test "simple-avatar GetDimInfo keeps the source half-body head height" {

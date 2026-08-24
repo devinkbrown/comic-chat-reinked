@@ -64,6 +64,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (argc >= 1 and std.mem.eql(u8, argv[0], "render-chrome")) {
+        const kind = if (argc >= 3) argv[2] else "portrait";
+        try runRenderChrome(gpa, init.io, if (argc >= 2) argv[1] else "anna hd", kind);
+        return;
+    }
+
     if (argc >= 1 and std.mem.eql(u8, argv[0], "render-strip")) {
         try runRenderStrip(gpa, init.io, if (argc >= 2) argv[1] else "source", if (argc >= 3) argv[2] else "ppm");
         return;
@@ -842,6 +848,21 @@ fn renderSolo(gpa: std.mem.Allocator, io: std.Io, img: cc.assets.bgb.Image) !voi
     cf.clear(cc.render.canvas.white);
     composite(&cf, img.pixels, img.width, img.height, pad, pad, 0);
     try emitPpm(gpa, io, cf.px, W, H);
+}
+
+fn runRenderChrome(gpa: std.mem.Allocator, io: std.Io, name: []const u8, kind: []const u8) !void {
+    const avb = avatarByName(name) orelse cc.comic.strip.avatarByName(name) orelse {
+        elog("unknown avatar '{s}'\n", .{name});
+        return;
+    };
+    var image = if (std.mem.eql(u8, kind, "body"))
+        try cc.comic.figure.chromeBody(gpa, avb, "")
+    else
+        try cc.comic.figure.chromePortrait(gpa, avb);
+    defer image.deinit(gpa);
+    const png = try cc.render.png.encode(gpa, image.pixels, image.width, image.height);
+    defer gpa.free(png);
+    try writeStdout(io, png);
 }
 
 fn runRenderFigure(gpa: std.mem.Allocator, io: std.Io, name: []const u8, emotion: usize) !void {
@@ -4258,12 +4279,16 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
     var transcript = cc.comic.session.Transcript.init(gpa);
     defer transcript.deinit();
     if (!std.mem.eql(u8, surface, "empty-members")) try transcript.setSelf("comicchat");
-    const with_conversation = std.mem.eql(u8, surface, "conversation") or std.mem.eql(u8, surface, "member") or std.mem.eql(u8, surface, "text-conversation");
+    const with_conversation = std.mem.eql(u8, surface, "conversation") or std.mem.eql(u8, surface, "member") or std.mem.eql(u8, surface, "text-conversation") or std.mem.eql(u8, surface, "cast");
     if (with_conversation) {
         try transcript.setAvatar("comicchat", "anna");
         try transcript.setAvatar("alex", "armando");
+        try transcript.setAvatar("maya", "anna color");
+        try transcript.setAvatar("jo", "kevin original");
         try transcript.add("alex", "Welcome to #root. The new studio is ready.");
         try transcript.add("comicchat", "Great. The comic view feels much clearer now.");
+        try transcript.add("maya", "Color portraits should stay faces, not smashed bodies.");
+        try transcript.add("jo", "Original mugshots use the authored icon.");
         if (std.mem.eql(u8, surface, "text-conversation")) {
             try transcript.add("comicchat", "The chat buffer now keeps a full thought together instead of turning every sentence into a separate visual interruption.");
             try transcript.add("alex", "That makes the room easier to scan when several people are talking at once.");
@@ -4337,8 +4362,28 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
     }
     if (std.mem.endsWith(u8, surface, "character")) {
         view.openDialog(.character);
-        try view.setDialogValueAt(0, if (std.mem.endsWith(u8, surface, "color-character")) "Xeno Color" else "Xeno HD");
+        const selected = if (std.mem.endsWith(u8, surface, "color-character"))
+            "Xeno Color"
+        else if (std.mem.endsWith(u8, surface, "original-character"))
+            "Xeno Original"
+        else
+            "Xeno HD";
+        try view.setDialogValueAt(0, selected);
         try view.setDialogValueAt(1, "Laughing");
+    }
+    if (std.mem.eql(u8, surface, "cast")) {
+        const extras = [_]struct { nick: []const u8, avatar: []const u8 }{
+            .{ .nick = "tong", .avatar = "tongtyed hd" },
+            .{ .nick = "xeno", .avatar = "xeno hd" },
+            .{ .nick = "tiki", .avatar = "tiki color" },
+            .{ .nick = "jordan", .avatar = "jordan original" },
+            .{ .nick = "sage", .avatar = "sage color" },
+            .{ .nick = "bolo", .avatar = "bolo hd" },
+        };
+        for (extras) |extra| {
+            try transcript.setAvatar(extra.nick, extra.avatar);
+            try transcript.add(extra.nick, "Present.");
+        }
     }
     if (std.mem.endsWith(u8, surface, "status")) view.status_panel_open = true;
     if (std.mem.eql(u8, surface, "inputs")) {
