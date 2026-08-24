@@ -1576,7 +1576,7 @@ pub const View = struct {
         const content = Rect{ .x = rect.x, .y = rect.y + 30, .w = rect.w, .h = @max(0, rect.h - 30) };
         if (transcript.roster.items.len == 0) {
             const waiting = emptyPageCopy(status).waiting;
-            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "The playbill is empty", if (waiting) "Connect and take a panel" else "Join and take a panel");
+            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "Playbill empty", if (waiting) "Connect and take a panel" else "Join and take a panel");
             return;
         }
         const viewport = memberViewport(rect, icon_mode);
