@@ -3905,7 +3905,6 @@ fn applyJoinDenied(
         try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
     }
     refreshJoinedState(workspace, state, "join denied");
-    state.status = "join denied";
     return true;
 }
 
@@ -4691,6 +4690,14 @@ test "self leave and join denial clear membership without a live socket" {
     try std.testing.expect(!client.hasRestorationTargets());
     try std.testing.expectEqualStrings("join denied", state.status);
     try std.testing.expectEqualStrings("Cannot join #locked: Cannot join channel (+i)", workspace.rooms.items[root].transcript.lines.items[1].text);
+
+    workspace.rooms.items[root].joined = true;
+    state.joined = true;
+    state.status = "connected";
+    const full = cc.net.message.parse(":server 471 me #overflow :Cannot join channel (+l)");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &full));
+    try std.testing.expect(state.joined);
+    try std.testing.expectEqualStrings("connected", state.status);
 }
 
 test "unknown CTCP is consumed while ACTION and SOUND stay speech" {
