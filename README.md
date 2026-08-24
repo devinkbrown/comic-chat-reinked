@@ -63,7 +63,7 @@ zig build run -- app eshmaki.me your-nick '#root' \
 ## Releases
 
 Each `comicchat-portable-*` GitHub release contains a portable source archive,
-Windows x86_64 ZIP, Linux x86_64 tarball, FreeBSD x86_64 tarball, OpenBSD
+Windows x86_64 ZIP, Linux x86_64 and aarch64 tarballs, FreeBSD x86_64 tarball, OpenBSD
 x86_64 tarball, and a SHA-256 manifest. Download the archive for your
 platform, extract it, and run `reinked` (or `reinked.exe` on Windows).
 
@@ -124,8 +124,9 @@ conversations, transcript range selection/copy/delete, source page-break
 editing, printable PDF export/open/print, and bold/italic/underline composer
 controls. The multiline composer sends each entered line through the same
 bounded IRC path. Windows uses the Unicode clipboard and common file dialogs;
-Wayland/X11 use the installed desktop clipboard and picker services with the
-internal clipboard/path editor as a safe fallback.
+Wayland/X11 speak the native clipboard protocols (`wl_data_device` /
+ICCCM `CLIPBOARD`) and fall back to `wl-copy`/`xclip`/`xsel` plus the
+internal clipboard/path editor when the desktop helper is missing.
 
 The status bar and the first toolbar button both open a prefilled live
 Connection Setup dialog. Applying it stops the current connection, validates
@@ -216,9 +217,11 @@ faces is retained in `src/render/COMIC_NEUE_LICENSE.txt`.
 Cross-compile examples:
 
 ```sh
+zig build -Dtarget=x86_64-linux
+zig build -Dtarget=aarch64-linux
+zig build linux
 zig build -Dtarget=x86_64-windows
 zig build -Dtarget=aarch64-windows
-zig build -Dtarget=x86_64-linux
 ```
 
 Cross-compilation installs the Windows binary at
@@ -264,12 +267,14 @@ pass a host and/or channel to override either default.
 
 The direct Wayland client parses compositor XKB keymaps, implements configured
 key repeat, accepts committed compose/dead-key/IME text through text-input-v3,
-maps native touch contacts to the shared interaction contract, and allocates
-scaled buffers from `wl_output` scale. Win32 uses per-monitor-v2 DPI geometry,
-Unicode/IME input, the Unicode clipboard, and native common dialogs. Window
-creation, configure/resize, scaled presentation, keyboard/pointer input, IRC
-traffic, and clean close are implemented across Wayland, X11, Win32, FreeBSD,
-and OpenBSD.
+maps native touch contacts to the shared interaction contract, tracks the
+entered `wl_output` integer scale, and copies through `wl_data_device`.
+X11 authenticates with MIT-MAGIC-COOKIE-1, presents integer HiDPI frames from
+`GDK_SCALE`/`Xft.dpi`, and owns the ICCCM clipboard. Win32 uses per-monitor-v2
+DPI geometry, Unicode/IME input, the Unicode clipboard, and native common
+dialogs. Window creation, configure/resize, scaled presentation,
+keyboard/pointer input, IRC traffic, and clean close are implemented across
+Wayland, X11, Win32, FreeBSD, and OpenBSD.
 
 The portable lane has no SDL dependency. Native backends speak the Wayland/X11
 protocols or Win32 APIs directly, and all display the same software-rendered

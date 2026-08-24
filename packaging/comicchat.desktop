@@ -6,4 +6,5 @@ Exec=reinked %f
 Icon=applications-internet
 Terminal=false
 Categories=Network;Chat;
+StartupWMClass=comicchat
 MimeType=application/x-comicchat-conversation;application/x-comicchat-locator;

@@ -27,6 +27,7 @@ jobs:
         run: |
           zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSafe -Dstrip=true
           zig build -Dtarget=x86_64-linux -Doptimize=ReleaseSafe -Dstrip=true
+          zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSafe -Dstrip=true
           zig build -Dtarget=x86_64-freebsd -Doptimize=ReleaseSafe -Dstrip=true
           zig build -Dtarget=x86_64-openbsd -Doptimize=ReleaseSafe -Dstrip=true
       - name: Check repository hygiene

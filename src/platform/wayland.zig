@@ -52,6 +52,16 @@ const seat_get_keyboard: u16 = 1;
 const seat_get_touch: u16 = 2;
 const seat_release: u16 = 3;
 const keyboard_release: u16 = 0;
+const data_device_manager_create_data_source: u16 = 0;
+const data_device_manager_get_data_device: u16 = 1;
+const data_source_offer: u16 = 0;
+const data_source_destroy: u16 = 1;
+const data_device_set_selection: u16 = 1;
+const data_device_release: u16 = 2;
+const data_offer_receive: u16 = 1;
+const data_offer_destroy: u16 = 2;
+const max_outputs: usize = 8;
+const max_clipboard_bytes = 1024 * 1024;
 const xdg_wm_base_destroy: u16 = 0;
 const xdg_wm_base_get_xdg_surface: u16 = 2;
 const xdg_wm_base_pong: u16 = 3;
@@ -75,8 +85,10 @@ const Globals = struct {
     shm: Global = .{},
     seat: Global = .{},
     xdg_wm_base: Global = .{},
-    output: Global = .{},
+    outputs: [max_outputs]Global = @splat(.{}),
+    output_count: u8 = 0,
     text_input_manager: Global = .{},
+    data_device_manager: Global = .{},
 
     fn record(self: *Globals, name: u32, interface: []const u8, version: u32) void {
         const value = Global{ .name = name, .version = version };
@@ -88,10 +100,13 @@ const Globals = struct {
             self.seat = value;
         } else if (std.mem.eql(u8, interface, "xdg_wm_base") and self.xdg_wm_base.name == 0) {
             self.xdg_wm_base = value;
-        } else if (std.mem.eql(u8, interface, "wl_output") and self.output.name == 0) {
-            self.output = value;
+        } else if (std.mem.eql(u8, interface, "wl_output") and self.output_count < max_outputs) {
+            self.outputs[self.output_count] = value;
+            self.output_count += 1;
         } else if (std.mem.eql(u8, interface, "zwp_text_input_manager_v3") and self.text_input_manager.name == 0) {
             self.text_input_manager = value;
+        } else if (std.mem.eql(u8, interface, "wl_data_device_manager") and self.data_device_manager.name == 0) {
+            self.data_device_manager = value;
         }
     }
 };
@@ -311,10 +326,26 @@ pub const Window = struct {
     xdg_wm_base_id: u32 = 0,
     xdg_surface_id: u32 = 0,
     xdg_toplevel_id: u32 = 0,
-    output_id: u32 = 0,
+    output_ids: [max_outputs]u32 = @splat(0),
+    output_scales: [max_outputs]u32 = @splat(1),
+    output_count: u8 = 0,
+    entered_outputs: [max_outputs]u32 = @splat(0),
+    entered_count: u8 = 0,
     output_scale: u32 = 1,
     text_input_manager_id: u32 = 0,
     text_input_id: u32 = 0,
+    data_device_manager_id: u32 = 0,
+    data_device_id: u32 = 0,
+    data_source_id: u32 = 0,
+    data_offer_id: u32 = 0,
+    pending_offer_id: u32 = 0,
+    offer_has_text: bool = false,
+    pending_offer_has_text: bool = false,
+    last_serial: u32 = 0,
+    clipboard_text: []u8 = &.{},
+    axis_have_discrete: bool = false,
+    ime_composing: bool = false,
+    last_committed: ?u21 = null,
     committed_text: std.ArrayList(u21) = .empty,
     committed_text_offset: usize = 0,
 
@@ -328,6 +359,10 @@ pub const Window = struct {
     shift_right: bool = false,
     control_left: bool = false,
     control_right: bool = false,
+    alt_left: bool = false,
+    alt_right: bool = false,
+    super_left: bool = false,
+    super_right: bool = false,
     caps_lock: bool = false,
     /// The compositor's layout, once a keymap event with a supported format
     /// has been received and successfully parsed. Null before that (falls
@@ -358,46 +393,19 @@ pub const Window = struct {
 
         const self = try gpa.create(Window);
         errdefer gpa.destroy(self);
-        self.gpa = gpa;
-        self.threaded = std.Io.Threaded.init(gpa, .{});
+        self.* = .{
+            .gpa = gpa,
+            .threaded = std.Io.Threaded.init(gpa, .{}),
+            .conn = undefined,
+            .width = w,
+            .height = h,
+        };
         errdefer self.threaded.deinit();
 
         const io = self.threaded.io();
         const stream = try openUnixSocket(io, socket_path);
         errdefer stream.close(io);
         self.conn = .{ .io = io, .stream = stream };
-        self.registry_id = 0;
-        self.compositor_id = 0;
-        self.compositor_version = 0;
-        self.shm_id = 0;
-        self.seat_id = 0;
-        self.seat_version = 0;
-        self.keyboard_id = 0;
-        self.pointer_id = 0;
-        self.touch_id = 0;
-        self.touch_contact = null;
-        self.pointer_x = 0;
-        self.pointer_y = 0;
-        self.surface_id = 0;
-        self.xdg_wm_base_id = 0;
-        self.xdg_surface_id = 0;
-        self.xdg_toplevel_id = 0;
-        self.output_id = 0;
-        self.output_scale = 1;
-        self.text_input_manager_id = 0;
-        self.text_input_id = 0;
-        self.committed_text = .empty;
-        self.committed_text_offset = 0;
-        self.width = w;
-        self.height = h;
-        self.pending_width = 0;
-        self.pending_height = 0;
-        self.configured = false;
-        self.argb_supported = false;
-        self.shift_left = false;
-        self.shift_right = false;
-        self.caps_lock = false;
-        self.buffers = .empty;
 
         var globals: Globals = .{};
         try self.discoverGlobals(&globals);
@@ -420,9 +428,19 @@ pub const Window = struct {
         self.xdg_wm_base_id = try self.conn.allocId();
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.xdg_wm_base, "xdg_wm_base", 1, self.xdg_wm_base_id);
 
-        if (globals.output.name != 0) {
-            self.output_id = try self.conn.allocId();
-            try sendBind(&self.conn, self.gpa, self.registry_id, globals.output, "wl_output", @min(globals.output.version, 2), self.output_id);
+        var output_i: u8 = 0;
+        while (output_i < globals.output_count) : (output_i += 1) {
+            const output_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.outputs[output_i], "wl_output", @min(globals.outputs[output_i].version, 2), output_id);
+            self.output_ids[self.output_count] = output_id;
+            self.output_scales[self.output_count] = 1;
+            self.output_count += 1;
+        }
+        if (globals.data_device_manager.name != 0) {
+            self.data_device_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.data_device_manager, "wl_data_device_manager", @min(globals.data_device_manager.version, 3), self.data_device_manager_id);
+            self.data_device_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.data_device_manager_id, data_device_manager_get_data_device, self.data_device_id, self.seat_id);
         }
         if (globals.text_input_manager.name != 0) {
             self.text_input_manager_id = try self.conn.allocId();
@@ -453,11 +471,17 @@ pub const Window = struct {
     }
 
     pub fn writeClipboard(self: *Window, text: []const u8) !void {
-        return services.writeClipboard(self.conn.io, .wayland, text);
+        if (self.writeClipboardNative(text)) |_| return else |_| {
+            return services.writeClipboard(self.conn.io, .wayland, text);
+        }
     }
 
     pub fn readClipboard(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        return services.readClipboard(gpa, self.conn.io, .wayland);
+        if (self.readClipboardNative(gpa)) |text| {
+            return text;
+        } else |_| {
+            return services.readClipboard(gpa, self.conn.io, .wayland);
+        }
     }
 
     pub fn chooseFile(self: *Window, gpa: std.mem.Allocator, save: bool, title: []const u8) !?[]u8 {
@@ -480,6 +504,7 @@ pub const Window = struct {
         self.destroyProtocolObjects() catch {};
         self.conn.stream.close(self.conn.io);
         if (self.xkb_keymap) |*keymap| keymap.deinit();
+        if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         for (self.buffers.items) |*buffer| buffer.deinit();
         self.buffers.deinit(self.gpa);
         self.committed_text.deinit(self.gpa);
@@ -566,6 +591,7 @@ pub const Window = struct {
     /// a burst of catch-up repeats once it resumes.
     pub fn checkRepeat(self: *Window) ?Event {
         if (self.takeCommittedKey()) |event| return event;
+        if (self.ime_composing or self.last_committed != null) return null;
         const code = self.held_key_code orelse return null;
         if (self.repeat_rate_per_sec <= 0) return null;
         const now = nowMs(self.conn.io);
@@ -621,13 +647,30 @@ pub const Window = struct {
             }
             return null;
         }
-        if (self.output_id != 0 and msg.object == self.output_id) {
+        if (self.outputIndex(msg.object)) |index| {
             if (msg.opcode == 3) {
                 if (msg.body.len != 4) return error.InvalidWaylandMessage;
                 const announced = getI32(msg.body);
-                if (announced > 0 and announced <= 8) self.output_scale = @intCast(announced);
+                if (announced > 0 and announced <= 8) {
+                    self.output_scales[index] = @intCast(announced);
+                    const previous = self.output_scale;
+                    self.output_scale = self.currentOutputScale();
+                    if (self.configured and previous != self.output_scale) return Event.expose;
+                }
             }
             return null;
+        }
+        if (self.data_device_id != 0 and msg.object == self.data_device_id) {
+            return try self.dataDeviceEvent(msg.opcode, msg.body);
+        }
+        if (self.data_source_id != 0 and msg.object == self.data_source_id) {
+            return try self.dataSourceEvent(msg.opcode, msg.body);
+        }
+        if (self.data_offer_id != 0 and msg.object == self.data_offer_id) {
+            return try self.dataOfferEvent(msg.opcode, msg.body);
+        }
+        if (self.pending_offer_id != 0 and msg.object == self.pending_offer_id) {
+            return try self.dataOfferEvent(msg.opcode, msg.body);
         }
         if (self.text_input_id != 0 and msg.object == self.text_input_id) {
             return try self.textInputEvent(msg.opcode, msg.body);
@@ -672,7 +715,7 @@ pub const Window = struct {
             }
             return Event.expose;
         }
-        if (msg.object == self.surface_id) return null;
+        if (msg.object == self.surface_id) return try self.surfaceEvent(msg.opcode, msg.body);
         for (self.buffers.items) |*buffer| {
             if (msg.object == buffer.id) {
                 if (msg.opcode == 0) buffer.busy = false;
@@ -702,6 +745,13 @@ pub const Window = struct {
             self.keyboard_id = 0;
             self.shift_left = false;
             self.shift_right = false;
+            self.control_left = false;
+            self.control_right = false;
+            self.alt_left = false;
+            self.alt_right = false;
+            self.super_left = false;
+            self.super_right = false;
+            self.held_key_code = null;
         }
         if ((capabilities & seat_touch) != 0) {
             if (self.touch_id == 0) {
@@ -759,21 +809,31 @@ pub const Window = struct {
             },
             1 => { // leave(surface)
                 if (body.len != 4) return error.InvalidWaylandMessage;
+                self.ime_composing = false;
                 try sendEmpty(&self.conn, self.text_input_id, 2); // disable
                 try sendEmpty(&self.conn, self.text_input_id, 7);
+            },
+            2 => { // preedit_string(text, cursor_begin, cursor_end)
+                const text = try parseLeadingString(body);
+                self.ime_composing = text.len != 0;
             },
             3 => { // commit_string(text)
                 const text = try parseWireString(body);
                 if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidWaylandString;
                 var view = try std.unicode.Utf8View.init(text);
                 var iterator = view.iterator();
+                var last: ?u21 = null;
                 while (iterator.nextCodepoint()) |codepoint| {
                     if (self.committed_text.items.len - self.committed_text_offset >= 4096) break;
                     try self.committed_text.append(self.gpa, codepoint);
+                    last = codepoint;
                 }
+                self.last_committed = last;
+                self.ime_composing = false;
                 return self.takeCommittedKey();
             },
-            2, 4, 5 => {}, // preedit/delete/done do not commit application text
+            4 => {}, // delete_surrounding_text
+            5 => self.ime_composing = false, // done
             else => {},
         }
         return null;
@@ -794,6 +854,7 @@ pub const Window = struct {
         switch (opcode) {
             0 => { // enter(serial, surface, x, y)
                 if (body.len != 16) return error.InvalidWaylandMessage;
+                self.last_serial = get32(body[0..4]);
                 self.pointer_x = @divTrunc(getI32(body[8..12]), 256);
                 self.pointer_y = @divTrunc(getI32(body[12..16]), 256);
                 return .{ .pointer = .{ .kind = .move, .x = self.pointer_x, .y = self.pointer_y } };
@@ -810,6 +871,7 @@ pub const Window = struct {
             },
             3 => { // button(serial, time, button, state)
                 if (body.len != 16) return error.InvalidWaylandMessage;
+                self.last_serial = get32(body[0..4]);
                 const button: shared_event.PointerButton = switch (get32(body[8..12])) {
                     0x110 => .primary,
                     0x111 => .secondary,
@@ -836,6 +898,7 @@ pub const Window = struct {
             },
             4 => { // axis(time, axis, value)
                 if (body.len != 12) return error.InvalidWaylandMessage;
+                if (self.axis_have_discrete) return null;
                 if (get32(body[4..8]) != 0) return null;
                 const value = getI32(body[8..12]);
                 return .{ .pointer = .{
@@ -843,6 +906,22 @@ pub const Window = struct {
                     .x = self.pointer_x,
                     .y = self.pointer_y,
                     .wheel_y = if (value < 0) 1 else if (value > 0) -1 else 0,
+                } };
+            },
+            5 => { // frame
+                self.axis_have_discrete = false;
+                return null;
+            },
+            8 => { // axis_discrete(axis, discrete)
+                if (body.len != 8) return error.InvalidWaylandMessage;
+                if (get32(body[0..4]) != 0) return null;
+                self.axis_have_discrete = true;
+                const discrete = getI32(body[4..8]);
+                return .{ .pointer = .{
+                    .kind = .wheel,
+                    .x = self.pointer_x,
+                    .y = self.pointer_y,
+                    .wheel_y = if (discrete < 0) 1 else if (discrete > 0) -1 else 0,
                 } };
             },
             else => return null,
@@ -872,6 +951,7 @@ pub const Window = struct {
             },
             1 => { // enter(serial, surface, keys array)
                 if (body.len < 12) return error.InvalidWaylandMessage;
+                self.last_serial = get32(body[0..4]);
                 const keys_len: usize = @intCast(get32(body[8..12]));
                 if (12 + pad4(keys_len) != body.len) return error.InvalidWaylandMessage;
                 return null;
@@ -882,11 +962,17 @@ pub const Window = struct {
                 self.shift_right = false;
                 self.control_left = false;
                 self.control_right = false;
+                self.alt_left = false;
+                self.alt_right = false;
+                self.super_left = false;
+                self.super_right = false;
                 self.held_key_code = null;
+                self.ime_composing = false;
                 return null;
             },
             3 => { // key(serial, time, key, state)
                 if (body.len != 16) return error.InvalidWaylandMessage;
+                self.last_serial = get32(body[0..4]);
                 const code = get32(body[8..12]);
                 const state = get32(body[12..16]);
                 const down = state != 0;
@@ -895,12 +981,17 @@ pub const Window = struct {
                     54 => self.shift_right = down,
                     29 => self.control_left = down,
                     97 => self.control_right = down,
+                    56 => self.alt_left = down,
+                    100 => self.alt_right = down,
+                    125 => self.super_left = down,
+                    126 => self.super_right = down,
                     58 => if (state == 1) {
                         self.caps_lock = !self.caps_lock;
                     },
                     else => {},
                 }
-                if (code != 42 and code != 54 and code != 58) {
+                const is_modifier = code == 42 or code == 54 or code == 29 or code == 97 or code == 56 or code == 100 or code == 125 or code == 126 or code == 58;
+                if (!is_modifier) {
                     if (down) {
                         self.held_key_code = code;
                         self.held_key_shift = self.shift_left or self.shift_right;
@@ -910,9 +1001,22 @@ pub const Window = struct {
                         self.held_key_code = null;
                     }
                 }
-                if (!down or code == 42 or code == 54 or code == 29 or code == 97 or code == 58) return null;
+                if (!down) {
+                    self.last_committed = null;
+                    return null;
+                }
+                if (is_modifier) return null;
+                if (self.ime_composing or self.last_committed != null) return null;
                 const shifted = self.shift_left or self.shift_right;
-                return .{ .key = .{ .key = self.translateKey(code, shifted), .modifiers = .{ .shift = shifted, .control = self.control_left or self.control_right } } };
+                return .{ .key = .{
+                    .key = self.translateKey(code, shifted),
+                    .modifiers = .{
+                        .shift = shifted,
+                        .control = self.control_left or self.control_right,
+                        .alt = self.alt_left or self.alt_right,
+                        .super = self.super_left or self.super_right,
+                    },
+                } };
             },
             4 => { // modifiers(serial, depressed, latched, locked, group)
                 if (body.len != 20) return error.InvalidWaylandMessage;
@@ -969,6 +1073,165 @@ pub const Window = struct {
             }
         }
         return evdevToKey(code, shift, self.caps_lock);
+    }
+
+    fn outputIndex(self: *const Window, id: u32) ?usize {
+        var i: usize = 0;
+        while (i < self.output_count) : (i += 1) {
+            if (self.output_ids[i] == id) return i;
+        }
+        return null;
+    }
+
+    fn currentOutputScale(self: *const Window) u32 {
+        var scale: u32 = 1;
+        var i: usize = 0;
+        while (i < self.entered_count) : (i += 1) {
+            if (self.outputIndex(self.entered_outputs[i])) |index| {
+                scale = @max(scale, self.output_scales[index]);
+            }
+        }
+        if (self.entered_count == 0 and self.output_count != 0) {
+            var j: usize = 0;
+            while (j < self.output_count) : (j += 1) scale = @max(scale, self.output_scales[j]);
+        }
+        return scale;
+    }
+
+    fn surfaceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // enter(output)
+                if (body.len != 4) return null;
+                const output = get32(body);
+                if (self.indexOfEntered(output) != null) return null;
+                if (self.entered_count >= max_outputs) return null;
+                self.entered_outputs[self.entered_count] = output;
+                self.entered_count += 1;
+            },
+            1 => { // leave(output)
+                if (body.len != 4) return null;
+                const output = get32(body);
+                if (self.indexOfEntered(output)) |index| {
+                    self.entered_count -= 1;
+                    self.entered_outputs[index] = self.entered_outputs[self.entered_count];
+                    self.entered_outputs[self.entered_count] = 0;
+                }
+            },
+            else => return null,
+        }
+        const previous = self.output_scale;
+        self.output_scale = self.currentOutputScale();
+        if (self.configured and previous != self.output_scale) return Event.expose;
+        return null;
+    }
+
+    fn indexOfEntered(self: *const Window, output: u32) ?usize {
+        var i: usize = 0;
+        while (i < self.entered_count) : (i += 1) {
+            if (self.entered_outputs[i] == output) return i;
+        }
+        return null;
+    }
+
+    fn writeClipboardNative(self: *Window, text: []const u8) !void {
+        if (text.len > max_clipboard_bytes) return error.ClipboardTooLarge;
+        if (self.data_device_id == 0) return error.MissingDataDevice;
+        if (self.last_serial == 0) return error.MissingSelectionSerial;
+        const copy = try self.gpa.dupe(u8, text);
+        if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
+        self.clipboard_text = copy;
+        if (self.data_source_id != 0) {
+            sendEmpty(&self.conn, self.data_source_id, data_source_destroy) catch {};
+            self.data_source_id = 0;
+        }
+        self.data_source_id = try self.conn.allocId();
+        try sendOneU32(&self.conn, self.data_device_manager_id, data_device_manager_create_data_source, self.data_source_id);
+        try sendString(&self.conn, self.gpa, self.data_source_id, data_source_offer, "text/plain;charset=utf-8");
+        try sendString(&self.conn, self.gpa, self.data_source_id, data_source_offer, "text/plain");
+        try sendTwoU32(&self.conn, self.data_device_id, data_device_set_selection, self.data_source_id, self.last_serial);
+    }
+
+    fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
+        if (self.clipboard_text.len != 0 and self.data_source_id != 0) {
+            return try gpa.dupe(u8, self.clipboard_text);
+        }
+        if (self.data_offer_id == 0 or !self.offer_has_text) return error.MissingDataOffer;
+        var fds: [2]i32 = undefined;
+        switch (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
+            .SUCCESS => {},
+            else => return error.PipeFailed,
+        }
+        defer _ = linux.close(fds[0]);
+        try sendReceiveFd(&self.conn, self.data_offer_id, "text/plain;charset=utf-8", fds[1]);
+        _ = linux.close(fds[1]);
+        try self.roundtrip();
+        return try readFdAll(gpa, fds[0], max_clipboard_bytes);
+    }
+
+    fn roundtrip(self: *Window) !void {
+        const callback = try self.conn.allocId();
+        try sendOneU32(&self.conn, wl_display, display_sync, callback);
+        while (true) {
+            const msg = try self.conn.readMessage(self.gpa);
+            defer msg.deinit(self.gpa);
+            if (msg.object == callback and msg.opcode == 0) return;
+            _ = try self.dispatch(msg);
+        }
+    }
+
+    fn dataDeviceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // data_offer
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                if (self.pending_offer_id != 0 and self.pending_offer_id != self.data_offer_id) {
+                    sendEmpty(&self.conn, self.pending_offer_id, data_offer_destroy) catch {};
+                }
+                self.pending_offer_id = get32(body);
+                self.pending_offer_has_text = false;
+            },
+            5 => { // selection
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                const id = get32(body);
+                if (self.data_offer_id != 0 and self.data_offer_id != id) {
+                    sendEmpty(&self.conn, self.data_offer_id, data_offer_destroy) catch {};
+                }
+                self.data_offer_id = id;
+                self.offer_has_text = id != 0 and id == self.pending_offer_id and self.pending_offer_has_text;
+                if (id == 0) self.offer_has_text = false;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn dataSourceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            1 => { // send(mime, fd)
+                _ = try parseWireString(body);
+                if (self.conn.takePendingFd()) |fd_value| {
+                    defer _ = linux.close(fd_value);
+                    writeAllFd(fd_value, self.clipboard_text) catch {};
+                }
+            },
+            2 => { // cancelled
+                if (self.data_source_id != 0) {
+                    sendEmpty(&self.conn, self.data_source_id, data_source_destroy) catch {};
+                    self.data_source_id = 0;
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn dataOfferEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        if (opcode != 0) return null;
+        const mime = try parseWireString(body);
+        if (std.mem.eql(u8, mime, "text/plain") or std.mem.eql(u8, mime, "text/plain;charset=utf-8")) {
+            if (self.pending_offer_id != 0) self.pending_offer_has_text = true;
+            if (self.data_offer_id != 0) self.offer_has_text = true;
+        }
+        return null;
     }
 
     fn createBuffer(self: *Window, w: u32, h: u32) !Buffer {
@@ -1030,6 +1293,10 @@ pub const Window = struct {
         if (self.keyboard_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.keyboard_id, keyboard_release);
         if (self.pointer_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.pointer_id, pointer_release);
         if (self.touch_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.touch_id, 0);
+        if (self.data_source_id != 0) try sendEmpty(&self.conn, self.data_source_id, data_source_destroy);
+        if (self.data_offer_id != 0) try sendEmpty(&self.conn, self.data_offer_id, data_offer_destroy);
+        if (self.pending_offer_id != 0 and self.pending_offer_id != self.data_offer_id) try sendEmpty(&self.conn, self.pending_offer_id, data_offer_destroy);
+        if (self.data_device_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.data_device_id, data_device_release);
         if (self.text_input_id != 0) try sendEmpty(&self.conn, self.text_input_id, 0);
         if (self.text_input_manager_id != 0) try sendEmpty(&self.conn, self.text_input_manager_id, 0);
         if (self.xdg_toplevel_id != 0) try sendEmpty(&self.conn, self.xdg_toplevel_id, xdg_toplevel_destroy);
@@ -1067,9 +1334,20 @@ fn parseRegistryGlobal(body: []const u8) !RegistryGlobal {
 fn parseWireString(body: []const u8) ![]const u8 {
     if (body.len < 4) return error.InvalidWaylandMessage;
     const length: usize = @intCast(get32(body[0..4]));
-    if (length == 0) return "";
+    if (length == 0) {
+        if (body.len != 4) return error.InvalidWaylandMessage;
+        return "";
+    }
     if (length > body.len - 4 or body.len != 4 + pad4(length) or body[3 + length] != 0)
         return error.InvalidWaylandMessage;
+    return body[4 .. 3 + length];
+}
+
+fn parseLeadingString(body: []const u8) ![]const u8 {
+    if (body.len < 4) return error.InvalidWaylandMessage;
+    const length: usize = @intCast(get32(body[0..4]));
+    if (length == 0) return "";
+    if (length > body.len - 4 or body[3 + length] != 0) return error.InvalidWaylandMessage;
     return body[4 .. 3 + length];
 }
 
@@ -1094,6 +1372,49 @@ fn sendBind(
     put32(req[12 + string_size .. 16 + string_size], version);
     put32(req[16 + string_size .. 20 + string_size], id);
     try conn.writeAll(req);
+}
+
+fn sendReceiveFd(conn: *Connection, object: u32, mime: []const u8, fd_value: i32) !void {
+    const string_size = try encodedStringSize(mime);
+    const total = try std.math.add(usize, 8, string_size);
+    if (total > 64) return error.WaylandMessageTooLarge;
+    var req: [64]u8 = @splat(0);
+    header(req[0..total], object, data_offer_receive);
+    encodeString(req[8 .. 8 + string_size], mime);
+    try conn.writeWithFd(req[0..total], fd_value);
+}
+
+fn writeAllFd(fd_value: i32, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = linux.write(fd_value, bytes[off..].ptr, bytes.len - off);
+        switch (linux.errno(n)) {
+            .SUCCESS => {
+                if (n == 0) return error.WriteZero;
+                off += @intCast(n);
+            },
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
+    }
+}
+
+fn readFdAll(gpa: std.mem.Allocator, fd_value: i32, limit: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var scratch: [4096]u8 = undefined;
+    while (out.items.len < limit) {
+        const n = linux.read(fd_value, &scratch, @min(scratch.len, limit - out.items.len));
+        switch (linux.errno(n)) {
+            .SUCCESS => {
+                if (n == 0) break;
+                try out.appendSlice(gpa, scratch[0..@intCast(n)]);
+            },
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 fn sendString(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u16, value: []const u8) !void {
@@ -1259,17 +1580,9 @@ fn asciiLetter(lower: u8, shift: bool, caps_lock: bool) Key {
 }
 
 fn waylandSocketPath(gpa: std.mem.Allocator) ![]u8 {
-    const fd_value = try openReadOnly("/proc/self/environ");
-    defer _ = linux.close(fd_value);
-    var env: std.ArrayList(u8) = .empty;
-    defer env.deinit(gpa);
-    var scratch: [4096]u8 = undefined;
-    while (true) {
-        const n = try readSomeFd(fd_value, &scratch);
-        if (n == 0) break;
-        try env.appendSlice(gpa, scratch[0..n]);
-    }
-    return socketPathFromEnvironment(gpa, env.items);
+    const env = try services.readEnviron(gpa);
+    defer gpa.free(env);
+    return socketPathFromEnvironment(gpa, env);
 }
 
 fn socketPathFromEnvironment(gpa: std.mem.Allocator, env: []const u8) ![]u8 {
@@ -1298,7 +1611,7 @@ fn environmentValue(env: []const u8, name: []const u8) ?[]const u8 {
 fn openUnixSocket(io: std.Io, path: []const u8) !net.Stream {
     const address = try net.UnixAddress.init(path);
     return net.UnixAddress.connect(&address, io) catch |err| switch (err) {
-        error.FileNotFound => error.WaylandUnavailable,
+        error.FileNotFound, error.Unexpected => error.WaylandUnavailable,
         error.AccessDenied, error.PermissionDenied => error.AccessDenied,
         else => err,
     };
@@ -1742,5 +2055,60 @@ test "Wayland Window entry points compile without a compositor" {
     // The invalid size returns before environment/socket access, while making
     // Zig analyze the complete native backend call graph.
     try std.testing.expectError(error.InvalidWindowSize, show(std.testing.allocator, &.{}, 0, 1));
+}
+
+test "Wayland output scale follows the entered surface, then the max bound output" {
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = .{ .io = undefined, .stream = .{ .socket = .{ .handle = -1, .address = undefined } } },
+        .width = 1,
+        .height = 1,
+        .output_ids = .{ 10, 11, 0, 0, 0, 0, 0, 0 },
+        .output_scales = .{ 1, 2, 1, 1, 1, 1, 1, 1 },
+        .output_count = 2,
+    };
+    try std.testing.expectEqual(@as(u32, 2), window.currentOutputScale());
+    window.entered_outputs[0] = 10;
+    window.entered_count = 1;
+    try std.testing.expectEqual(@as(u32, 1), window.currentOutputScale());
+    window.entered_outputs[1] = 11;
+    window.entered_count = 2;
+    try std.testing.expectEqual(@as(u32, 2), window.currentOutputScale());
+}
+
+test "Wayland discrete axis wins over continuous axis in the same frame" {
+    var sockets: [2]i32 = undefined;
+    const pair_rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(pair_rc));
+    defer _ = linux.close(sockets[1]);
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = .{ .io = threaded.io(), .stream = .{ .socket = .{ .handle = sockets[0], .address = undefined } } },
+        .pointer_id = 9,
+        .width = 1,
+        .height = 1,
+    };
+    defer _ = linux.close(sockets[0]);
+
+    var discrete: [16]u8 = @splat(0);
+    header(&discrete, window.pointer_id, 8);
+    put32(discrete[8..12], 0);
+    putI32(discrete[12..16], -1);
+    var wrote = linux.write(sockets[1], &discrete, discrete.len);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(wrote));
+    try std.testing.expectEqual(Event{ .pointer = .{ .kind = .wheel, .x = 0, .y = 0, .wheel_y = 1 } }, try window.nextEvent());
+
+    var axis: [20]u8 = @splat(0);
+    header(&axis, window.pointer_id, 4);
+    put32(axis[12..16], 0);
+    putI32(axis[16..20], 2560);
+    wrote = linux.write(sockets[1], &axis, axis.len);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(wrote));
+    try std.testing.expectEqual(Event.other, try window.nextEvent());
 }
 const pointer_release: u16 = 1;

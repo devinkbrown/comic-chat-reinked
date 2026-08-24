@@ -36,7 +36,8 @@ This distinction is important:
   modules so their inline tests are compiled and run.
 - The current release test gate reports 440 passed tests and one intentionally
   skipped platform-conditional test.
-- Native Linux plus x86_64 Windows, FreeBSD, and OpenBSD release builds pass.
+- Native Linux plus first-class `x86_64-linux` and `aarch64-linux` targets,
+  and x86_64 Windows, FreeBSD, and OpenBSD release builds pass.
 - Published binaries are stripped so source paths and other build-machine debug
   metadata are not retained. The source archive includes the source tree and the crypto,
   protocol, and certificate-loader subset exported from the exact pinned Onyx
@@ -70,8 +71,8 @@ This distinction is important:
 | Multiple rooms/windows | Reachable | Up to 64 room tabs own independent state; favorites, commands, clickable tabs, and separately spawned room windows are live. |
 | Microsoft dialogs | Reachable | All 40 historical templates plus 13 portable workflows have typed IDs, adaptive geometry, modal routing, validation, selection, live preview, native browse, and connected acceptance behavior. |
 | Pointer/touch | Reachable | X11, Wayland, and Win32 share motion/button/wheel targeting; Wayland binds `wl_touch`, while Windows/X11 retain their native pointer-emulation paths. |
-| Clipboard/IME/accessibility | Reachable with adapter boundary | Windows Unicode clipboard/IME and X11/Wayland desktop clipboard services are live. Wayland accepts text-input-v3 commits. A 128-node semantic tree exposes menus, fields, states, focus, and bounds; full external UIA/AT-SPI provider transport remains platform integration work. |
-| DPI scaling | Reachable | Wayland binds output scale and submits scaled buffers; Win32 uses per-monitor-v2 logical geometry and scaled presentation. |
+| Clipboard/IME/accessibility | Reachable with adapter boundary | Windows Unicode clipboard/IME, X11 ICCCM `CLIPBOARD`, and Wayland `wl_data_device` are live, with `xclip`/`xsel`/`wl-copy` as fallback. Wayland accepts text-input-v3 commits and suppresses duplicate keyboard chars while composing. A 128-node semantic tree exposes menus, fields, states, focus, and bounds; full external UIA/AT-SPI provider transport remains platform integration work. |
+| DPI scaling | Reachable | Wayland tracks entered `wl_output` integer scale and submits scaled buffers; X11 uses `GDK_SCALE`/`QT_SCALE_FACTOR`/`Xft.dpi`; Win32 uses per-monitor-v2 logical geometry and scaled presentation. Fractional Wayland scale remains a gap. |
 | Printing | Reachable | A dependency-free PDF 1.4 backend exports the current view; the print dialog can save, open, or submit it to the native desktop print service. |
 
 ## Source UI contract status
@@ -97,6 +98,7 @@ PASS  zig build test --summary all
 PASS  zig build --summary all
 PASS  zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSafe
 PASS  zig build -Dtarget=x86_64-linux -Doptimize=ReleaseSafe
+PASS  zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSafe
 PASS  zig build -Dtarget=x86_64-freebsd -Doptimize=ReleaseSafe
 PASS  zig build -Dtarget=x86_64-openbsd -Doptimize=ReleaseSafe
 PASS  git diff --check

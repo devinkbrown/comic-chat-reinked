@@ -1,14 +1,15 @@
 //! Minimal pure-Zig X11 window backend.
 //!
-//! Talks to the local X server over `/tmp/.X11-unix/X<n>` and uploads an
-//! RGBA framebuffer with PutImage. No Xlib, no C imports.
+//! Talks to the local X server over `/tmp/.X11-unix/X<n>` (pathname, then
+//! abstract) with MIT-MAGIC-COOKIE-1 from Xauthority, and uploads an RGBA
+//! framebuffer with PutImage. No Xlib, no C imports.
 //!
 //! Two layers:
 //!   * `show(...)` — one-shot: open a window, draw an image, wait for a
 //!     keypress / close.
 //!   * `Window` — interactive: open/present/nextEvent/fd, with keyboard
-//!     translation (GetKeyboardMapping) and resize/close events, suitable for
-//!     a poll(2)-driven client event loop.
+//!     translation (GetKeyboardMapping), integer HiDPI scale, ICCCM clipboard,
+//!     and resize/close events, suitable for a poll(2)-driven client event loop.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -27,6 +28,7 @@ const event_button_release: u32 = 1 << 3;
 const event_pointer_motion: u32 = 1 << 6;
 const event_exposure: u32 = 1 << 15;
 const event_structure: u32 = 1 << 17;
+const event_property_change: u32 = 1 << 22;
 
 const cw_back_pixel: u32 = 1 << 1;
 const cw_border_pixel: u32 = 1 << 3;
@@ -36,9 +38,16 @@ const gc_foreground: u32 = 1 << 2;
 const gc_background: u32 = 1 << 3;
 
 const atom_atom = 4;
-const atom_wm_name = 39;
+const atom_cardinal = 6;
 const atom_string = 31;
+const atom_wm_class = 67;
+const atom_wm_name = 39;
+const atom_resource_manager = 23;
 const prop_replace = 0;
+const family_internet: u16 = 0;
+const family_local: u16 = 256;
+const family_wild: u16 = 65535;
+const max_clipboard_bytes = 1024 * 1024;
 
 const request_put_image_header_units = 6;
 const min_max_request_units = 64;
@@ -54,6 +63,11 @@ const XConn = struct {
     max_keycode: u8,
     wm_protocols: u32 = 0,
     wm_delete_window: u32 = 0,
+    clipboard: u32 = 0,
+    utf8_string: u32 = 0,
+    targets: u32 = 0,
+    net_wm_name: u32 = 0,
+    net_wm_pid: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -75,6 +89,12 @@ const Screen = struct {
 
 const Display = struct {
     number: u16,
+    local: bool,
+};
+
+const Auth = struct {
+    name: []const u8 = &.{},
+    data: []const u8 = &.{},
 };
 
 const Setup = struct {
@@ -140,11 +160,12 @@ pub fn keysymToKey(sym: u32) Key {
         0xff52 => .up,
         0xff53 => .right,
         0xff54 => .down,
-        0xff50 => .home,
-        0xff57 => .end,
-        0xff55 => .page_up,
-        0xff56 => .page_down,
-        0xffff => .delete,
+        0xff50, 0xff95 => .home,
+        0xff57, 0xff9c => .end,
+        0xff55, 0xff9a => .page_up,
+        0xff56, 0xff9b => .page_down,
+        0xffff, 0xff9f => .delete,
+        0xffb0...0xffb9 => .{ .char = '0' + @as(u21, @intCast(sym - 0xffb0)) },
         else => .other,
     };
 }
@@ -178,10 +199,15 @@ pub const Window = struct {
     gc: u32,
     width: u32,
     height: u32,
+    pixel_width: u32,
+    pixel_height: u32,
+    scale: u32,
     keymap: Keymap,
-    last_primary_click_ms: u32 = 0,
-    last_primary_x: i32 = 0,
-    last_primary_y: i32 = 0,
+    last_primary_click_ms: u32,
+    last_primary_x: i32,
+    last_primary_y: i32,
+    clipboard_text: []u8,
+    owns_clipboard: bool,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
         const display = try readDisplay(gpa);
@@ -190,27 +216,56 @@ pub const Window = struct {
     }
 
     pub fn openWithDisplay(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8, display: []const u8) !*Window {
+        if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
+            return error.InvalidWindowSize;
+        }
         const parsed = try parseDisplay(display);
+        const env = try services.readEnviron(gpa);
+        defer gpa.free(env);
 
         const self = try gpa.create(Window);
         errdefer gpa.destroy(self);
-        self.gpa = gpa;
-        self.threaded = std.Io.Threaded.init(gpa, .{});
+        self.* = .{
+            .gpa = gpa,
+            .threaded = std.Io.Threaded.init(gpa, .{}),
+            .conn = undefined,
+            .window = 0,
+            .gc = 0,
+            .width = w,
+            .height = h,
+            .pixel_width = w,
+            .pixel_height = h,
+            .scale = 1,
+            .keymap = .{ .syms = &.{}, .per = 0, .min = 0 },
+            .last_primary_click_ms = 0,
+            .last_primary_x = 0,
+            .last_primary_y = 0,
+            .clipboard_text = &.{},
+            .owns_clipboard = false,
+        };
         errdefer self.threaded.deinit();
         const io = self.threaded.io();
 
-        self.conn = try connectDisplay(gpa, io, parsed);
+        self.conn = try connectDisplay(gpa, io, parsed, env);
         errdefer self.conn.stream.close(io);
         if (self.conn.screen.root_depth != image_depth) return error.UnsupportedDepth;
 
-        self.width = w;
-        self.height = h;
+        try internSessionAtoms(&self.conn);
+        self.scale = try detectScale(gpa, &self.conn, env);
+        const pixel_w = try std.math.mul(u32, w, self.scale);
+        const pixel_h = try std.math.mul(u32, h, self.scale);
+        if (pixel_w > std.math.maxInt(u16) or pixel_h > std.math.maxInt(u16)) return error.InvalidWindowSize;
+        self.pixel_width = pixel_w;
+        self.pixel_height = pixel_h;
+
         self.window = try self.conn.allocId();
         self.gc = try self.conn.allocId();
-        try createWindow(&self.conn, self.window, @intCast(w), @intCast(h));
+        try createWindow(&self.conn, self.window, @intCast(pixel_w), @intCast(pixel_h));
         try createGc(&self.conn, self.gc, self.window);
         try installWmClose(&self.conn, self.window);
         try setTitle(&self.conn, self.window, title);
+        try setWmClass(&self.conn, self.window, "comicchat", "Reinked");
+        try setNetWmPid(&self.conn, self.window);
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
         try mapWindow(&self.conn, self.window);
@@ -218,6 +273,7 @@ pub const Window = struct {
     }
 
     pub fn deinit(self: *Window) void {
+        if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         self.keymap.deinit(self.gpa);
         self.conn.stream.close(self.conn.io);
         self.threaded.deinit();
@@ -229,19 +285,34 @@ pub const Window = struct {
         return self.conn.stream.socket.handle;
     }
 
-    /// Upload a full frame. `w`/`h` are the frame's own dimensions (normally
-    /// the current window size).
+    /// Upload a full logical frame. `w`/`h` are logical pixels; HiDPI scale is
+    /// applied here so the client keeps 96-DPI geometry.
     pub fn present(self: *Window, pixels: []const u32, w: u32, h: u32) !void {
         if (pixels.len != @as(usize, w) * @as(usize, h)) return error.BadFramebufferSize;
-        try putImage(self.gpa, &self.conn, self.window, self.gc, pixels, w, h);
+        if (self.scale <= 1) {
+            try putImage(self.gpa, &self.conn, self.window, self.gc, pixels, w, h);
+            return;
+        }
+        const pixel_w = try std.math.mul(u32, w, self.scale);
+        const pixel_h = try std.math.mul(u32, h, self.scale);
+        const scaled = try self.gpa.alloc(u32, try std.math.mul(usize, @as(usize, pixel_w), @as(usize, pixel_h)));
+        defer self.gpa.free(scaled);
+        scaleNearest(scaled, pixels, w, h, self.scale);
+        try putImage(self.gpa, &self.conn, self.window, self.gc, scaled, pixel_w, pixel_h);
     }
 
     pub fn writeClipboard(self: *Window, text: []const u8) !void {
-        return services.writeClipboard(self.conn.io, .x11, text);
+        if (self.writeClipboardNative(text)) |_| return else |_| {
+            return services.writeClipboard(self.conn.io, .x11, text);
+        }
     }
 
     pub fn readClipboard(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        return services.readClipboard(gpa, self.conn.io, .x11);
+        if (self.readClipboardNative(gpa)) |text| {
+            return text;
+        } else |_| {
+            return services.readClipboard(gpa, self.conn.io, .x11);
+        }
     }
 
     pub fn chooseFile(self: *Window, gpa: std.mem.Allocator, save: bool, title: []const u8) !?[]u8 {
@@ -281,12 +352,15 @@ pub const Window = struct {
                         .shift = state & 1 != 0,
                         .control = state & 4 != 0,
                         .alt = state & 8 != 0,
+                        .super = state & 64 != 0,
                     },
                 } };
             },
             4, 5, 6 => {
-                const x: i32 = @as(i16, @bitCast(get16(event[24..26])));
-                const y: i32 = @as(i16, @bitCast(get16(event[26..28])));
+                const raw_x: i32 = @as(i16, @bitCast(get16(event[24..26])));
+                const raw_y: i32 = @as(i16, @bitCast(get16(event[26..28])));
+                const x = physicalPointToLogical(raw_x, self.scale);
+                const y = physicalPointToLogical(raw_y, self.scale);
                 if (kind == 6) return .{ .pointer = .{ .kind = .move, .x = x, .y = y } };
                 const detail = event[1];
                 if (kind == 4 and (detail == 4 or detail == 5)) return .{ .pointer = .{
@@ -321,13 +395,33 @@ pub const Window = struct {
             12 => return .expose,
             17 => return .close, // DestroyNotify
             22 => { // ConfigureNotify
-                const w: u32 = get16(event[20..22]);
-                const h: u32 = get16(event[22..24]);
-                if (w == 0 or h == 0) return .other;
-                if (w == self.width and h == self.height) return .other;
+                const pixel_w: u32 = get16(event[20..22]);
+                const pixel_h: u32 = get16(event[22..24]);
+                if (pixel_w == 0 or pixel_h == 0) return .other;
+                const w = physicalToLogical(pixel_w, self.scale);
+                const h = physicalToLogical(pixel_h, self.scale);
+                if (w == self.width and h == self.height and pixel_w == self.pixel_width and pixel_h == self.pixel_height) {
+                    return .other;
+                }
+                self.pixel_width = pixel_w;
+                self.pixel_height = pixel_h;
                 self.width = w;
                 self.height = h;
                 return .{ .resize = .{ .w = w, .h = h } };
+            },
+            29 => { // SelectionClear
+                if (get32(event[8..12]) == self.conn.clipboard) {
+                    self.owns_clipboard = false;
+                    if (self.clipboard_text.len != 0) {
+                        self.gpa.free(self.clipboard_text);
+                        self.clipboard_text = &.{};
+                    }
+                }
+                return .other;
+            },
+            30 => { // SelectionRequest
+                self.serveSelectionRequest(event) catch {};
+                return .other;
             },
             33 => { // ClientMessage
                 if (get32(event[8..12]) == self.conn.wm_protocols and
@@ -337,35 +431,70 @@ pub const Window = struct {
             else => return .other,
         }
     }
+
+    fn writeClipboardNative(self: *Window, text: []const u8) !void {
+        if (text.len > max_clipboard_bytes) return error.ClipboardTooLarge;
+        if (self.conn.clipboard == 0) return error.ClipboardUnavailable;
+        const copy = try self.gpa.dupe(u8, text);
+        if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
+        self.clipboard_text = copy;
+        try setSelectionOwner(&self.conn, self.window, self.conn.clipboard);
+        self.owns_clipboard = true;
+    }
+
+    fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
+        if (self.owns_clipboard) {
+            if (self.clipboard_text.len == 0) return null;
+            return try gpa.dupe(u8, self.clipboard_text);
+        }
+        if (self.conn.clipboard == 0 or self.conn.utf8_string == 0) return error.ClipboardUnavailable;
+        try convertSelection(&self.conn, self.window, self.conn.clipboard, self.conn.utf8_string, self.conn.utf8_string);
+        var attempts: u16 = 0;
+        while (attempts < 64) : (attempts += 1) {
+            var raw: [32]u8 = undefined;
+            try readExact(&self.conn, &raw);
+            const kind = raw[0] & 0x7f;
+            if (kind == 31) {
+                if (get32(raw[8..12]) != self.window) continue;
+                if (get32(raw[20..24]) == 0) return null;
+                return try getWindowProperty(gpa, &self.conn, self.window, self.conn.utf8_string);
+            }
+            if (kind == 30) {
+                self.serveSelectionRequest(raw) catch {};
+                continue;
+            }
+            if (kind == 0) return error.X11ServerError;
+        }
+        return error.ClipboardTimeout;
+    }
+
+    fn serveSelectionRequest(self: *Window, event: [32]u8) !void {
+        const requestor = get32(event[12..16]);
+        const selection = get32(event[16..20]);
+        const target = get32(event[20..24]);
+        var property = get32(event[24..28]);
+        if (property == 0) property = target;
+        var served: u32 = 0;
+        if (selection == self.conn.clipboard and self.owns_clipboard and property != 0) {
+            if (target == self.conn.targets) {
+                const atoms = [_]u32{ self.conn.targets, self.conn.utf8_string, atom_string };
+                try changePropertyAtoms(&self.conn, requestor, property, &atoms);
+                served = property;
+            } else if (target == self.conn.utf8_string or target == atom_string) {
+                try changePropertyBytes(&self.conn, requestor, property, target, self.clipboard_text);
+                served = property;
+            }
+        }
+        try sendSelectionNotify(&self.conn, requestor, get32(event[4..8]), selection, target, served);
+    }
 };
 
 fn readDisplay(gpa: std.mem.Allocator) ![]u8 {
-    const fd = try openReadOnly("/proc/self/environ");
-    defer _ = linux.close(fd);
-
-    var env: std.ArrayList(u8) = .empty;
-    defer env.deinit(gpa);
-
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = try readSomeFd(fd, &buf);
-        if (n == 0) break;
-        try env.appendSlice(gpa, buf[0..n]);
-    }
-
-    var start: usize = 0;
-    while (start < env.items.len) {
-        const rest = env.items[start..];
-        const end_rel = std.mem.indexOfScalar(u8, rest, 0) orelse rest.len;
-        const item = rest[0..end_rel];
-        if (std.mem.startsWith(u8, item, "DISPLAY=")) {
-            const value = item["DISPLAY=".len..];
-            if (value.len == 0) return error.DisplayUnset;
-            return gpa.dupe(u8, value);
-        }
-        start += end_rel + 1;
-    }
-    return error.DisplayUnset;
+    const env = try services.readEnviron(gpa);
+    defer gpa.free(env);
+    const value = services.environValue(env, "DISPLAY") orelse return error.DisplayUnset;
+    if (value.len == 0) return error.DisplayUnset;
+    return gpa.dupe(u8, value);
 }
 
 fn parseDisplay(display: []const u8) !Display {
@@ -374,20 +503,37 @@ fn parseDisplay(display: []const u8) !Display {
     const start = i;
     while (i < display.len and display[i] >= '0' and display[i] <= '9') : (i += 1) {}
     if (i == start) return error.InvalidDisplay;
-    return .{ .number = try std.fmt.parseInt(u16, display[start..i], 10) };
+    const host = display[0..colon];
+    const local = host.len == 0 or
+        std.mem.eql(u8, host, "unix") or
+        std.mem.eql(u8, host, "localhost") or
+        std.mem.eql(u8, host, "127.0.0.1");
+    return .{
+        .number = try std.fmt.parseInt(u16, display[start..i], 10),
+        .local = local,
+    };
 }
 
-fn connectDisplay(gpa: std.mem.Allocator, io: std.Io, display: Display) !XConn {
+fn connectDisplay(gpa: std.mem.Allocator, io: std.Io, display: Display, env: []const u8) !XConn {
+    if (!display.local) return error.RemoteDisplayUnsupported;
     var path_buf: [64]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/.X11-unix/X{d}", .{display.number});
-
-    const stream = try openUnixSocket(io, path);
+    const stream = openUnixSocket(io, path) catch blk: {
+        var abstract_buf: [65]u8 = undefined;
+        abstract_buf[0] = 0;
+        const rest = try std.fmt.bufPrint(abstract_buf[1..], "/tmp/.X11-unix/X{d}", .{display.number});
+        break :blk try openUnixSocket(io, abstract_buf[0 .. 1 + rest.len]);
+    };
     errdefer stream.close(io);
 
-    var hello: [12]u8 = @splat(0);
-    hello[0] = 'l';
-    put16(hello[2..4], 11);
-    try writeAllRaw(io, stream, &hello);
+    var hostname_buf: [64]u8 = undefined;
+    const hostname = localHostname(&hostname_buf);
+    var display_number_buf: [8]u8 = undefined;
+    const display_number = try std.fmt.bufPrint(&display_number_buf, "{d}", .{display.number});
+    var auth_storage: [256]u8 = undefined;
+    const auth = readMatchingAuth(env, hostname, display_number, &auth_storage) catch Auth{};
+
+    try writeSetupHello(io, stream, auth);
 
     var header: [8]u8 = undefined;
     try readExactRaw(io, stream, &header);
@@ -414,6 +560,25 @@ fn connectDisplay(gpa: std.mem.Allocator, io: std.Io, display: Display) !XConn {
         .min_keycode = setup.min_keycode,
         .max_keycode = setup.max_keycode,
     };
+}
+
+fn writeSetupHello(io: std.Io, stream: net.Stream, auth: Auth) !void {
+    if (auth.name.len > std.math.maxInt(u16) or auth.data.len > std.math.maxInt(u16)) {
+        return error.AuthTooLarge;
+    }
+    const name_pad = pad4(auth.name.len);
+    const data_pad = pad4(auth.data.len);
+    var stack: [12 + 256]u8 = undefined;
+    const total = 12 + name_pad + data_pad;
+    const hello = if (total <= stack.len) stack[0..total] else return error.AuthTooLarge;
+    @memset(hello, 0);
+    hello[0] = 'l';
+    put16(hello[2..4], 11);
+    put16(hello[6..8], @intCast(auth.name.len));
+    put16(hello[8..10], @intCast(auth.data.len));
+    if (auth.name.len != 0) @memcpy(hello[12 .. 12 + auth.name.len], auth.name);
+    if (auth.data.len != 0) @memcpy(hello[12 + name_pad .. 12 + name_pad + auth.data.len], auth.data);
+    try writeAllRaw(io, stream, hello);
 }
 
 /// Parse the connection-setup "additional data" (everything after the 8-byte
@@ -466,7 +631,8 @@ fn createWindow(conn: *XConn, window: u32, w: u16, h: u16) !void {
         conn.screen.white_pixel,
         conn.screen.black_pixel,
         event_key_press | event_button_press | event_button_release |
-            event_pointer_motion | event_exposure | event_structure,
+            event_pointer_motion | event_exposure | event_structure |
+            event_property_change,
     };
     const value_mask = cw_back_pixel | cw_border_pixel | cw_event_mask;
     var req: [44]u8 = @splat(0);
@@ -517,20 +683,27 @@ fn installWmClose(conn: *XConn, window: u32) !void {
 
 fn setTitle(conn: *XConn, window: u32, title: []const u8) !void {
     if (title.len == 0 or title.len > 255) return;
-    const padded = pad4(title.len);
-    var buf: [24 + 256 + 4]u8 = undefined;
-    const req = buf[0 .. 24 + padded];
-    @memset(req, 0);
-    req[0] = 18;
-    req[1] = prop_replace;
-    put16(req[2..4], @intCast(req.len / 4));
-    put32(req[4..8], window);
-    put32(req[8..12], atom_wm_name);
-    put32(req[12..16], atom_string);
-    req[16] = 8;
-    put32(req[20..24], @intCast(title.len));
-    @memcpy(req[24 .. 24 + title.len], title);
-    try writeAll(conn, req);
+    try changePropertyBytes(conn, window, atom_wm_name, atom_string, title);
+    if (conn.net_wm_name != 0 and conn.utf8_string != 0) {
+        try changePropertyBytes(conn, window, conn.net_wm_name, conn.utf8_string, title);
+    }
+}
+
+fn setWmClass(conn: *XConn, window: u32, instance: []const u8, class_name: []const u8) !void {
+    if (instance.len == 0 or class_name.len == 0) return;
+    var buf: [256]u8 = undefined;
+    if (instance.len + class_name.len + 2 > buf.len) return;
+    @memcpy(buf[0..instance.len], instance);
+    buf[instance.len] = 0;
+    @memcpy(buf[instance.len + 1 .. instance.len + 1 + class_name.len], class_name);
+    buf[instance.len + 1 + class_name.len] = 0;
+    try changePropertyBytes(conn, window, atom_wm_class, atom_string, buf[0 .. instance.len + class_name.len + 2]);
+}
+
+fn setNetWmPid(conn: *XConn, window: u32) !void {
+    if (conn.net_wm_pid == 0) return;
+    const pid: u32 = @intCast(@max(0, linux.getpid()));
+    try changeProperty32(conn, window, conn.net_wm_pid, atom_cardinal, &.{pid});
 }
 
 fn internAtom(conn: *XConn, name: []const u8) !u32 {
@@ -657,7 +830,7 @@ fn encodeBgrx(dst: []u8, pixels: []const u32, w: u32, h: u32) void {
 fn openUnixSocket(io: std.Io, path: []const u8) !net.Stream {
     const addr = try net.UnixAddress.init(path);
     return net.UnixAddress.connect(&addr, io) catch |err| switch (err) {
-        error.FileNotFound => error.XServerUnavailable,
+        error.FileNotFound, error.Unexpected => error.XServerUnavailable,
         error.AccessDenied, error.PermissionDenied => error.AccessDenied,
         else => err,
     };
@@ -723,6 +896,273 @@ fn writeAll(conn: *XConn, bytes: []const u8) !void {
     try writeAllRaw(conn.io, conn.stream, bytes);
 }
 
+fn internSessionAtoms(conn: *XConn) !void {
+    conn.clipboard = try internAtom(conn, "CLIPBOARD");
+    conn.utf8_string = try internAtom(conn, "UTF8_STRING");
+    conn.targets = try internAtom(conn, "TARGETS");
+    conn.net_wm_name = try internAtom(conn, "_NET_WM_NAME");
+    conn.net_wm_pid = try internAtom(conn, "_NET_WM_PID");
+}
+
+fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8) !u32 {
+    if (services.scaleFromEnvironment(env)) |scale| return scale;
+    if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager)) |resources| {
+        defer gpa.free(resources);
+        if (services.parseXftDpi(resources)) |dpi| return services.scaleFromDpi(dpi);
+    } else |_| {}
+    return 1;
+}
+
+fn localHostname(buf: []u8) []const u8 {
+    var uts: linux.utsname = undefined;
+    if (linux.errno(linux.uname(&uts)) != .SUCCESS) return "localhost";
+    const name = std.mem.sliceTo(&uts.nodename, 0);
+    const n = @min(buf.len, name.len);
+    @memcpy(buf[0..n], name[0..n]);
+    return buf[0..n];
+}
+
+const XauthRecord = struct {
+    family: u16,
+    address: []const u8,
+    number: []const u8,
+    name: []const u8,
+    data: []const u8,
+};
+
+fn nextXauthRecord(bytes: []const u8, offset: *usize) !?XauthRecord {
+    if (offset.* >= bytes.len) return null;
+    if (bytes.len - offset.* < 2) return error.TruncatedXauth;
+    const family = std.mem.readInt(u16, bytes[offset.*..][0..2], .big);
+    offset.* += 2;
+    const address = try takeXauthCounted(bytes, offset);
+    const number = try takeXauthCounted(bytes, offset);
+    const name = try takeXauthCounted(bytes, offset);
+    const data = try takeXauthCounted(bytes, offset);
+    return .{
+        .family = family,
+        .address = address,
+        .number = number,
+        .name = name,
+        .data = data,
+    };
+}
+
+fn takeXauthCounted(bytes: []const u8, offset: *usize) ![]const u8 {
+    if (bytes.len - offset.* < 2) return error.TruncatedXauth;
+    const len = std.mem.readInt(u16, bytes[offset.*..][0..2], .big);
+    offset.* += 2;
+    if (bytes.len - offset.* < len) return error.TruncatedXauth;
+    const slice = bytes[offset.* .. offset.* + len];
+    offset.* += len;
+    return slice;
+}
+
+fn xauthMatches(record: XauthRecord, hostname: []const u8, display_number: []const u8) bool {
+    if (!std.mem.eql(u8, record.name, "MIT-MAGIC-COOKIE-1")) return false;
+    if (record.number.len != 0 and !std.mem.eql(u8, record.number, display_number)) return false;
+    return switch (record.family) {
+        family_wild => true,
+        family_local => std.mem.eql(u8, record.address, hostname),
+        family_internet => std.mem.eql(u8, record.address, &[_]u8{ 127, 0, 0, 1 }) or
+            std.mem.eql(u8, record.address, hostname),
+        else => false,
+    };
+}
+
+fn selectXauth(bytes: []const u8, hostname: []const u8, display_number: []const u8) !?XauthRecord {
+    var offset: usize = 0;
+    var fallback: ?XauthRecord = null;
+    while (try nextXauthRecord(bytes, &offset)) |record| {
+        if (!xauthMatches(record, hostname, display_number)) continue;
+        if (record.family == family_local) return record;
+        if (fallback == null) fallback = record;
+    }
+    return fallback;
+}
+
+fn readMatchingAuth(env: []const u8, hostname: []const u8, display_number: []const u8, storage: []u8) !Auth {
+    var path_buf: [512]u8 = undefined;
+    const path = xauthPath(env, &path_buf) orelse return error.NoAuthFile;
+    var zpath: [513]u8 = undefined;
+    if (path.len >= zpath.len) return error.NameTooLong;
+    @memcpy(zpath[0..path.len], path);
+    zpath[path.len] = 0;
+    const fd = try openReadOnly(@ptrCast(zpath[0 .. path.len + 1]));
+    defer _ = linux.close(fd);
+    var file: std.ArrayList(u8) = .empty;
+    defer file.deinit(std.heap.page_allocator);
+    var scratch: [4096]u8 = undefined;
+    while (true) {
+        const n = try readSomeFd(fd, &scratch);
+        if (n == 0) break;
+        if (file.items.len + n > 64 * 1024) return error.AuthTooLarge;
+        try file.appendSlice(std.heap.page_allocator, scratch[0..n]);
+    }
+    const record = (try selectXauth(file.items, hostname, display_number)) orelse return error.NoMatchingAuth;
+    if (record.name.len + record.data.len > storage.len) return error.AuthTooLarge;
+    @memcpy(storage[0..record.name.len], record.name);
+    @memcpy(storage[record.name.len .. record.name.len + record.data.len], record.data);
+    return .{
+        .name = storage[0..record.name.len],
+        .data = storage[record.name.len .. record.name.len + record.data.len],
+    };
+}
+
+fn xauthPath(env: []const u8, buf: []u8) ?[]const u8 {
+    if (services.environValue(env, "XAUTHORITY")) |value| {
+        if (value.len != 0 and value.len <= buf.len) {
+            @memcpy(buf[0..value.len], value);
+            return buf[0..value.len];
+        }
+    }
+    const home = services.environValue(env, "HOME") orelse return null;
+    if (home.len + "/.Xauthority".len > buf.len) return null;
+    @memcpy(buf[0..home.len], home);
+    @memcpy(buf[home.len .. home.len + "/.Xauthority".len], "/.Xauthority");
+    return buf[0 .. home.len + "/.Xauthority".len];
+}
+
+fn getWindowProperty(gpa: std.mem.Allocator, conn: *XConn, window: u32, property: u32) ![]u8 {
+    var req: [24]u8 = @splat(0);
+    req[0] = 20;
+    put16(req[2..4], 6);
+    put32(req[4..8], window);
+    put32(req[8..12], property);
+    put32(req[16..20], 0);
+    put32(req[20..24], 256 * 1024);
+    try writeAll(conn, &req);
+
+    const reply = try readReply(conn);
+    const extra_words = get32(reply[4..8]);
+    const extra = try gpa.alloc(u8, extra_words * 4);
+    errdefer gpa.free(extra);
+    if (extra.len != 0) try readExact(conn, extra);
+    if (reply[1] == 0 or get32(reply[8..12]) == 0) {
+        gpa.free(extra);
+        return error.NoProperty;
+    }
+    const value_len: usize = @intCast(get32(reply[16..20]));
+    const format = reply[1];
+    const bytes_len: usize = switch (format) {
+        8 => value_len,
+        16 => value_len * 2,
+        32 => value_len * 4,
+        else => {
+            gpa.free(extra);
+            return error.UnsupportedPropertyFormat;
+        },
+    };
+    if (bytes_len > extra.len) {
+        gpa.free(extra);
+        return error.ShortProperty;
+    }
+    if (bytes_len == extra.len) return extra;
+    const trimmed = try gpa.dupe(u8, extra[0..bytes_len]);
+    gpa.free(extra);
+    return trimmed;
+}
+
+fn changePropertyBytes(conn: *XConn, window: u32, property: u32, typ: u32, bytes: []const u8) !void {
+    if (bytes.len > max_clipboard_bytes) return error.PropertyTooLarge;
+    const padded = pad4(bytes.len);
+    const need = 24 + padded;
+    const req = try std.heap.page_allocator.alloc(u8, need);
+    defer std.heap.page_allocator.free(req);
+    @memset(req, 0);
+    req[0] = 18;
+    req[1] = prop_replace;
+    put16(req[2..4], @intCast(req.len / 4));
+    put32(req[4..8], window);
+    put32(req[8..12], property);
+    put32(req[12..16], typ);
+    req[16] = 8;
+    put32(req[20..24], @intCast(bytes.len));
+    if (bytes.len != 0) @memcpy(req[24 .. 24 + bytes.len], bytes);
+    try writeAll(conn, req);
+}
+
+fn changePropertyAtoms(conn: *XConn, window: u32, property: u32, atoms: []const u32) !void {
+    try changeProperty32(conn, window, property, atom_atom, atoms);
+}
+
+fn changeProperty32(conn: *XConn, window: u32, property: u32, typ: u32, values: []const u32) !void {
+    if (values.len > 64) return error.PropertyTooLarge;
+    var req: [24 + 256]u8 = @splat(0);
+    const total = 24 + values.len * 4;
+    req[0] = 18;
+    req[1] = prop_replace;
+    put16(req[2..4], @intCast(total / 4));
+    put32(req[4..8], window);
+    put32(req[8..12], property);
+    put32(req[12..16], typ);
+    req[16] = 32;
+    put32(req[20..24], @intCast(values.len));
+    for (values, 0..) |value, i| put32(req[24 + i * 4 .. 28 + i * 4], value);
+    try writeAll(conn, req[0..total]);
+}
+
+fn setSelectionOwner(conn: *XConn, window: u32, selection: u32) !void {
+    var req: [16]u8 = @splat(0);
+    req[0] = 22;
+    put16(req[2..4], 4);
+    put32(req[4..8], window);
+    put32(req[8..12], selection);
+    try writeAll(conn, &req);
+}
+
+fn convertSelection(conn: *XConn, requestor: u32, selection: u32, target: u32, property: u32) !void {
+    var req: [24]u8 = @splat(0);
+    req[0] = 24;
+    put16(req[2..4], 6);
+    put32(req[4..8], requestor);
+    put32(req[8..12], selection);
+    put32(req[12..16], target);
+    put32(req[16..20], property);
+    try writeAll(conn, &req);
+}
+
+fn sendSelectionNotify(conn: *XConn, requestor: u32, time: u32, selection: u32, target: u32, property: u32) !void {
+    var req: [44]u8 = @splat(0);
+    req[0] = 25;
+    put16(req[2..4], 11);
+    put32(req[4..8], requestor);
+    req[12] = 31;
+    put32(req[16..20], time);
+    put32(req[20..24], requestor);
+    put32(req[24..28], selection);
+    put32(req[28..32], target);
+    put32(req[32..36], property);
+    try writeAll(conn, &req);
+}
+
+fn scaleNearest(dst: []u32, src: []const u32, w: u32, h: u32, scale: u32) void {
+    const pixel_w = w * scale;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        var scale_y: u32 = 0;
+        while (scale_y < scale) : (scale_y += 1) {
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                const pixel = src[@as(usize, y) * w + x];
+                var scale_x: u32 = 0;
+                while (scale_x < scale) : (scale_x += 1) {
+                    dst[@as(usize, y * scale + scale_y) * pixel_w + x * scale + scale_x] = pixel;
+                }
+            }
+        }
+    }
+}
+
+fn physicalToLogical(value: u32, scale: u32) u32 {
+    const denom = @max(scale, 1);
+    return @max(1, (value + denom / 2) / denom);
+}
+
+fn physicalPointToLogical(value: i32, scale: u32) i32 {
+    return @divTrunc(value, @as(i32, @intCast(@max(scale, 1))));
+}
+
 pub fn pad4(n: usize) usize {
     return (n + 3) & ~@as(usize, 3);
 }
@@ -766,8 +1206,70 @@ test "x11 BGRX encoder ignores alpha and uses little-endian XImage order" {
 
 test "x11 DISPLAY parser accepts screen suffix" {
     try std.testing.expectEqual(@as(u16, 0), (try parseDisplay(":0")).number);
+    try std.testing.expect((try parseDisplay(":0")).local);
     try std.testing.expectEqual(@as(u16, 12), (try parseDisplay("localhost:12.1")).number);
+    try std.testing.expect((try parseDisplay("unix:0")).local);
+    try std.testing.expect(!(try parseDisplay("remote.example:1")).local);
     try std.testing.expectError(error.InvalidDisplay, parseDisplay("localhost"));
+}
+
+test "x11 Xauthority matcher prefers local MIT-MAGIC-COOKIE-1" {
+    var file: [64]u8 = @splat(0);
+    var off: usize = 0;
+    std.mem.writeInt(u16, file[off..][0..2], family_local, .big);
+    off += 2;
+    std.mem.writeInt(u16, file[off..][0..2], 4, .big);
+    off += 2;
+    @memcpy(file[off .. off + 4], "host");
+    off += 4;
+    std.mem.writeInt(u16, file[off..][0..2], 1, .big);
+    off += 2;
+    file[off] = '0';
+    off += 1;
+    std.mem.writeInt(u16, file[off..][0..2], 18, .big);
+    off += 2;
+    @memcpy(file[off .. off + 18], "MIT-MAGIC-COOKIE-1");
+    off += 18;
+    std.mem.writeInt(u16, file[off..][0..2], 2, .big);
+    off += 2;
+    file[off] = 0xaa;
+    file[off + 1] = 0xbb;
+    off += 2;
+    const record = (try selectXauth(file[0..off], "host", "0")).?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, record.data);
+    try std.testing.expect((try selectXauth(file[0..off], "other", "0")) == null);
+}
+
+test "x11 HiDPI helpers convert physical pixels and nearest-neighbor scale" {
+    try std.testing.expectEqual(@as(u32, 480), physicalToLogical(960, 2));
+    try std.testing.expectEqual(@as(i32, 10), physicalPointToLogical(21, 2));
+    var out: [8]u32 = undefined;
+    scaleNearest(&out, &[_]u32{ 0xff112233, 0xff445566 }, 2, 1, 2);
+    try std.testing.expectEqual(@as(u32, 0xff112233), out[0]);
+    try std.testing.expectEqual(@as(u32, 0xff112233), out[1]);
+    try std.testing.expectEqual(@as(u32, 0xff445566), out[2]);
+    try std.testing.expectEqual(@as(u32, 0xff445566), out[3]);
+}
+
+test "x11 setup hello encodes MIT-MAGIC-COOKIE-1 lengths" {
+    var hello: [12 + 20 + 16]u8 = undefined;
+    const auth = Auth{ .name = "MIT-MAGIC-COOKIE-1", .data = "0123456789abcdef" };
+    const name_pad = pad4(auth.name.len);
+    const total = 12 + name_pad + pad4(auth.data.len);
+    @memset(hello[0..total], 0);
+    hello[0] = 'l';
+    put16(hello[2..4], 11);
+    put16(hello[6..8], @intCast(auth.name.len));
+    put16(hello[8..10], @intCast(auth.data.len));
+    @memcpy(hello[12 .. 12 + auth.name.len], auth.name);
+    @memcpy(hello[12 + name_pad .. 12 + name_pad + auth.data.len], auth.data);
+    try std.testing.expectEqual(@as(u16, 18), get16(hello[6..8]));
+    try std.testing.expectEqual(@as(u16, 16), get16(hello[8..10]));
+    try std.testing.expectEqual(@as(usize, 48), total);
+}
+
+test "x11 Window rejects an invalid size before contacting the server" {
+    try std.testing.expectError(error.InvalidWindowSize, Window.open(std.testing.allocator, 0, 480, "x"));
 }
 
 test "x11 setup parser reads spec offsets (vendor@16, screens@20, keycodes@26)" {
@@ -808,6 +1310,7 @@ test "keysymToKey maps printable ASCII and editing keys" {
     try std.testing.expectEqual(Key.enter, keysymToKey(0xff8d));
     try std.testing.expectEqual(Key.escape, keysymToKey(0xff1b));
     try std.testing.expectEqual(Key.page_up, keysymToKey(0xff55));
+    try std.testing.expectEqual(Key{ .char = '5' }, keysymToKey(0xffb5));
     try std.testing.expectEqual(Key.other, keysymToKey(0xffe1)); // Shift_L
 }
 

@@ -14,6 +14,8 @@ The portable tree is currently tested with Zig
 ```sh
 zig build test
 zig build
+zig build -Dtarget=x86_64-linux
+zig build -Dtarget=aarch64-linux
 zig build -Dtarget=x86_64-windows
 zig build -Dtarget=x86-windows
 zig build -Dtarget=aarch64-windows
