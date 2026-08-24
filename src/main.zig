@@ -860,7 +860,11 @@ fn runRenderChrome(gpa: std.mem.Allocator, io: std.Io, name: []const u8, kind: [
     else
         try cc.comic.figure.chromePortrait(gpa, avb);
     defer image.deinit(gpa);
-    const png = try cc.render.png.encode(gpa, image.pixels, image.width, image.height);
+    var paper = try cc.render.canvas.Canvas.init(gpa, image.width, image.height);
+    defer paper.deinit(gpa);
+    paper.clear(cc.render.canvas.white);
+    cc.comic.figure.composite(&paper, image.pixels, image.width, image.height, 0, 0);
+    const png = try cc.render.png.encode(gpa, paper.px, image.width, image.height);
     defer gpa.free(png);
     try writeStdout(io, png);
 }

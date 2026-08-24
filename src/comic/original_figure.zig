@@ -753,6 +753,7 @@ fn loadPose(
     const drawing_plan = record.imagePlan(.drawing) orelse return error.MissingImage;
     var result = LoadedPose{ .drawing = try decodePlan(gpa, data, drawing_plan) };
     errdefer result.deinit(gpa);
+    _ = try source_figure.takePaddedSimpleCard(gpa, &result.drawing);
     if (want_mask) {
         if (record.imagePlan(.mask)) |plan| result.mask = try decodePlan(gpa, data, plan);
     }

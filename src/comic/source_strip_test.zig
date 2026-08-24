@@ -346,6 +346,53 @@ test "later color-avatar lines do not relayout the established first panel" {
     try std.testing.expect(first_panel_hash != mature_panel_hash);
 }
 
+fn countChromatic(image: strip.Image, x: u32, y: u32, width: u32, height: u32) usize {
+    var count: usize = 0;
+    var row: u32 = 0;
+    while (row < height) : (row += 1) {
+        var column: u32 = 0;
+        while (column < width) : (column += 1) {
+            const argb = pixel(image, x + column, y + row);
+            const red: u8 = @truncate(argb >> 16);
+            const green: u8 = @truncate(argb >> 8);
+            const blue: u8 = @truncate(argb);
+            if (red != green or green != blue) count += 1;
+        }
+    }
+    return count;
+}
+
+test "Color female close-up is not a feet-only crop of the padded card" {
+    const gpa = std.testing.allocator;
+    const lines = [_]strip.Line{
+        .{ .speaker = "anna color", .text = "One." },
+        .{ .speaker = "anna color", .text = "Two." },
+    };
+    var page = try strip.render(gpa, &lines);
+    defer page.deinit(gpa);
+
+    const x: u32 = 0;
+    const y: u32 = strip.panel_height + strip.device_interstice;
+    const w = strip.panel_width;
+    const h = strip.panel_height;
+    const all = countChromatic(page, x, y, w, h);
+    try std.testing.expect(all > 1000);
+
+    var min_y: u32 = h;
+    var max_y: u32 = 0;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        if (countChromatic(page, x, y + row, w, 1) == 0) continue;
+        min_y = @min(min_y, row);
+        max_y = @max(max_y, row + 1);
+    }
+    try std.testing.expect(max_y > min_y);
+    const span = max_y - min_y;
+    // A feet-only crop of the padded card occupies a thin band at the bottom.
+    try std.testing.expect(span * 4 >= h);
+    try std.testing.expect(min_y + span / 3 < (h * 3) / 4);
+}
+
 test "a last-nine transcript window loses first-panel establishing geometry" {
     const gpa = std.testing.allocator;
     const full = [_]strip.Line{

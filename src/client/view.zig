@@ -3436,7 +3436,8 @@ test "color and HD chrome portraits are heads with a keyed paper matte" {
         defer portrait.deinit(std.testing.allocator);
         var body = try figure.chromeBody(std.testing.allocator, data, "");
         defer body.deinit(std.testing.allocator);
-        try std.testing.expect(portrait.height < body.height);
+        try std.testing.expect(portrait.height <= body.height);
+        try std.testing.expect(portrait.height >= 24);
         canvas.clear(ui.current.layer);
         blitContainCenterAlphaSmooth(&canvas, portrait.pixels, portrait.width, portrait.height, 10, 10, 60, 60);
         try std.testing.expectEqual(ui.current.layer, canvas.px[0]);

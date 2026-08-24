@@ -292,11 +292,12 @@ fn assembleDetailedForSourcePoseInner(
 
     if (asset.kind == .simple_avatar) {
         const record = selected.body orelse return error.PoseNotFound;
-        const image = try bgb.decodeImageRef(gpa, avb_data, record.images[0]);
+        var image = try bgb.decodeImageRef(gpa, avb_data, record.images[0]);
+        const origin_x = try takePaddedSimpleCard(gpa, &image);
         if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
-            .face_x = record.face.x,
+            .face_x = clampedFaceX(record.face.x - origin_x, image.width),
             .head_height = simpleHeadHeight(image.height),
             .requested = selected.requested,
         };
@@ -349,11 +350,12 @@ fn assembleDetailedAnalysisInner(
         const choice = selectAvailable(table.records, analysis, .body, null) orelse neutralChoice();
         const record = bgb.selectPose(table.records, .body, choice.emotion.assetIndex(), choice.intensity) orelse
             return error.PoseNotFound;
-        const image = try bgb.decodePoseForEmotion(gpa, avb_data, .body, choice.emotion.assetIndex(), choice.intensity);
+        var image = try bgb.decodePoseForEmotion(gpa, avb_data, .body, choice.emotion.assetIndex(), choice.intensity);
+        const origin_x = try takePaddedSimpleCard(gpa, &image);
         if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
-            .face_x = record.face.x,
+            .face_x = clampedFaceX(record.face.x - origin_x, image.width),
             .head_height = simpleHeadHeight(image.height),
         };
     }
@@ -426,9 +428,107 @@ fn selectAvailable(
 
 /// `CBodySingle::GetDimInfo` at `avatar.cpp:63`:
 /// `headHeight = ydim/2; // for now, be conservative -- head = half body!`
-/// Authored `face.y` is unused for simple-avatar layout. Do not "improve" this.
+/// Authored `face.y` is unused for simple-avatar layout. Generated Color/HD
+/// cards are cropped to the opaque silhouette first so `ydim` is the figure,
+/// not the 240×280 pad. Do not replace this with `face.y`.
 fn simpleHeadHeight(image_height: u32) i32 {
     return @intCast(image_height / 2);
+}
+
+fn clampedFaceX(face_x: i32, width: u32) i32 {
+    if (width == 0) return 0;
+    if (face_x < 0 or face_x > @as(i32, @intCast(width))) return @intCast(width / 2);
+    return face_x;
+}
+
+/// Packager canvas from `tools/package_generated_avb.py`. Authored simple
+/// poses stay well below this; they keep their decoded DIB dimensions.
+fn isPaddedSimpleCard(image: Image, bbox: Bounds) bool {
+    if (image.width < 200 or image.height < 240) return false;
+    return bbox.w + 8 < image.width or bbox.h + 8 < image.height;
+}
+
+fn paperInkPixel(image: Image, x: u32, y: u32) bool {
+    if (x >= image.width or y >= image.height) return false;
+    const pixel = image.pixels[y * image.width + x];
+    return (pixel >> 24) != 0 and (pixel & 0x00ffffff) != 0x00ffffff;
+}
+
+fn paperInkBounds(image: Image) ?Bounds {
+    var min_x: u32 = image.width;
+    var min_y: u32 = image.height;
+    var max_x: u32 = 0;
+    var max_y: u32 = 0;
+    var y: u32 = 0;
+    while (y < image.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < image.width) : (x += 1) {
+            if (!paperInkPixel(image, x, y)) continue;
+            min_x = @min(min_x, x);
+            min_y = @min(min_y, y);
+            max_x = @max(max_x, x + 1);
+            max_y = @max(max_y, y + 1);
+        }
+    }
+    if (min_x >= max_x or min_y >= max_y) return null;
+    return .{ .x = min_x, .y = min_y, .w = max_x - min_x, .h = max_y - min_y };
+}
+
+fn columnHasPaperInk(image: Image, x: u32) bool {
+    var y: u32 = 0;
+    while (y < image.height) : (y += 1) {
+        if (paperInkPixel(image, x, y)) return true;
+    }
+    return false;
+}
+
+/// Generated HD/Color cards sometimes store a wrap sliver to the right of the
+/// real figure. Layout must use the widest ink column-run, not the bbox of
+/// every non-white pixel.
+fn largestPaperInkRun(image: Image) ?Bounds {
+    var best_x0: u32 = 0;
+    var best_x1: u32 = 0;
+    var x: u32 = 0;
+    while (x < image.width) {
+        if (!columnHasPaperInk(image, x)) {
+            x += 1;
+            continue;
+        }
+        var x1 = x + 1;
+        while (x1 < image.width and columnHasPaperInk(image, x1)) : (x1 += 1) {}
+        if (x1 - x > best_x1 - best_x0) {
+            best_x0 = x;
+            best_x1 = x1;
+        }
+        x = x1;
+    }
+    if (best_x1 <= best_x0) return paperInkBounds(image);
+
+    var min_y: u32 = image.height;
+    var max_y: u32 = 0;
+    var y: u32 = 0;
+    while (y < image.height) : (y += 1) {
+        var col = best_x0;
+        while (col < best_x1) : (col += 1) {
+            if (!paperInkPixel(image, col, y)) continue;
+            min_y = @min(min_y, y);
+            max_y = @max(max_y, y + 1);
+        }
+    }
+    if (min_y >= max_y) return paperInkBounds(image);
+    return .{ .x = best_x0, .y = min_y, .w = best_x1 - best_x0, .h = max_y - min_y };
+}
+
+/// Crop a generated 240×280 white card to the ink silhouette. Returns the
+/// discarded left pad so `face.x` stays inside the cropped bitmap.
+pub fn takePaddedSimpleCard(gpa: std.mem.Allocator, image: *Image) !i32 {
+    const full = paperInkBounds(image.*) orelse return 0;
+    if (!isPaddedSimpleCard(image.*, full)) return 0;
+    const bbox = largestPaperInkRun(image.*) orelse full;
+    const cropped = try copyRect(gpa, image.*, bbox.x, bbox.y, bbox.w, bbox.h);
+    image.deinit(gpa);
+    image.* = cropped;
+    return @intCast(bbox.x);
 }
 
 /// `CBodyCam::DrawBody` calls `DrawBody(..., FALSE)` and `CBodySingle` uses
@@ -550,26 +650,20 @@ fn iconLooksLikeStretchedBody(icon: Image, body: Image) bool {
 }
 
 fn cropHeadPortrait(gpa: std.mem.Allocator, image: Image, head_height: i32) !Image {
-    // Generated poses sit below leftover card padding, so `ydim/2` from y=0
-    // can be only hair. Microsoft `GetDimInfo` still owns strip layout
-    // (`headHeight = ydim/2`); chrome mugshots follow the Color packager:
-    // upper 3/5 of the opaque silhouette, tightened to a 5:4 head frame.
-    _ = head_height;
+    // Generated cards are cropped to the opaque silhouette first. A half-body
+    // band that is wider than it is tall contain-fits into a pancake and reads
+    // as a waist cut; keep the full silhouette instead of 5:4-clipping arms.
     const bbox = opaqueBounds(image) orelse return copyRect(gpa, image, 0, 0, image.width, image.height);
-    const crop_h = @min(bbox.h, @max(@as(u32, 64), bbox.h * 3 / 5));
+    const half: u32 = if (head_height > 0) @intCast(head_height) else bbox.h / 2;
+    const crop_h = @min(bbox.h, @max(@as(u32, 64), half));
+    // Generated standing figures are taller than a mugshot slot. Returning the
+    // full silhouette lets CAST/gallery contain-fit the whole woman instead of
+    // a waist-cut head band or a 5:4 side clip.
+    if (bbox.h >= 160 and bbox.w >= 80) {
+        return copyRect(gpa, image, bbox.x, bbox.y, bbox.w, bbox.h);
+    }
     const band = opaqueBoundsIn(image, bbox.x, bbox.y, bbox.w, crop_h) orelse bbox;
-    const crop_w = if (band.w > (band.h * 5 + 3) / 4)
-        @min(band.w, (band.h * 5 + 3) / 4)
-    else
-        band.w;
-    const crop_x = if (crop_w >= band.w) band.x else blk: {
-        const center = opaqueCenterX(image, band.x, band.y, band.w, band.h) orelse band.x + band.w / 2;
-        const raw: i32 = @as(i32, @intCast(center)) - @as(i32, @intCast(crop_w / 2));
-        const min_x: i32 = @intCast(band.x);
-        const max_x: i32 = @intCast(band.x + band.w - crop_w);
-        break :blk @as(u32, @intCast(std.math.clamp(raw, min_x, max_x)));
-    };
-    var head = try copyRect(gpa, image, crop_x, band.y, crop_w, band.h);
+    var head = try copyRect(gpa, image, band.x, band.y, band.w, band.h);
     const trimmed = trimTransparent(gpa, head) catch return head;
     head.deinit(gpa);
     return trimmed;
@@ -830,17 +924,16 @@ test "HD chrome portraits reject smashed 64x64 bodies and Color keeps the mugsho
     var smashed = try bgb.decodeIcon(gpa, hd);
     defer smashed.deinit(gpa);
     keySrcAndMatte(smashed);
-    var hd_pose = try assembleDetailedForText(gpa, hd, "");
-    defer hd_pose.deinit(gpa);
-    keySrcAndMatte(hd_pose.image);
-    try std.testing.expect(iconLooksLikeStretchedBody(smashed, hd_pose.image));
+    var hd_card = try bgb.decodePoseForEmotion(gpa, hd, .body, 9, 0);
+    defer hd_card.deinit(gpa);
+    keySrcAndMatte(hd_card);
+    try std.testing.expect(iconLooksLikeStretchedBody(smashed, hd_card));
     var hd_body = try chromeBody(gpa, hd, "");
     defer hd_body.deinit(gpa);
     var hd_portrait = try chromePortrait(gpa, hd);
     defer hd_portrait.deinit(gpa);
     try std.testing.expect(hd_portrait.height != smashed.height or hd_portrait.width != smashed.width);
     try std.testing.expect(hd_portrait.height >= 80);
-    try std.testing.expect(hd_portrait.height * 2 >= hd_portrait.width);
     try std.testing.expect(countOpaque(hd_portrait) * 4 >= @as(usize, hd_portrait.width) * hd_portrait.height);
 
     const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
@@ -852,8 +945,59 @@ test "HD chrome portraits reject smashed 64x64 bodies and Color keeps the mugsho
     try std.testing.expect(!iconLooksLikeStretchedBody(color_icon, color_body));
     var color_portrait = try chromePortrait(gpa, color);
     defer color_portrait.deinit(gpa);
-    try std.testing.expect(color_portrait.height < color_body.height);
-    try std.testing.expect(color_portrait.height * 2 >= color_portrait.width);
+    try std.testing.expect(color_portrait.height <= color_body.height);
+}
+
+test "Anna HD and Color female chrome is a full silhouette not a half-width or feet crop" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/anna-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/anna-color-hd-v1.avb"),
+    };
+    for (blobs) |avb_data| {
+        var assembled = try assembleDetailedForText(gpa, avb_data, "");
+        defer assembled.deinit(gpa);
+        try std.testing.expect(assembled.image.width < 200);
+        try std.testing.expect(assembled.image.height < 240);
+        try std.testing.expectEqual(simpleHeadHeight(assembled.image.height), assembled.head_height);
+        try std.testing.expect(assembled.head_height * 5 >= @as(i32, @intCast(assembled.image.height)) * 2);
+
+        var body = try chromeBody(gpa, avb_data, "");
+        defer body.deinit(gpa);
+        var portrait = try chromePortrait(gpa, avb_data);
+        defer portrait.deinit(gpa);
+
+        try std.testing.expect(body.width >= 80);
+        try std.testing.expect(body.width < 160);
+        try std.testing.expect(body.height >= 160);
+        try std.testing.expect(body.height > body.width);
+        try std.testing.expect(portrait.width * 4 >= body.width * 3);
+        try std.testing.expect(portrait.height >= 80);
+        try std.testing.expect(portrait.height <= body.height);
+        try std.testing.expect(portrait.width > body.width / 2);
+
+        const bbox = opaqueBounds(body).?;
+        try std.testing.expectEqual(@as(u32, 0), bbox.x);
+        try std.testing.expect(bbox.w * 8 >= body.width * 7);
+        var empty_run: u32 = 0;
+        var col: u32 = 0;
+        while (col < body.width) : (col += 1) {
+            var ink = false;
+            var row: u32 = 0;
+            while (row < body.height) : (row += 1) {
+                if (body.pixels[row * body.width + col] >> 24 != 0) {
+                    ink = true;
+                    break;
+                }
+            }
+            if (ink) {
+                empty_run = 0;
+            } else {
+                empty_run += 1;
+                try std.testing.expect(empty_run < 12);
+            }
+        }
+    }
 }
 
 test "chrome body keeps the full simple-avatar figure after keying white" {
@@ -863,7 +1007,7 @@ test "chrome body keeps the full simple-avatar figure after keying white" {
     defer portrait.deinit(gpa);
     var body = try chromeBody(gpa, color, "");
     defer body.deinit(gpa);
-    try std.testing.expect(body.height > portrait.height);
+    try std.testing.expect(body.height >= portrait.height);
     var transparent = false;
     for (body.pixels) |pixel| if (pixel >> 24 == 0) {
         transparent = true;
@@ -886,6 +1030,8 @@ test "simple-avatar GetDimInfo keeps the source half-body head height" {
     try std.testing.expectEqual(simpleHeadHeight(generated.image.height), generated.head_height);
     // face.y is authored metadata, not the layout head band.
     try std.testing.expect(generated.head_height != generated.image.height);
+    try std.testing.expect(generated.image.height < 240);
+    try std.testing.expect(generated.image.width < 240);
 }
 
 test "text rules select simple-avatar whole-body expressions" {
