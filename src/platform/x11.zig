@@ -1,15 +1,18 @@
 //! Minimal pure-Zig X11 window backend.
 //!
-//! Talks to the local X server over `/tmp/.X11-unix/X<n>` (pathname, then
-//! abstract) with MIT-MAGIC-COOKIE-1 from Xauthority, and uploads an RGBA
-//! framebuffer with PutImage. No Xlib, no C imports.
+//! Talks to the X server over `/tmp/.X11-unix/X<n>` (pathname, then abstract)
+//! or TCP port `6000+N` for `host:N` / `localhost:N` / `ssh -X`, with
+//! MIT-MAGIC-COOKIE-1 from Xauthority, and uploads an RGBA framebuffer with
+//! PutImage. No Xlib, no C imports.
 //!
 //! Two layers:
 //!   * `show(...)` — one-shot: open a window, draw an image, wait for a
 //!     keypress / close.
 //!   * `Window` — interactive: open/present/nextEvent/fd, with keyboard
-//!     translation (GetKeyboardMapping), integer HiDPI scale, ICCCM clipboard,
-//!     and resize/close events, suitable for a poll(2)-driven client event loop.
+//!     translation (GetKeyboardMapping, including Mod5/AltGr), integer HiDPI
+//!     scale, ICCCM CLIPBOARD+PRIMARY (INCR for large transfers), WM size
+//!     hints, and resize/close events, suitable for a poll(2)-driven client
+//!     event loop.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -40,10 +43,19 @@ const gc_background: u32 = 1 << 3;
 const atom_atom = 4;
 const atom_cardinal = 6;
 const atom_string = 31;
+const atom_primary = 1;
 const atom_wm_class = 67;
 const atom_wm_name = 39;
+const atom_wm_normal_hints = 40;
+const atom_wm_size_hints = 41;
 const atom_resource_manager = 23;
 const prop_replace = 0;
+const property_new_value: u8 = 0;
+const property_deleted: u8 = 1;
+const size_hint_p_min: u32 = 1 << 4;
+const size_hint_p_max: u32 = 1 << 5;
+const size_hint_p_base: u32 = 1 << 8;
+const incr_chunk_bytes: usize = 16 * 1024;
 const family_internet: u16 = 0;
 const family_local: u16 = 256;
 const family_wild: u16 = 65535;
@@ -66,6 +78,7 @@ const XConn = struct {
     clipboard: u32 = 0,
     utf8_string: u32 = 0,
     targets: u32 = 0,
+    incr: u32 = 0,
     net_wm_name: u32 = 0,
     net_wm_pid: u32 = 0,
 
@@ -88,6 +101,7 @@ const Screen = struct {
 };
 
 const Display = struct {
+    host: []const u8,
     number: u16,
     local: bool,
 };
@@ -129,9 +143,17 @@ pub const Keymap = struct {
         if (idx >= self.syms.len) return 0;
         const s0 = self.syms[idx];
         const s1 = if (self.per > 1 and idx + 1 < self.syms.len) self.syms[idx + 1] else 0;
+        const s2 = if (self.per > 2 and idx + 2 < self.syms.len) self.syms[idx + 2] else 0;
+        const s3 = if (self.per > 3 and idx + 3 < self.syms.len) self.syms[idx + 3] else 0;
 
         const shift = (state & 0x1) != 0;
         const lock = (state & 0x2) != 0;
+        const level3 = (state & 0x80) != 0; // Mod5 / ISO_Level3_Shift
+
+        if (level3 and (s2 != 0 or s3 != 0)) {
+            if (shift and s3 != 0) return s3;
+            if (s2 != 0) return s2;
+        }
 
         var sym = s0;
         if (shift and s1 != 0) sym = s1;
@@ -208,6 +230,11 @@ pub const Window = struct {
     last_primary_y: i32,
     clipboard_text: []u8,
     owns_clipboard: bool,
+    owns_primary: bool,
+    incr_requestor: u32,
+    incr_property: u32,
+    incr_target: u32,
+    incr_offset: usize,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
         if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
@@ -245,6 +272,11 @@ pub const Window = struct {
             .last_primary_y = 0,
             .clipboard_text = &.{},
             .owns_clipboard = false,
+            .owns_primary = false,
+            .incr_requestor = 0,
+            .incr_property = 0,
+            .incr_target = 0,
+            .incr_offset = 0,
         };
         errdefer self.threaded.deinit();
         const io = self.threaded.io();
@@ -269,6 +301,7 @@ pub const Window = struct {
         try setTitle(&self.conn, self.window, title);
         try setWmClass(&self.conn, self.window, "comicchat", "Reinked");
         try setNetWmPid(&self.conn, self.window);
+        try setSizeHints(&self.conn, self.window, w, h);
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
         try mapWindow(&self.conn, self.window);
@@ -354,7 +387,7 @@ pub const Window = struct {
                     .modifiers = .{
                         .shift = state & 1 != 0,
                         .control = state & 4 != 0,
-                        .alt = state & 8 != 0,
+                        .alt = state & 8 != 0 or state & 0x80 != 0,
                         .super = state & 64 != 0,
                     },
                 } };
@@ -412,14 +445,12 @@ pub const Window = struct {
                 self.height = h;
                 return .{ .resize = .{ .w = w, .h = h } };
             },
+            28 => { // PropertyNotify
+                self.continueIncr(event);
+                return .other;
+            },
             29 => { // SelectionClear
-                if (get32(event[8..12]) == self.conn.clipboard) {
-                    self.owns_clipboard = false;
-                    if (self.clipboard_text.len != 0) {
-                        self.gpa.free(self.clipboard_text);
-                        self.clipboard_text = &.{};
-                    }
-                }
+                self.handleSelectionClear(event);
                 return .other;
             },
             30 => { // SelectionRequest
@@ -442,16 +473,25 @@ pub const Window = struct {
         if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         self.clipboard_text = copy;
         try setSelectionOwner(&self.conn, self.window, self.conn.clipboard);
+        try setSelectionOwner(&self.conn, self.window, atom_primary);
         self.owns_clipboard = true;
+        self.owns_primary = true;
     }
 
     fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        if (self.owns_clipboard) {
+        if (self.owns_clipboard or self.owns_primary) {
             if (self.clipboard_text.len == 0) return null;
             return try gpa.dupe(u8, self.clipboard_text);
         }
         if (self.conn.clipboard == 0 or self.conn.utf8_string == 0) return error.ClipboardUnavailable;
-        try convertSelection(&self.conn, self.window, self.conn.clipboard, self.conn.utf8_string, self.conn.utf8_string);
+        if (self.convertAndRead(gpa, self.conn.clipboard)) |text| {
+            if (text != null) return text;
+        } else |_| {}
+        return self.convertAndRead(gpa, atom_primary);
+    }
+
+    fn convertAndRead(self: *Window, gpa: std.mem.Allocator, selection: u32) !?[]u8 {
+        try convertSelection(&self.conn, self.window, selection, self.conn.utf8_string, self.conn.utf8_string);
         var attempts: u16 = 0;
         while (attempts < 64) : (attempts += 1) {
             var raw: [32]u8 = undefined;
@@ -460,15 +500,77 @@ pub const Window = struct {
             if (kind == 31) {
                 if (get32(raw[8..12]) != self.window) continue;
                 if (get32(raw[20..24]) == 0) return null;
-                return try getWindowProperty(gpa, &self.conn, self.window, self.conn.utf8_string);
+                return try self.readSelectionProperty(gpa, self.conn.utf8_string);
             }
-            if (kind == 30) {
-                self.serveSelectionRequest(raw) catch {};
-                continue;
-            }
+            _ = self.handleProtocolEvent(raw);
             if (kind == 0) return error.X11ServerError;
         }
         return error.ClipboardTimeout;
+    }
+
+    fn readSelectionProperty(self: *Window, gpa: std.mem.Allocator, property: u32) !?[]u8 {
+        const first = getWindowPropertyRaw(gpa, &self.conn, self.window, property, true) catch return null;
+        if (self.conn.incr != 0 and first.typ == self.conn.incr) {
+            gpa.free(first.bytes);
+            return try self.readIncrProperty(gpa, property);
+        }
+        return first.bytes;
+    }
+
+    fn readIncrProperty(self: *Window, gpa: std.mem.Allocator, property: u32) ![]u8 {
+        var acc: std.ArrayList(u8) = .empty;
+        errdefer acc.deinit(gpa);
+        var attempts: u16 = 0;
+        while (attempts < 256) : (attempts += 1) {
+            var raw: [32]u8 = undefined;
+            try readExact(&self.conn, &raw);
+            const kind = raw[0] & 0x7f;
+            if (kind == 28) {
+                if (get32(raw[4..8]) != self.window or get32(raw[8..12]) != property) {
+                    self.continueIncr(raw);
+                    continue;
+                }
+                if (raw[16] != property_new_value) continue;
+                const chunk = getWindowPropertyRaw(gpa, &self.conn, self.window, property, true) catch continue;
+                defer gpa.free(chunk.bytes);
+                if (chunk.bytes.len == 0) return try acc.toOwnedSlice(gpa);
+                if (acc.items.len + chunk.bytes.len > max_clipboard_bytes) return error.ClipboardTooLarge;
+                try acc.appendSlice(gpa, chunk.bytes);
+                continue;
+            }
+            _ = self.handleProtocolEvent(raw);
+            if (kind == 0) return error.X11ServerError;
+        }
+        return error.ClipboardTimeout;
+    }
+
+    fn handleProtocolEvent(self: *Window, event: [32]u8) bool {
+        const kind = event[0] & 0x7f;
+        switch (kind) {
+            28 => {
+                self.continueIncr(event);
+                return true;
+            },
+            29 => {
+                self.handleSelectionClear(event);
+                return true;
+            },
+            30 => {
+                self.serveSelectionRequest(event) catch {};
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn handleSelectionClear(self: *Window, event: [32]u8) void {
+        const selection = get32(event[8..12]);
+        if (selection == self.conn.clipboard) self.owns_clipboard = false;
+        if (selection == atom_primary) self.owns_primary = false;
+        if (!self.owns_clipboard and !self.owns_primary and self.clipboard_text.len != 0) {
+            self.gpa.free(self.clipboard_text);
+            self.clipboard_text = &.{};
+        }
     }
 
     fn serveSelectionRequest(self: *Window, event: [32]u8) !void {
@@ -477,18 +579,55 @@ pub const Window = struct {
         const target = get32(event[20..24]);
         var property = get32(event[24..28]);
         if (property == 0) property = target;
+        const ours = (selection == self.conn.clipboard and self.owns_clipboard) or
+            (selection == atom_primary and self.owns_primary);
         var served: u32 = 0;
-        if (selection == self.conn.clipboard and self.owns_clipboard and property != 0) {
+        if (ours and property != 0) {
             if (target == self.conn.targets) {
-                const atoms = [_]u32{ self.conn.targets, self.conn.utf8_string, atom_string };
+                const atoms = [_]u32{ self.conn.targets, self.conn.utf8_string, atom_string, self.conn.incr };
                 try changePropertyAtoms(&self.conn, requestor, property, &atoms);
                 served = property;
             } else if (target == self.conn.utf8_string or target == atom_string) {
-                try changePropertyBytes(&self.conn, requestor, property, target, self.clipboard_text);
-                served = property;
+                if (self.clipboard_text.len > incrThreshold(&self.conn) and self.conn.incr != 0) {
+                    try selectPropertyNotify(&self.conn, requestor);
+                    const size: u32 = @intCast(self.clipboard_text.len);
+                    try changeProperty32(&self.conn, requestor, property, self.conn.incr, &.{size});
+                    self.incr_requestor = requestor;
+                    self.incr_property = property;
+                    self.incr_target = target;
+                    self.incr_offset = 0;
+                    served = property;
+                } else {
+                    try changePropertyBytes(&self.conn, requestor, property, target, self.clipboard_text);
+                    served = property;
+                }
             }
         }
         try sendSelectionNotify(&self.conn, requestor, get32(event[4..8]), selection, target, served);
+    }
+
+    fn continueIncr(self: *Window, event: [32]u8) void {
+        if (self.incr_requestor == 0) return;
+        if (get32(event[4..8]) != self.incr_requestor) return;
+        if (get32(event[8..12]) != self.incr_property) return;
+        if (event[16] != property_deleted) return;
+        self.sendIncrChunk() catch {
+            self.incr_requestor = 0;
+            self.incr_offset = 0;
+        };
+    }
+
+    fn sendIncrChunk(self: *Window) !void {
+        const start = self.incr_offset;
+        if (start >= self.clipboard_text.len) {
+            try changePropertyBytes(&self.conn, self.incr_requestor, self.incr_property, self.incr_target, &.{});
+            self.incr_requestor = 0;
+            self.incr_offset = 0;
+            return;
+        }
+        const n = @min(self.clipboard_text.len - start, incr_chunk_bytes);
+        try changePropertyBytes(&self.conn, self.incr_requestor, self.incr_property, self.incr_target, self.clipboard_text[start .. start + n]);
+        self.incr_offset = start + n;
     }
 };
 
@@ -506,35 +645,31 @@ fn parseDisplay(display: []const u8) !Display {
     const start = i;
     while (i < display.len and display[i] >= '0' and display[i] <= '9') : (i += 1) {}
     if (i == start) return error.InvalidDisplay;
-    const host = display[0..colon];
-    const local = host.len == 0 or
-        std.mem.eql(u8, host, "unix") or
-        std.mem.eql(u8, host, "localhost") or
-        std.mem.eql(u8, host, "127.0.0.1");
+    var host = display[0..colon];
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') {
+        host = host[1 .. host.len - 1];
+    }
+    const local = host.len == 0 or std.mem.eql(u8, host, "unix");
     return .{
+        .host = host,
         .number = try std.fmt.parseInt(u16, display[start..i], 10),
         .local = local,
     };
 }
 
 fn connectDisplay(gpa: std.mem.Allocator, io: std.Io, display: Display, env: []const u8) !XConn {
-    if (!display.local) return error.RemoteDisplayUnsupported;
-    var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/.X11-unix/X{d}", .{display.number});
-    const stream = openUnixSocket(io, path) catch blk: {
-        var abstract_buf: [65]u8 = undefined;
-        abstract_buf[0] = 0;
-        const rest = try std.fmt.bufPrint(abstract_buf[1..], "/tmp/.X11-unix/X{d}", .{display.number});
-        break :blk try openUnixSocket(io, abstract_buf[0 .. 1 + rest.len]);
-    };
+    const stream = if (display.local)
+        try connectLocalUnix(io, display.number)
+    else
+        try connectTcp(io, display.host, display.number);
     errdefer stream.close(io);
 
     var hostname_buf: [64]u8 = undefined;
-    const hostname = localHostname(&hostname_buf);
+    const hostname = if (display.local) localHostname(&hostname_buf) else display.host;
     var display_number_buf: [8]u8 = undefined;
     const display_number = try std.fmt.bufPrint(&display_number_buf, "{d}", .{display.number});
     var auth_storage: [256]u8 = undefined;
-    const auth = readMatchingAuth(env, hostname, display_number, &auth_storage) catch Auth{};
+    const auth = readMatchingAuth(env, hostname, display_number, display.local, &auth_storage) catch Auth{};
 
     try writeSetupHello(io, stream, auth);
 
@@ -830,13 +965,79 @@ fn encodeBgrx(dst: []u8, pixels: []const u32, w: u32, h: u32) void {
     }
 }
 
-fn openUnixSocket(io: std.Io, path: []const u8) !net.Stream {
-    const addr = try net.UnixAddress.init(path);
-    return net.UnixAddress.connect(&addr, io) catch |err| switch (err) {
-        error.FileNotFound, error.Unexpected => error.XServerUnavailable,
-        error.AccessDenied, error.PermissionDenied => error.AccessDenied,
+fn connectLocalUnix(io: std.Io, number: u16) !net.Stream {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/.X11-unix/X{d}", .{number});
+    return openUnixSocket(io, path) catch {
+        var abstract_buf: [65]u8 = undefined;
+        abstract_buf[0] = 0;
+        const rest = try std.fmt.bufPrint(abstract_buf[1..], "/tmp/.X11-unix/X{d}", .{number});
+        return openUnixSocket(io, abstract_buf[0 .. 1 + rest.len]);
+    };
+}
+
+fn connectTcp(io: std.Io, host: []const u8, number: u16) !net.Stream {
+    const port = std.math.add(u16, 6000, number) catch return error.InvalidDisplay;
+    if (net.IpAddress.parseIp4(host, port)) |addr| {
+        return addr.connect(io, .{ .mode = .stream }) catch |err| return mapTcpError(err);
+    } else |_| {}
+    if (net.IpAddress.parseIp6(host, port)) |addr| {
+        return addr.connect(io, .{ .mode = .stream }) catch |err| return mapTcpError(err);
+    } else |_| {}
+    const name = net.HostName.init(host) catch return error.InvalidDisplay;
+    return name.connect(io, port, .{ .mode = .stream }) catch |err| return mapTcpError(err);
+}
+
+fn mapTcpError(err: anyerror) anyerror {
+    return switch (err) {
+        error.ConnectionRefused,
+        error.NetworkUnreachable,
+        error.HostUnreachable,
+        error.ConnectionTimedOut,
+        error.ConnectionResetByPeer,
+        error.UnknownHostName,
+        error.NameNotFound,
+        error.AddressNotAvailable,
+        error.AddressFamilyUnsupported,
+        => error.XServerUnavailable,
         else => err,
     };
+}
+
+fn openUnixSocket(io: std.Io, path: []const u8) !net.Stream {
+    return services.connectUnixStream(io, path) catch |err| switch (err) {
+        error.ServerUnavailable => error.XServerUnavailable,
+        error.AccessDenied => error.AccessDenied,
+        else => err,
+    };
+}
+
+fn incrThreshold(conn: *const XConn) usize {
+    const max_units = @max(conn.max_request_units, min_max_request_units);
+    if (max_units <= 8) return incr_chunk_bytes;
+    return @min((@as(usize, max_units) - 8) * 4 / 2, incr_chunk_bytes);
+}
+
+fn setSizeHints(conn: *XConn, window: u32, w: u32, h: u32) !void {
+    var hints: [18]u32 = @splat(0);
+    hints[0] = size_hint_p_min | size_hint_p_max | size_hint_p_base;
+    hints[5] = 160;
+    hints[6] = 120;
+    hints[7] = 8192;
+    hints[8] = 8192;
+    hints[15] = w;
+    hints[16] = h;
+    try changeProperty32(conn, window, atom_wm_normal_hints, atom_wm_size_hints, &hints);
+}
+
+fn selectPropertyNotify(conn: *XConn, window: u32) !void {
+    var req: [16]u8 = @splat(0);
+    req[0] = 2;
+    put16(req[2..4], 4);
+    put32(req[4..8], window);
+    put32(req[8..12], cw_event_mask);
+    put32(req[12..16], event_property_change);
+    try writeAll(conn, &req);
 }
 
 fn openReadOnly(path: [*:0]const u8) !i32 {
@@ -903,6 +1104,7 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.clipboard = try internAtom(conn, "CLIPBOARD");
     conn.utf8_string = try internAtom(conn, "UTF8_STRING");
     conn.targets = try internAtom(conn, "TARGETS");
+    conn.incr = try internAtom(conn, "INCR");
     conn.net_wm_name = try internAtom(conn, "_NET_WM_NAME");
     conn.net_wm_pid = try internAtom(conn, "_NET_WM_PID");
 }
@@ -961,30 +1163,46 @@ fn takeXauthCounted(bytes: []const u8, offset: *usize) ![]const u8 {
     return slice;
 }
 
-fn xauthMatches(record: XauthRecord, hostname: []const u8, display_number: []const u8) bool {
+fn isLoopbackHost(host: []const u8) bool {
+    return std.mem.eql(u8, host, "localhost") or
+        std.mem.eql(u8, host, "127.0.0.1") or
+        std.mem.eql(u8, host, "::1");
+}
+
+fn internetAddressMatches(address: []const u8, hostname: []const u8) bool {
+    if (std.mem.eql(u8, address, hostname)) return true;
+    if (isLoopbackHost(hostname) and std.mem.eql(u8, address, &[_]u8{ 127, 0, 0, 1 })) return true;
+    if (net.Ip4Address.parse(hostname, 0)) |ip4| {
+        return std.mem.eql(u8, address, &ip4.bytes);
+    } else |_| {}
+    return false;
+}
+
+fn xauthMatches(record: XauthRecord, hostname: []const u8, display_number: []const u8, local: bool) bool {
     if (!std.mem.eql(u8, record.name, "MIT-MAGIC-COOKIE-1")) return false;
     if (record.number.len != 0 and !std.mem.eql(u8, record.number, display_number)) return false;
     return switch (record.family) {
         family_wild => true,
         family_local => std.mem.eql(u8, record.address, hostname),
-        family_internet => std.mem.eql(u8, record.address, &[_]u8{ 127, 0, 0, 1 }) or
-            std.mem.eql(u8, record.address, hostname),
+        family_internet => internetAddressMatches(record.address, hostname) or
+            (local and std.mem.eql(u8, record.address, &[_]u8{ 127, 0, 0, 1 })),
         else => false,
     };
 }
 
-fn selectXauth(bytes: []const u8, hostname: []const u8, display_number: []const u8) !?XauthRecord {
+fn selectXauth(bytes: []const u8, hostname: []const u8, display_number: []const u8, local: bool) !?XauthRecord {
     var offset: usize = 0;
     var fallback: ?XauthRecord = null;
     while (try nextXauthRecord(bytes, &offset)) |record| {
-        if (!xauthMatches(record, hostname, display_number)) continue;
-        if (record.family == family_local) return record;
+        if (!xauthMatches(record, hostname, display_number, local)) continue;
+        if (local and record.family == family_local) return record;
+        if (!local and record.family == family_internet) return record;
         if (fallback == null) fallback = record;
     }
     return fallback;
 }
 
-fn readMatchingAuth(env: []const u8, hostname: []const u8, display_number: []const u8, storage: []u8) !Auth {
+fn readMatchingAuth(env: []const u8, hostname: []const u8, display_number: []const u8, local: bool, storage: []u8) !Auth {
     var path_buf: [512]u8 = undefined;
     const path = xauthPath(env, &path_buf) orelse return error.NoAuthFile;
     var zpath: [513]u8 = undefined;
@@ -1002,7 +1220,7 @@ fn readMatchingAuth(env: []const u8, hostname: []const u8, display_number: []con
         if (file.items.len + n > 64 * 1024) return error.AuthTooLarge;
         try file.appendSlice(std.heap.page_allocator, scratch[0..n]);
     }
-    const record = (try selectXauth(file.items, hostname, display_number)) orelse return error.NoMatchingAuth;
+    const record = (try selectXauth(file.items, hostname, display_number, local)) orelse return error.NoMatchingAuth;
     if (record.name.len + record.data.len > storage.len) return error.AuthTooLarge;
     @memcpy(storage[0..record.name.len], record.name);
     @memcpy(storage[record.name.len .. record.name.len + record.data.len], record.data);
@@ -1026,9 +1244,19 @@ fn xauthPath(env: []const u8, buf: []u8) ?[]const u8 {
     return buf[0 .. home.len + "/.Xauthority".len];
 }
 
+const PropertyValue = struct {
+    typ: u32,
+    bytes: []u8,
+};
+
 fn getWindowProperty(gpa: std.mem.Allocator, conn: *XConn, window: u32, property: u32) ![]u8 {
+    return (try getWindowPropertyRaw(gpa, conn, window, property, false)).bytes;
+}
+
+fn getWindowPropertyRaw(gpa: std.mem.Allocator, conn: *XConn, window: u32, property: u32, delete: bool) !PropertyValue {
     var req: [24]u8 = @splat(0);
     req[0] = 20;
+    req[1] = if (delete) 1 else 0;
     put16(req[2..4], 6);
     put32(req[4..8], window);
     put32(req[8..12], property);
@@ -1041,7 +1269,8 @@ fn getWindowProperty(gpa: std.mem.Allocator, conn: *XConn, window: u32, property
     const extra = try gpa.alloc(u8, extra_words * 4);
     errdefer gpa.free(extra);
     if (extra.len != 0) try readExact(conn, extra);
-    if (reply[1] == 0 or get32(reply[8..12]) == 0) {
+    const typ = get32(reply[8..12]);
+    if (reply[1] == 0 or typ == 0) {
         gpa.free(extra);
         return error.NoProperty;
     }
@@ -1060,10 +1289,10 @@ fn getWindowProperty(gpa: std.mem.Allocator, conn: *XConn, window: u32, property
         gpa.free(extra);
         return error.ShortProperty;
     }
-    if (bytes_len == extra.len) return extra;
+    if (bytes_len == extra.len) return .{ .typ = typ, .bytes = extra };
     const trimmed = try gpa.dupe(u8, extra[0..bytes_len]);
     gpa.free(extra);
-    return trimmed;
+    return .{ .typ = typ, .bytes = trimmed };
 }
 
 fn changePropertyBytes(conn: *XConn, window: u32, property: u32, typ: u32, bytes: []const u8) !void {
@@ -1210,9 +1439,14 @@ test "x11 BGRX encoder ignores alpha and uses little-endian XImage order" {
 test "x11 DISPLAY parser accepts screen suffix" {
     try std.testing.expectEqual(@as(u16, 0), (try parseDisplay(":0")).number);
     try std.testing.expect((try parseDisplay(":0")).local);
+    try std.testing.expectEqualStrings("", (try parseDisplay(":0")).host);
     try std.testing.expectEqual(@as(u16, 12), (try parseDisplay("localhost:12.1")).number);
+    try std.testing.expectEqualStrings("localhost", (try parseDisplay("localhost:12.1")).host);
+    try std.testing.expect(!(try parseDisplay("localhost:12.1")).local);
+    try std.testing.expect(!(try parseDisplay("127.0.0.1:0")).local);
     try std.testing.expect((try parseDisplay("unix:0")).local);
     try std.testing.expect(!(try parseDisplay("remote.example:1")).local);
+    try std.testing.expectEqualStrings("::1", (try parseDisplay("[::1]:10")).host);
     try std.testing.expectError(error.InvalidDisplay, parseDisplay("localhost"));
 }
 
@@ -1238,9 +1472,9 @@ test "x11 Xauthority matcher prefers local MIT-MAGIC-COOKIE-1" {
     file[off] = 0xaa;
     file[off + 1] = 0xbb;
     off += 2;
-    const record = (try selectXauth(file[0..off], "host", "0")).?;
+    const record = (try selectXauth(file[0..off], "host", "0", true)).?;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, record.data);
-    try std.testing.expect((try selectXauth(file[0..off], "other", "0")) == null);
+    try std.testing.expect((try selectXauth(file[0..off], "other", "0", true)) == null);
 }
 
 test "x11 HiDPI helpers convert physical pixels and nearest-neighbor scale" {
@@ -1335,4 +1569,13 @@ test "Keymap.translate: shift columns and alpha case rules" {
     try std.testing.expectEqual(Key{ .char = '!' }, km.translate(9, 1));
     try std.testing.expectEqual(Key{ .char = '1' }, km.translate(9, 2)); // lock ≠ shift for digits
     try std.testing.expectEqual(Key.other, km.translate(7, 0)); // below min
+}
+
+test "Keymap.translate uses Mod5 for ISO Level3 when a third keysym exists" {
+    var syms = [_]u32{ '2', '@', 0xb3, 0xa3 };
+    const km = Keymap{ .syms = &syms, .per = 4, .min = 10 };
+    try std.testing.expectEqual(Key{ .char = '2' }, km.translate(10, 0));
+    try std.testing.expectEqual(Key{ .char = '@' }, km.translate(10, 1));
+    try std.testing.expectEqual(Key{ .char = 0xb3 }, km.translate(10, 0x80));
+    try std.testing.expectEqual(Key{ .char = 0xa3 }, km.translate(10, 0x81));
 }

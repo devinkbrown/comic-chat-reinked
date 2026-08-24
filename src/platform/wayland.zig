@@ -8,14 +8,18 @@
 //!
 //! Keyboard: the compositor-provided XKB keymap fd is received (see
 //! `xkb.zig`'s bounded text-format parser) and drives translation for the
-//! configured layout's base and Shift levels — non-US layouts now produce
-//! their real characters, not a hardcoded US table. Client-side key repeat
-//! (Wayland deliberately leaves this to the client, unlike X11's native
-//! auto-repeat) is implemented via `repeat_info` + `Window.checkRepeat`.
+//! configured layout's base, Shift, and AltGr/ISO Level3 symbols — non-US
+//! layouts now produce their real characters, not a hardcoded US table.
+//! Client-side key repeat (Wayland deliberately leaves this to the client,
+//! unlike X11's native auto-repeat) is implemented via `repeat_info` +
+//! `Window.checkRepeat`.
 //!
 //! Committed compose/dead-key/IME text is received through text-input-v3 when
 //! the compositor advertises it. The bounded XKB parser remains the fallback
-//! for compositors without that protocol.
+//! for compositors without that protocol. Fractional buffer scale uses
+//! `wp_fractional_scale_v1` + `wp_viewporter` when advertised, otherwise the
+//! entered `wl_output` integer scale. Clipboard uses `wl_data_device` and
+//! `zwp_primary_selection_v1` when present.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -60,6 +64,18 @@ const data_device_set_selection: u16 = 1;
 const data_device_release: u16 = 2;
 const data_offer_receive: u16 = 1;
 const data_offer_destroy: u16 = 2;
+const viewporter_get_viewport: u16 = 1;
+const viewport_destroy: u16 = 0;
+const viewport_set_destination: u16 = 2;
+const fractional_manager_get_fractional_scale: u16 = 1;
+const primary_manager_create_source: u16 = 0;
+const primary_manager_get_device: u16 = 1;
+const primary_device_set_selection: u16 = 0;
+const primary_device_destroy: u16 = 1;
+const primary_source_offer: u16 = 0;
+const primary_source_destroy: u16 = 1;
+const primary_offer_receive: u16 = 0;
+const primary_offer_destroy: u16 = 1;
 const max_outputs: usize = 8;
 const max_clipboard_bytes = 1024 * 1024;
 const xdg_wm_base_destroy: u16 = 0;
@@ -89,6 +105,9 @@ const Globals = struct {
     output_count: u8 = 0,
     text_input_manager: Global = .{},
     data_device_manager: Global = .{},
+    viewporter: Global = .{},
+    fractional_manager: Global = .{},
+    primary_manager: Global = .{},
 
     fn record(self: *Globals, name: u32, interface: []const u8, version: u32) void {
         const value = Global{ .name = name, .version = version };
@@ -107,6 +126,12 @@ const Globals = struct {
             self.text_input_manager = value;
         } else if (std.mem.eql(u8, interface, "wl_data_device_manager") and self.data_device_manager.name == 0) {
             self.data_device_manager = value;
+        } else if (std.mem.eql(u8, interface, "wp_viewporter") and self.viewporter.name == 0) {
+            self.viewporter = value;
+        } else if (std.mem.eql(u8, interface, "wp_fractional_scale_manager_v1") and self.fractional_manager.name == 0) {
+            self.fractional_manager = value;
+        } else if (std.mem.eql(u8, interface, "zwp_primary_selection_device_manager_v1") and self.primary_manager.name == 0) {
+            self.primary_manager = value;
         }
     }
 };
@@ -332,6 +357,18 @@ pub const Window = struct {
     entered_outputs: [max_outputs]u32 = @splat(0),
     entered_count: u8 = 0,
     output_scale: u32 = 1,
+    viewporter_id: u32 = 0,
+    viewport_id: u32 = 0,
+    fractional_manager_id: u32 = 0,
+    fractional_scale_id: u32 = 0,
+    fractional_scale_120: u32 = 0,
+    primary_manager_id: u32 = 0,
+    primary_device_id: u32 = 0,
+    primary_source_id: u32 = 0,
+    primary_offer_id: u32 = 0,
+    pending_primary_offer_id: u32 = 0,
+    primary_offer_has_text: bool = false,
+    pending_primary_offer_has_text: bool = false,
     text_input_manager_id: u32 = 0,
     text_input_id: u32 = 0,
     data_device_manager_id: u32 = 0,
@@ -442,6 +479,12 @@ pub const Window = struct {
             self.data_device_id = try self.conn.allocId();
             try sendTwoU32(&self.conn, self.data_device_manager_id, data_device_manager_get_data_device, self.data_device_id, self.seat_id);
         }
+        if (globals.primary_manager.name != 0) {
+            self.primary_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.primary_manager, "zwp_primary_selection_device_manager_v1", 1, self.primary_manager_id);
+            self.primary_device_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.primary_manager_id, primary_manager_get_device, self.primary_device_id, self.seat_id);
+        }
         if (globals.text_input_manager.name != 0) {
             self.text_input_manager_id = try self.conn.allocId();
             try sendBind(&self.conn, self.gpa, self.registry_id, globals.text_input_manager, "zwp_text_input_manager_v3", 1, self.text_input_manager_id);
@@ -451,6 +494,16 @@ pub const Window = struct {
 
         self.surface_id = try self.conn.allocId();
         try sendOneU32(&self.conn, self.compositor_id, compositor_create_surface, self.surface_id);
+        if (globals.viewporter.name != 0 and globals.fractional_manager.name != 0) {
+            self.viewporter_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.viewporter, "wp_viewporter", 1, self.viewporter_id);
+            self.viewport_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.viewporter_id, viewporter_get_viewport, self.viewport_id, self.surface_id);
+            self.fractional_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.fractional_manager, "wp_fractional_scale_manager_v1", 1, self.fractional_manager_id);
+            self.fractional_scale_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.fractional_manager_id, fractional_manager_get_fractional_scale, self.fractional_scale_id, self.surface_id);
+        }
         self.xdg_surface_id = try self.conn.allocId();
         try sendTwoU32(&self.conn, self.xdg_wm_base_id, xdg_wm_base_get_xdg_surface, self.xdg_surface_id, self.surface_id);
         self.xdg_toplevel_id = try self.conn.allocId();
@@ -526,8 +579,9 @@ pub const Window = struct {
         const count = try std.math.mul(usize, @as(usize, w), @as(usize, h));
         if (pixels.len != count) return error.BadFramebufferSize;
 
-        const pixel_w = try std.math.mul(u32, w, self.output_scale);
-        const pixel_h = try std.math.mul(u32, h, self.output_scale);
+        const dims = self.bufferDimensions(w, h);
+        const pixel_w = dims.w;
+        const pixel_h = dims.h;
         self.discardIdleBuffersExcept(pixel_w, pixel_h);
         var index: ?usize = null;
         for (self.buffers.items, 0..) |buffer, i| {
@@ -542,23 +596,21 @@ pub const Window = struct {
         }
         const buffer = &self.buffers.items[index.?];
         const destination: []u32 = std.mem.bytesAsSlice(u32, buffer.memory);
-        var source_y: u32 = 0;
-        while (source_y < h) : (source_y += 1) {
-            var scale_y: u32 = 0;
-            while (scale_y < self.output_scale) : (scale_y += 1) {
-                var source_x: u32 = 0;
-                while (source_x < w) : (source_x += 1) {
-                    const pixel = pixels[@as(usize, source_y) * w + source_x];
-                    var scale_x: u32 = 0;
-                    while (scale_x < self.output_scale) : (scale_x += 1) {
-                        destination[@as(usize, source_y * self.output_scale + scale_y) * pixel_w + source_x * self.output_scale + scale_x] = pixel;
-                    }
-                }
-            }
-        }
+        scaleNearestTo(destination, pixels, w, h, pixel_w, pixel_h);
         buffer.busy = true;
 
-        if (self.compositor_version >= 3) try sendOneU32(&self.conn, self.surface_id, surface_set_buffer_scale, self.output_scale);
+        if (self.compositor_version >= 3) {
+            try sendOneU32(&self.conn, self.surface_id, surface_set_buffer_scale, if (dims.use_viewport) 1 else self.output_scale);
+        }
+        if (dims.use_viewport) {
+            try sendTwoU32(
+                &self.conn,
+                self.viewport_id,
+                viewport_set_destination,
+                @bitCast(@as(i32, @intCast(w))),
+                @bitCast(@as(i32, @intCast(h))),
+            );
+        }
         try sendAttach(&self.conn, self.surface_id, buffer.id);
         if (self.compositor_version >= 4) {
             try sendDamage(&self.conn, self.surface_id, surface_damage_buffer, pixel_w, pixel_h);
@@ -566,6 +618,21 @@ pub const Window = struct {
             try sendDamage(&self.conn, self.surface_id, surface_damage, w, h);
         }
         try sendEmpty(&self.conn, self.surface_id, surface_commit);
+    }
+
+    fn bufferDimensions(self: *const Window, logical_w: u32, logical_h: u32) struct { w: u32, h: u32, use_viewport: bool } {
+        if (self.viewport_id != 0 and self.fractional_scale_120 != 0) {
+            return .{
+                .w = scale120(logical_w, self.fractional_scale_120),
+                .h = scale120(logical_h, self.fractional_scale_120),
+                .use_viewport = true,
+            };
+        }
+        return .{
+            .w = logical_w * self.output_scale,
+            .h = logical_h * self.output_scale,
+            .use_viewport = false,
+        };
     }
 
     /// Read and dispatch exactly one wire event. Protocol-only events (buffer
@@ -598,7 +665,15 @@ pub const Window = struct {
         if (now < self.next_repeat_at_ms) return null;
         const interval_ms: u64 = @intCast(@max(1, @divTrunc(1000, self.repeat_rate_per_sec)));
         self.next_repeat_at_ms = now +| interval_ms;
-        return .{ .key = .{ .key = self.translateKey(code, self.held_key_shift), .modifiers = .{ .shift = self.held_key_shift, .control = self.held_key_control } } };
+        return .{ .key = .{
+            .key = self.translateKey(code, self.held_key_shift),
+            .modifiers = .{
+                .shift = self.held_key_shift,
+                .control = self.held_key_control,
+                .alt = self.alt_left or self.alt_right,
+                .super = self.super_left or self.super_right,
+            },
+        } };
     }
 
     fn discoverGlobals(self: *Window, globals: *Globals) !void {
@@ -660,6 +735,15 @@ pub const Window = struct {
             }
             return null;
         }
+        if (self.fractional_scale_id != 0 and msg.object == self.fractional_scale_id) {
+            if (msg.opcode == 0) {
+                if (msg.body.len != 4) return error.InvalidWaylandMessage;
+                const previous = self.fractional_scale_120;
+                self.fractional_scale_120 = get32(msg.body);
+                if (self.configured and previous != self.fractional_scale_120) return Event.expose;
+            }
+            return null;
+        }
         if (self.data_device_id != 0 and msg.object == self.data_device_id) {
             return try self.dataDeviceEvent(msg.opcode, msg.body);
         }
@@ -671,6 +755,18 @@ pub const Window = struct {
         }
         if (self.pending_offer_id != 0 and msg.object == self.pending_offer_id) {
             return try self.dataOfferEvent(msg.opcode, msg.body);
+        }
+        if (self.primary_device_id != 0 and msg.object == self.primary_device_id) {
+            return try self.primaryDeviceEvent(msg.opcode, msg.body);
+        }
+        if (self.primary_source_id != 0 and msg.object == self.primary_source_id) {
+            return try self.primarySourceEvent(msg.opcode, msg.body);
+        }
+        if (self.primary_offer_id != 0 and msg.object == self.primary_offer_id) {
+            return try self.primaryOfferEvent(msg.opcode, msg.body);
+        }
+        if (self.pending_primary_offer_id != 0 and msg.object == self.pending_primary_offer_id) {
+            return try self.primaryOfferEvent(msg.opcode, msg.body);
         }
         if (self.text_input_id != 0 and msg.object == self.text_input_id) {
             return try self.textInputEvent(msg.opcode, msg.body);
@@ -1063,6 +1159,12 @@ pub const Window = struct {
     /// simply the base character's uppercase form).
     fn translateKey(self: *Window, code: u32, shift: bool) Key {
         if (self.xkb_keymap) |*keymap| {
+            if (self.alt_right) {
+                if (keymap.keysymForLevel(code, .level3)) |keysym| {
+                    if (xkb.charForKeysym(keysym)) |ch| return .{ .char = ch };
+                    if (xkb.namedKeyForKeysym(keysym)) |named| return namedKeyToKey(named);
+                }
+            }
             if (keymap.keysymFor(code, false)) |base_keysym| {
                 const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
                 const effective_shift = if (is_letter) (shift != self.caps_lock) else shift;
@@ -1149,20 +1251,40 @@ pub const Window = struct {
         try sendString(&self.conn, self.gpa, self.data_source_id, data_source_offer, "text/plain;charset=utf-8");
         try sendString(&self.conn, self.gpa, self.data_source_id, data_source_offer, "text/plain");
         try sendTwoU32(&self.conn, self.data_device_id, data_device_set_selection, self.data_source_id, self.last_serial);
+        if (self.primary_device_id != 0) {
+            if (self.primary_source_id != 0) {
+                sendEmpty(&self.conn, self.primary_source_id, primary_source_destroy) catch {};
+                self.primary_source_id = 0;
+            }
+            self.primary_source_id = try self.conn.allocId();
+            try sendOneU32(&self.conn, self.primary_manager_id, primary_manager_create_source, self.primary_source_id);
+            try sendString(&self.conn, self.gpa, self.primary_source_id, primary_source_offer, "text/plain;charset=utf-8");
+            try sendString(&self.conn, self.gpa, self.primary_source_id, primary_source_offer, "text/plain");
+            try sendTwoU32(&self.conn, self.primary_device_id, primary_device_set_selection, self.primary_source_id, self.last_serial);
+        }
     }
 
     fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        if (self.clipboard_text.len != 0 and self.data_source_id != 0) {
+        if (self.clipboard_text.len != 0 and (self.data_source_id != 0 or self.primary_source_id != 0)) {
             return try gpa.dupe(u8, self.clipboard_text);
         }
-        if (self.data_offer_id == 0 or !self.offer_has_text) return error.MissingDataOffer;
+        if (self.data_offer_id != 0 and self.offer_has_text) {
+            return try self.receiveOffer(gpa, self.data_offer_id, data_offer_receive);
+        }
+        if (self.primary_offer_id != 0 and self.primary_offer_has_text) {
+            return try self.receiveOffer(gpa, self.primary_offer_id, primary_offer_receive);
+        }
+        return error.MissingDataOffer;
+    }
+
+    fn receiveOffer(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16) ![]u8 {
         var fds: [2]i32 = undefined;
         switch (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
             .SUCCESS => {},
             else => return error.PipeFailed,
         }
         defer _ = linux.close(fds[0]);
-        try sendReceiveFd(&self.conn, self.data_offer_id, "text/plain;charset=utf-8", fds[1]);
+        try sendReceiveFd(&self.conn, offer_id, opcode, "text/plain;charset=utf-8", fds[1]);
         _ = linux.close(fds[1]);
         try self.roundtrip();
         return try readFdAll(gpa, fds[0], max_clipboard_bytes);
@@ -1234,6 +1356,61 @@ pub const Window = struct {
         return null;
     }
 
+    fn primaryDeviceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // data_offer
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                if (self.pending_primary_offer_id != 0 and self.pending_primary_offer_id != self.primary_offer_id) {
+                    sendEmpty(&self.conn, self.pending_primary_offer_id, primary_offer_destroy) catch {};
+                }
+                self.pending_primary_offer_id = get32(body);
+                self.pending_primary_offer_has_text = false;
+            },
+            1 => { // selection
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                const id = get32(body);
+                if (self.primary_offer_id != 0 and self.primary_offer_id != id) {
+                    sendEmpty(&self.conn, self.primary_offer_id, primary_offer_destroy) catch {};
+                }
+                self.primary_offer_id = id;
+                self.primary_offer_has_text = id != 0 and id == self.pending_primary_offer_id and self.pending_primary_offer_has_text;
+                if (id == 0) self.primary_offer_has_text = false;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn primarySourceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // send(mime, fd)
+                _ = try parseWireString(body);
+                if (self.conn.takePendingFd()) |fd_value| {
+                    defer _ = linux.close(fd_value);
+                    writeAllFd(fd_value, self.clipboard_text) catch {};
+                }
+            },
+            1 => { // cancelled
+                if (self.primary_source_id != 0) {
+                    sendEmpty(&self.conn, self.primary_source_id, primary_source_destroy) catch {};
+                    self.primary_source_id = 0;
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn primaryOfferEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        if (opcode != 0) return null;
+        const mime = try parseWireString(body);
+        if (std.mem.eql(u8, mime, "text/plain") or std.mem.eql(u8, mime, "text/plain;charset=utf-8")) {
+            if (self.pending_primary_offer_id != 0) self.pending_primary_offer_has_text = true;
+            if (self.primary_offer_id != 0) self.primary_offer_has_text = true;
+        }
+        return null;
+    }
+
     fn createBuffer(self: *Window, w: u32, h: u32) !Buffer {
         const stride = try std.math.mul(usize, @as(usize, w), 4);
         const byte_len = try std.math.mul(usize, stride, @as(usize, h));
@@ -1297,6 +1474,15 @@ pub const Window = struct {
         if (self.data_offer_id != 0) try sendEmpty(&self.conn, self.data_offer_id, data_offer_destroy);
         if (self.pending_offer_id != 0 and self.pending_offer_id != self.data_offer_id) try sendEmpty(&self.conn, self.pending_offer_id, data_offer_destroy);
         if (self.data_device_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.data_device_id, data_device_release);
+        if (self.primary_source_id != 0) try sendEmpty(&self.conn, self.primary_source_id, primary_source_destroy);
+        if (self.primary_offer_id != 0) try sendEmpty(&self.conn, self.primary_offer_id, primary_offer_destroy);
+        if (self.pending_primary_offer_id != 0 and self.pending_primary_offer_id != self.primary_offer_id) try sendEmpty(&self.conn, self.pending_primary_offer_id, primary_offer_destroy);
+        if (self.primary_device_id != 0) try sendEmpty(&self.conn, self.primary_device_id, primary_device_destroy);
+        if (self.viewport_id != 0) try sendEmpty(&self.conn, self.viewport_id, viewport_destroy);
+        if (self.fractional_scale_id != 0) try sendEmpty(&self.conn, self.fractional_scale_id, 0);
+        if (self.viewporter_id != 0) try sendEmpty(&self.conn, self.viewporter_id, 0);
+        if (self.fractional_manager_id != 0) try sendEmpty(&self.conn, self.fractional_manager_id, 0);
+        if (self.primary_manager_id != 0) try sendEmpty(&self.conn, self.primary_manager_id, 2);
         if (self.text_input_id != 0) try sendEmpty(&self.conn, self.text_input_id, 0);
         if (self.text_input_manager_id != 0) try sendEmpty(&self.conn, self.text_input_manager_id, 0);
         if (self.xdg_toplevel_id != 0) try sendEmpty(&self.conn, self.xdg_toplevel_id, xdg_toplevel_destroy);
@@ -1374,12 +1560,12 @@ fn sendBind(
     try conn.writeAll(req);
 }
 
-fn sendReceiveFd(conn: *Connection, object: u32, mime: []const u8, fd_value: i32) !void {
+fn sendReceiveFd(conn: *Connection, object: u32, opcode: u16, mime: []const u8, fd_value: i32) !void {
     const string_size = try encodedStringSize(mime);
     const total = try std.math.add(usize, 8, string_size);
     if (total > 64) return error.WaylandMessageTooLarge;
     var req: [64]u8 = @splat(0);
-    header(req[0..total], object, data_offer_receive);
+    header(req[0..total], object, opcode);
     encodeString(req[8 .. 8 + string_size], mime);
     try conn.writeWithFd(req[0..total], fd_value);
 }
@@ -1609,12 +1795,29 @@ fn environmentValue(env: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn openUnixSocket(io: std.Io, path: []const u8) !net.Stream {
-    const address = try net.UnixAddress.init(path);
-    return net.UnixAddress.connect(&address, io) catch |err| switch (err) {
-        error.FileNotFound, error.Unexpected => error.WaylandUnavailable,
-        error.AccessDenied, error.PermissionDenied => error.AccessDenied,
+    return services.connectUnixStream(io, path) catch |err| switch (err) {
+        error.ServerUnavailable => error.WaylandUnavailable,
+        error.AccessDenied => error.AccessDenied,
         else => err,
     };
+}
+
+fn scale120(logical: u32, scale: u32) u32 {
+    const value = (@as(u64, logical) * scale + 60) / 120;
+    return @intCast(@max(1, value));
+}
+
+fn scaleNearestTo(dst: []u32, src: []const u32, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) void {
+    if (src_w == 0 or src_h == 0 or dst_w == 0 or dst_h == 0) return;
+    var y: u32 = 0;
+    while (y < dst_h) : (y += 1) {
+        const sy = y * src_h / dst_h;
+        var x: u32 = 0;
+        while (x < dst_w) : (x += 1) {
+            const sx = x * src_w / dst_w;
+            dst[@as(usize, y) * dst_w + x] = src[@as(usize, sy) * src_w + sx];
+        }
+    }
 }
 
 fn truncateFd(fd_value: i32, length: i64) !void {
@@ -2110,5 +2313,55 @@ test "Wayland discrete axis wins over continuous axis in the same frame" {
     wrote = linux.write(sockets[1], &axis, axis.len);
     try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(wrote));
     try std.testing.expectEqual(Event.other, try window.nextEvent());
+}
+
+test "fractional scale 120ths rounds to the nearest buffer size" {
+    try std.testing.expectEqual(@as(u32, 100), scale120(100, 120));
+    try std.testing.expectEqual(@as(u32, 150), scale120(100, 180));
+    try std.testing.expectEqual(@as(u32, 200), scale120(100, 240));
+    try std.testing.expectEqual(@as(u32, 1), scale120(0, 180));
+}
+
+test "Wayland bufferDimensions prefers fractional viewport over integer output scale" {
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = undefined,
+        .width = 320,
+        .height = 240,
+        .output_scale = 2,
+        .viewport_id = 7,
+        .fractional_scale_120 = 180,
+    };
+    const dims = window.bufferDimensions(320, 240);
+    try std.testing.expect(dims.use_viewport);
+    try std.testing.expectEqual(@as(u32, 480), dims.w);
+    try std.testing.expectEqual(@as(u32, 360), dims.h);
+
+    window.fractional_scale_120 = 0;
+    const fallback = window.bufferDimensions(320, 240);
+    try std.testing.expect(!fallback.use_viewport);
+    try std.testing.expectEqual(@as(u32, 640), fallback.w);
+}
+
+test "nearest-neighbor scale fills an arbitrary destination size" {
+    var out: [6]u32 = undefined;
+    scaleNearestTo(&out, &[_]u32{ 1, 2 }, 2, 1, 3, 2);
+    try std.testing.expectEqual(@as(u32, 1), out[0]);
+    try std.testing.expectEqual(@as(u32, 1), out[1]);
+    try std.testing.expectEqual(@as(u32, 2), out[2]);
+    try std.testing.expectEqual(@as(u32, 1), out[3]);
+    try std.testing.expectEqual(@as(u32, 1), out[4]);
+    try std.testing.expectEqual(@as(u32, 2), out[5]);
+}
+
+test "registry records fractional scale, viewporter, and primary selection" {
+    var globals: Globals = .{};
+    globals.record(3, "wp_viewporter", 1);
+    globals.record(4, "wp_fractional_scale_manager_v1", 1);
+    globals.record(5, "zwp_primary_selection_device_manager_v1", 1);
+    try std.testing.expectEqual(@as(u32, 3), globals.viewporter.name);
+    try std.testing.expectEqual(@as(u32, 4), globals.fractional_manager.name);
+    try std.testing.expectEqual(@as(u32, 5), globals.primary_manager.name);
 }
 const pointer_release: u16 = 1;

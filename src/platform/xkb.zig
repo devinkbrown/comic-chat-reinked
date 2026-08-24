@@ -9,11 +9,12 @@
 //! (modifier-mapping semantics). Implementing those is a much larger,
 //! separate undertaking — this parser covers `xkb_keycodes` (physical key
 //! name <-> numeric code) and `xkb_symbols` (key name -> the keysym list for
-//! levels 1 and 2, i.e. unshifted and Shift), which is what makes the base
-//! and shifted character of a non-US layout actually correct. AltGr/ISO
-//! Level3 and compose/dead-key sequences are not represented; a level-3+
-//! keysym, if present, is ignored. IME input method integration is a
-//! separate protocol (text-input-unstable-v3) and out of scope entirely.
+//! levels 1–3: unshifted, Shift, and AltGr/ISO Level3 when the keymap lists
+//! a third keysym). That is what makes the base, shifted, and AltGr
+//! character of a non-US layout actually correct. Compose/dead-key sequences
+//! are not represented; a level-4+ keysym, if present, is ignored. IME
+//! input method integration is a separate protocol (text-input-unstable-v3)
+//! and out of scope for this parser.
 //!
 //! Wayland's wl_keyboard.key event reports the physical key as a raw evdev
 //! scancode. XKB numeric keycodes are that scancode plus 8 (a fixed offset
@@ -29,13 +30,19 @@ pub const ParseError = error{
     MalformedKeymap,
 } || std.mem.Allocator.Error;
 
-/// A physical key's Shift-level-1 (unshifted) and Shift-level-2 (shifted)
-/// keysym names, e.g. .{ "a", "A" } or .{ "1", "exclam" }. A key with only
-/// one level (rare; some symbol keys) repeats it in both slots.
+/// A physical key's Shift-level-1 (unshifted), Shift-level-2 (shifted), and
+/// optional ISO Level3 (AltGr) keysym names, e.g. .{ "a", "A", "ae" } or
+/// .{ "1", "exclam" }. A key with only one level (rare; some symbol keys)
+/// repeats it in both Shift slots. Level3 is null when the keymap lists
+/// fewer than three symbols.
 const Levels = struct {
     base: []const u8,
     shifted: []const u8,
+    level3: ?[]const u8 = null,
 };
+
+/// Which of the three bounded XKB levels to read.
+pub const Level = enum { base, shift, level3 };
 
 /// A parsed keymap: enough of `xkb_keycodes` and `xkb_symbols` to translate
 /// an evdev scancode plus a shift state into the keysym name the
@@ -45,8 +52,8 @@ pub const Keymap = struct {
     /// xkb numeric keycode (evdev + 8) -> the bracket name that names it in
     /// both xkb_keycodes and xkb_symbols, e.g. 38 -> "AC01".
     code_to_name: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
-    /// Bracket name -> its level-1/level-2 keysym names, e.g. "AC01" ->
-    /// .{"a", "A"}.
+    /// Bracket name -> its level-1/2/3 keysym names, e.g. "AC01" ->
+    /// .{"a", "A", "ae"}.
     name_to_levels: std.StringHashMapUnmanaged(Levels) = .empty,
     /// Backing storage for every name/keysym slice held above, freed once as
     /// a whole on deinit rather than tracked per entry.
@@ -65,11 +72,22 @@ pub const Keymap = struct {
     }
 
     /// The keysym name a physical key (evdev scancode) produces at the given
-    /// shift level, or null if this keymap has no entry for that key.
+    /// Shift level, or null if this keymap has no entry for that key.
     pub fn keysymFor(self: *const Keymap, evdev_code: u32, shifted: bool) ?[]const u8 {
+        return self.keysymForLevel(evdev_code, if (shifted) .shift else .base);
+    }
+
+    /// The keysym name a physical key produces at base, Shift, or AltGr/ISO
+    /// Level3. Level3 returns null when the keymap listed fewer than three
+    /// symbols for that key so the caller can fall back to Shift/base.
+    pub fn keysymForLevel(self: *const Keymap, evdev_code: u32, level: Level) ?[]const u8 {
         const name = self.code_to_name.get(xkbKeycodeFromEvdev(evdev_code)) orelse return null;
         const levels = self.name_to_levels.get(name) orelse return null;
-        return if (shifted) levels.shifted else levels.base;
+        return switch (level) {
+            .base => levels.base,
+            .shift => levels.shifted,
+            .level3 => levels.level3,
+        };
     }
 };
 
@@ -237,6 +255,7 @@ fn parseSymbols(
             var it = std.mem.splitScalar(u8, syms, ',');
             var base: ?[]const u8 = null;
             var shifted: ?[]const u8 = null;
+            var level3: ?[]const u8 = null;
             while (it.next()) |raw| {
                 const trimmed = std.mem.trim(u8, raw, " \t\r\n");
                 if (trimmed.len == 0) continue;
@@ -244,14 +263,17 @@ fn parseSymbols(
                     base = trimmed;
                 } else if (shifted == null) {
                     shifted = trimmed;
+                } else if (level3 == null) {
+                    level3 = trimmed;
                 } else {
-                    break; // level 3+ ignored, see module doc.
+                    break; // level 4+ ignored, see module doc.
                 }
             }
             if (base) |b| {
                 try out.put(gpa, try arena.dupe(u8, name), .{
                     .base = try arena.dupe(u8, b),
                     .shifted = try arena.dupe(u8, shifted orelse b),
+                    .level3 = if (level3) |third| try arena.dupe(u8, third) else null,
                 });
             }
         }
@@ -387,6 +409,54 @@ const named_char_keysyms = std.StaticStringMap(u8).initComptime(.{
     .{ "bar", '|' },
     .{ "braceright", '}' },
     .{ "asciitilde", '~' },
+    .{ "exclamdown", 0xa1 },
+    .{ "cent", 0xa2 },
+    .{ "sterling", 0xa3 },
+    .{ "currency", 0xa4 },
+    .{ "yen", 0xa5 },
+    .{ "section", 0xa7 },
+    .{ "copyright", 0xa9 },
+    .{ "guillemotleft", 0xab },
+    .{ "notsign", 0xac },
+    .{ "registered", 0xae },
+    .{ "degree", 0xb0 },
+    .{ "plusminus", 0xb1 },
+    .{ "twosuperior", 0xb2 },
+    .{ "threesuperior", 0xb3 },
+    .{ "mu", 0xb5 },
+    .{ "paragraph", 0xb6 },
+    .{ "periodcentered", 0xb7 },
+    .{ "onesuperior", 0xb9 },
+    .{ "guillemotright", 0xbb },
+    .{ "onequarter", 0xbc },
+    .{ "onehalf", 0xbd },
+    .{ "threequarters", 0xbe },
+    .{ "questiondown", 0xbf },
+    .{ "Agrave", 0xc0 },
+    .{ "Aacute", 0xc1 },
+    .{ "Adiaeresis", 0xc4 },
+    .{ "Aring", 0xc5 },
+    .{ "AE", 0xc6 },
+    .{ "Ccedilla", 0xc7 },
+    .{ "Egrave", 0xc8 },
+    .{ "Eacute", 0xc9 },
+    .{ "Ntilde", 0xd1 },
+    .{ "Odiaeresis", 0xd6 },
+    .{ "Oslash", 0xd8 },
+    .{ "Udiaeresis", 0xdc },
+    .{ "ssharp", 0xdf },
+    .{ "agrave", 0xe0 },
+    .{ "aacute", 0xe1 },
+    .{ "adiaeresis", 0xe4 },
+    .{ "aring", 0xe5 },
+    .{ "ae", 0xe6 },
+    .{ "ccedilla", 0xe7 },
+    .{ "egrave", 0xe8 },
+    .{ "eacute", 0xe9 },
+    .{ "ntilde", 0xf1 },
+    .{ "odiaeresis", 0xf6 },
+    .{ "oslash", 0xf8 },
+    .{ "udiaeresis", 0xfc },
 });
 
 /// Resolves a keysym name to a plain character, if it is one. Covers the
@@ -395,6 +465,7 @@ const named_char_keysyms = std.StaticStringMap(u8).initComptime(.{
 /// keysym this bounded parser does not translate).
 pub fn charForKeysym(name: []const u8) ?u21 {
     if (name.len == 1 and std.ascii.isPrint(name[0])) return name[0];
+    if (std.mem.eql(u8, name, "EuroSign") or std.mem.eql(u8, name, "euro")) return 0x20ac;
     if (named_char_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
@@ -475,6 +546,34 @@ test "parse translates a realistic US-shaped fragment for base and shifted level
 
     // A key with no entry at all (never declared).
     try std.testing.expectEqual(@as(?[]const u8, null), keymap.keysymFor(999, false));
+}
+
+test "parse keeps the third keysym as ISO Level3 / AltGr" {
+    const text =
+        \\xkb_keymap {
+        \\  xkb_keycodes "evdev" {
+        \\      minimum = 8;
+        \\      maximum = 255;
+        \\      <AC01> = 38;
+        \\      <AE03> = 12;
+        \\  };
+        \\  xkb_symbols "pc+de" {
+        \\      key <AC01> { [ a, A, ae ] };
+        \\      key <AE03> { [ 3, section, threesuperior, sterling ] };
+        \\  };
+        \\};
+    ;
+    var keymap = try parse(std.testing.allocator, 1, text);
+    defer keymap.deinit();
+
+    try std.testing.expectEqualStrings("a", keymap.keysymForLevel(30, .base).?);
+    try std.testing.expectEqualStrings("A", keymap.keysymForLevel(30, .shift).?);
+    try std.testing.expectEqualStrings("ae", keymap.keysymForLevel(30, .level3).?);
+    try std.testing.expectEqual(@as(u21, 0xe6), charForKeysym(keymap.keysymForLevel(30, .level3).?).?);
+    try std.testing.expectEqualStrings("threesuperior", keymap.keysymForLevel(4, .level3).?);
+    try std.testing.expectEqual(@as(u21, 0xb3), charForKeysym("threesuperior").?);
+    try std.testing.expectEqual(@as(u21, 0x20ac), charForKeysym("EuroSign").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), keymap.keysymForLevel(28, .level3));
 }
 
 test "parse rejects an unsupported keymap format" {

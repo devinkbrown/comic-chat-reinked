@@ -265,16 +265,19 @@ backdrops, face expressions, and fonts are embedded in the binaries.
 `comicchat app <nick>` defaults to the `eshmaki.me` server and `#root` channel;
 pass a host and/or channel to override either default.
 
-The direct Wayland client parses compositor XKB keymaps, implements configured
-key repeat, accepts committed compose/dead-key/IME text through text-input-v3,
-maps native touch contacts to the shared interaction contract, tracks the
-entered `wl_output` integer scale, and copies through `wl_data_device`.
-X11 authenticates with MIT-MAGIC-COOKIE-1, presents integer HiDPI frames from
-`GDK_SCALE`/`Xft.dpi`, and owns the ICCCM clipboard. Win32 uses per-monitor-v2
-DPI geometry, Unicode/IME input, the Unicode clipboard, and native common
-dialogs. Window creation, configure/resize, scaled presentation,
-keyboard/pointer input, IRC traffic, and clean close are implemented across
-Wayland, X11, Win32, FreeBSD, and OpenBSD.
+The direct Wayland client parses compositor XKB keymaps (base, Shift, and
+AltGr/ISO Level3 when listed), implements configured key repeat, accepts
+committed compose/dead-key/IME text through text-input-v3, maps native touch
+contacts to the shared interaction contract, tracks entered `wl_output`
+integer scale plus `wp_fractional_scale_v1`/`wp_viewporter` when advertised,
+and copies through `wl_data_device` and `zwp_primary_selection_v1`.
+X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
+TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
+`GDK_SCALE`/`Xft.dpi`, and owns ICCCM CLIPBOARD+PRIMARY including INCR.
+Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
+clipboard, and native common dialogs. Window creation, configure/resize,
+scaled presentation, keyboard/pointer input, IRC traffic, and clean close
+are implemented across Wayland, X11, Win32, FreeBSD, and OpenBSD.
 
 The portable lane has no SDL dependency. Native backends speak the Wayland/X11
 protocols or Win32 APIs directly, and all display the same software-rendered

@@ -96,6 +96,59 @@ fn parsePositiveScale(value: []const u8) ?u32 {
     return rounded;
 }
 
+/// Connects a UNIX-domain stream without going through `std.Io.net.UnixAddress`.
+/// Abstract-namespace misses return `ECONNREFUSED` (111); Zig's helper treats
+/// that as `Unexpected` and dumps a stack. Map the usual "no server" errnos
+/// here so a missing X11/Wayland socket is a clean `ServerUnavailable`.
+pub fn connectUnixStream(io: std.Io, path: []const u8) !std.Io.net.Stream {
+    _ = io;
+    const fd = try connectUnixFd(path);
+    return .{ .socket = .{
+        .handle = fd,
+        .address = .{ .ip4 = .loopback(0) },
+    } };
+}
+
+fn connectUnixFd(path: []const u8) !i32 {
+    const max_path = @sizeOf(linux.sockaddr.un) - @sizeOf(linux.sa_family_t);
+    if (path.len >= max_path) return error.NameTooLong;
+    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .NFILE, .MFILE, .NOBUFS, .NOMEM => return error.SystemResources,
+        .AFNOSUPPORT, .PROTONOSUPPORT => return error.AddressFamilyUnsupported,
+        else => return error.Unexpected,
+    }
+    const fd: i32 = @intCast(rc);
+
+    var addr = std.mem.zeroes(linux.sockaddr.un);
+    addr.family = linux.AF.UNIX;
+    @memcpy(addr.path[0..path.len], path);
+    // Pathname sockets include a trailing NUL in the address length.
+    // Abstract sockets (`path[0] == 0`) use the exact byte count, no extra NUL.
+    const addr_len: u32 = if (path.len > 0 and path[0] == 0)
+        @intCast(@sizeOf(linux.sa_family_t) + path.len)
+    else
+        @intCast(@sizeOf(linux.sa_family_t) + path.len + 1);
+
+    const connect_rc = linux.connect(fd, &addr, addr_len);
+    switch (linux.errno(connect_rc)) {
+        .SUCCESS => return fd,
+        .NOENT, .CONNREFUSED, .AGAIN, .TIMEDOUT, .NETUNREACH, .HOSTUNREACH, .ADDRNOTAVAIL, .NOTCONN => {
+            _ = linux.close(fd);
+            return error.ServerUnavailable;
+        },
+        .ACCES, .PERM => {
+            _ = linux.close(fd);
+            return error.AccessDenied;
+        },
+        else => {
+            _ = linux.close(fd);
+            return error.Unexpected;
+        },
+    }
+}
+
 pub fn writeClipboard(io: std.Io, desktop: Desktop, text: []const u8) !void {
     if (text.len > max_clipboard_bytes) return error.ClipboardTooLarge;
     const argv_groups: []const []const []const u8 = switch (desktop) {
@@ -290,6 +343,15 @@ test "integer scale comes from toolkit env, then rounded DPI" {
     try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(144));
     try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(192));
     try std.testing.expectEqual(@as(u32, 1), scaleFromDpi(120));
+}
+
+test "unix connect maps a missing pathname socket to ServerUnavailable" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.ServerUnavailable,
+        connectUnixStream(threaded.io(), "/tmp/.comicchat-missing-unix-socket-test"),
+    );
 }
 
 test "Xft.dpi parser accepts integer and fractional resource lines" {
