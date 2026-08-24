@@ -210,6 +210,9 @@ pub const Window = struct {
     owns_clipboard: bool,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
+        if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
+            return error.InvalidWindowSize;
+        }
         const display = try readDisplay(gpa);
         defer gpa.free(display);
         return openWithDisplay(gpa, w, h, title, display);
@@ -1270,6 +1273,10 @@ test "x11 setup hello encodes MIT-MAGIC-COOKIE-1 lengths" {
 
 test "x11 Window rejects an invalid size before contacting the server" {
     try std.testing.expectError(error.InvalidWindowSize, Window.open(std.testing.allocator, 0, 480, "x"));
+    try std.testing.expectError(
+        error.InvalidWindowSize,
+        Window.openWithDisplay(std.testing.allocator, 0, 480, "x", ":0"),
+    );
 }
 
 test "x11 setup parser reads spec offsets (vendor@16, screens@20, keycodes@26)" {
