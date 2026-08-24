@@ -1491,7 +1491,7 @@ pub const View = struct {
 
         if (all.len == 0) {
             const caption_w = @min(400, @max(220, rect.w - 40));
-            const caption_h: i32 = 72;
+            const caption_h: i32 = 88;
             ui.drawEmptyCaption(&self.canvas, .{
                 .x = rect.x + @divTrunc(rect.w - caption_w, 2),
                 .y = rect.bottom() - caption_h - 12,
@@ -1550,7 +1550,7 @@ pub const View = struct {
         ui.drawPaneCountHeader(&self.canvas, rect, "CAST", count);
         const content = Rect{ .x = rect.x, .y = rect.y + 30, .w = rect.w, .h = @max(0, rect.h - 30) };
         if (transcript.roster.items.len == 0) {
-            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 40 }, "No members yet", "People appear here when they join");
+            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "The playbill is empty", "People take a panel when they join");
             return;
         }
         const viewport = memberViewport(rect, icon_mode);
@@ -1868,7 +1868,7 @@ fn drawMenuBar(c: *Canvas, rect: Rect, active: ?u8, hovered: ?u8) void {
         const index: u8 = @intCast(raw_index);
         const selected = active == index or hovered == index;
         const item_w = Canvas.uiTextWidth(item) + 16;
-        const edition_reserve: i32 = if (rect.w >= 760) Canvas.uiTextWidth("Sunday") + 42 else 8;
+        const edition_reserve: i32 = if (rect.w >= 760) Canvas.uiTextWidth(ui.mastheadEdition(rect.w)) + 42 else 8;
         if (x + item_w > rect.right() - edition_reserve) break;
         ui.drawMenuLabel(c, x, rect.y, item_w, item, selected);
         x += Canvas.uiTextWidth(item) + 28;
@@ -2365,7 +2365,12 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     const content_rect = editor_layout.content;
     if (input.len == 0) {
         const placeholder_x = edit.x + 18 + placeholderGap(focused);
-        drawTextEllipsized(c, "Ink the next balloon...", placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18, ui.current.secondary);
+        const enter_w: i32 = if (edit.w >= 240) Canvas.uiTextWidth("Enter") + 20 else 0;
+        drawTextEllipsized(c, "Ink the next balloon...", placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - enter_w, ui.current.secondary);
+        if (enter_w > 0) {
+            ui.drawInkPlate(c, edit.right() - enter_w - 10, edit.y + 13, enter_w, 18, 2, if (focused) ui.current.accent else ui.current.layer);
+            drawTextEllipsized(c, "Enter", edit.right() - enter_w - 2, edit.y + 14, enter_w - 16, if (focused) ui.current.layer else ui.current.ink);
+        }
     } else {
         const viewport = composerViewport(input, cursor, content_rect.w);
         for (viewport.rows[0..viewport.count], 0..) |row, row_index| {
@@ -2672,6 +2677,16 @@ fn dialogLayout(width: u32, height: u32, spec: dialogs.Spec) ui.DialogLayout {
     return ui.DialogLayout.init(width, height, spec.source_w, spec.source_h, dialogs.fields(spec.id).len, dialogPrimaryButtonWidth(spec.id), dialogs.showsCancel(spec.id));
 }
 
+fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
+    if (id != .settings) return "";
+    return switch (index) {
+        0 => "STUDIO",
+        3 => "PAGE",
+        5 => "CAST",
+        else => "",
+    };
+}
+
 fn dialogFieldFocusable(field: dialogs.Field) bool {
     return field.kind != .readonly and field.kind != .preview;
 }
@@ -2703,7 +2718,10 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         if (index < first_field) continue;
         const row_y = dialog_layout.fieldLabelYScrolled(index, first_field);
         if (row_y + 40 > rect.bottom() - 43) break;
-        ui.drawDialogFieldLabel(c, .{ .x = rect.x + 20, .y = row_y, .w = rect.w - 40, .h = 17 }, field.label, index == active_field);
+        const kicker = settingsKicker(spec.id, index);
+        const kicker_w: i32 = if (kicker.len == 0) 0 else Canvas.uiTextWidth(kicker) + 18;
+        ui.drawDialogFieldLabel(c, .{ .x = rect.x + 20, .y = row_y, .w = rect.w - 40 - kicker_w, .h = 17 }, field.label, index == active_field);
+        if (kicker_w > 0) ui.drawInkChip(c, .{ .x = rect.right() - kicker_w - 22, .y = row_y - 1, .w = kicker_w, .h = 18 }, kicker, true);
         var field_rect = dialog_layout.fieldRectScrolled(index, first_field);
         if (spec.id == .character and field.kind == .preview) field_rect = characterGalleryRect(dialog_layout, first_field);
         const field_y = field_rect.y;

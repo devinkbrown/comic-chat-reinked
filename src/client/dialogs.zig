@@ -233,7 +233,7 @@ pub fn fields(id: Id) []const Field {
         .connection_features => &.{ .{ .label = "Transport", .kind = .readonly }, .{ .label = "Authentication", .kind = .readonly }, .{ .label = "IRCX", .kind = .readonly }, .{ .label = "Enabled IRCv3 capabilities", .kind = .readonly } },
         .motd => &.{.{ .label = "Message of the day", .hint = "Server supplied", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room" }, .{ .label = "Invitation note" } },
-        .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later", .kind = .readonly } },
+        .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later · printed page", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Channel", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "For example TOPIC,ONJOIN" }, .{ .label = "Value", .hint = "Empty deletes when setting" }, .{ .label = "Action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Nickname mask", .hint = "*!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
         .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "CHANNEL, MEMBER, SERVER, CONNECTION, SOCKET or USER" }, .{ .label = "Mask", .hint = "Optional" } },

@@ -30,7 +30,9 @@ visual contract.
   window sizes the caption collapses to a compact instruction instead of
   overflowing the available buffer. Structural chrome strokes stay at least
   two framebuffer pixels (`ui.stroke`) so nearest-neighbour 2x/3x HiDPI scale
-  keeps masthead rules, page ticks, and plate frames readable.
+  keeps masthead rules, page ticks, and plate frames readable. CAST portraits
+  keep the same bottom-aligned blit; only the playbill plate around them is
+  chrome.
 - Shell chrome is an ink masthead, paper tool rack, playbill inspector headers,
   and a caption-box composer. Dialogs use the same masthead as the application.
 - Comic pages default to four panels across. The room strip exposes an
