@@ -372,6 +372,19 @@ pub const Restoration = struct {
         try self.targets.append(self.gpa, .{ .channel = owned_channel, .key = owned_key, .after = owned_after });
     }
 
+    pub fn setJoinKey(self: *Restoration, channel: []const u8, key: []const u8) !void {
+        if (key.len != 0 and !validRestoreAtom(key, true)) return error.InvalidRestoreTarget;
+        for (self.targets.items) |*target| {
+            if (!std.ascii.eqlIgnoreCase(target.channel, channel)) continue;
+            if (target.key) |old| {
+                self.gpa.free(old);
+                target.key = null;
+            }
+            if (key.len != 0) target.key = try self.gpa.dupe(u8, key);
+            return;
+        }
+    }
+
     pub fn forget(self: *Restoration, channel: []const u8) void {
         for (self.targets.items, 0..) |target, index| {
             if (!std.ascii.eqlIgnoreCase(target.channel, channel)) continue;
@@ -595,6 +608,14 @@ test "reconnect jitter, happy eyeballs, restore, and proxy codecs" {
     try std.testing.expect(std.mem.indexOf(u8, commands.items, "PRIVMSG") == null);
     try std.testing.expect(std.mem.indexOf(u8, commands.items, "CHATHISTORY AFTER") != null);
     try std.testing.expect(std.mem.indexOf(u8, commands.items, "JOIN #locked swordfish") != null);
+    try restore.setJoinKey("#locked", "newkey");
+    commands.clearRetainingCapacity();
+    try restore.appendCommands(&commands, gpa, 0);
+    try std.testing.expect(std.mem.indexOf(u8, commands.items, "JOIN #locked newkey") != null);
+    try restore.setJoinKey("#locked", "");
+    commands.clearRetainingCapacity();
+    try restore.appendCommands(&commands, gpa, 0);
+    try std.testing.expect(std.mem.indexOf(u8, commands.items, "JOIN #locked\r\n") != null);
     restore.forget("#locked");
     commands.clearRetainingCapacity();
     try restore.appendCommands(&commands, gpa, 0);

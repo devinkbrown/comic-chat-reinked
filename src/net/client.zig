@@ -502,6 +502,16 @@ pub const Client = struct {
         try self.queueOut(.interactive, true, false);
     }
 
+    pub fn quit(self: *Client, reason: []const u8) !void {
+        if (reason.len == 0)
+            try self.appendCommand("QUIT", &.{})
+        else {
+            try self.validateOutgoingText(reason);
+            try self.appendCommandTrailing("QUIT", &.{reason});
+        }
+        try self.queueOut(.control, true, false);
+    }
+
     pub fn part(self: *Client, channel: []const u8) !void {
         try self.appendCommand("PART", &.{channel});
         if (self.restoration) |*restoration| restoration.forget(channel);
@@ -1337,6 +1347,10 @@ pub const Client = struct {
         if (self.restoration) |*restoration| restoration.forget(channel);
     }
 
+    pub fn setRestorationKey(self: *Client, channel: []const u8, key: []const u8) void {
+        if (self.restoration) |*restoration| restoration.setJoinKey(channel, key) catch {};
+    }
+
     pub fn renameRestoration(self: *Client, old_channel: []const u8, new_channel: []const u8) void {
         const restoration = if (self.restoration) |*value| value else return;
         var key_storage: [512]u8 = undefined;
@@ -1834,6 +1848,17 @@ fn validChannelContext(value: []const u8) bool {
 }
 
 // --- Tests ----------------------------------------------------------------
+
+test "QUIT serializes a trailing reason" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var msg = message.Message{ .command = "QUIT", .force_trailing = true };
+    msg.params[0] = "Comic Chat";
+    msg.param_count = 1;
+    try message.write(&out, gpa, msg);
+    try std.testing.expectEqualStrings("QUIT :Comic Chat\r\n", out.items);
+}
 
 test "autoRespond answers PING with matching PONG" {
     const gpa = std.testing.allocator;

@@ -1603,7 +1603,12 @@ const AsyncNetwork = struct {
     }
 };
 
-fn applyNetworkEvent(event: NetworkEvent, state: *ChatState, gpa: std.mem.Allocator) bool {
+fn applyNetworkEvent(
+    event: NetworkEvent,
+    state: *ChatState,
+    workspace: ?*cc.client.workspace.Workspace,
+    gpa: std.mem.Allocator,
+) bool {
     return switch (event) {
         .none => false,
         .connecting => changed: {
@@ -1615,19 +1620,19 @@ fn applyNetworkEvent(event: NetworkEvent, state: *ChatState, gpa: std.mem.Alloca
             break :changed true;
         },
         .retry_scheduled => |err| changed: {
-            resetChatConnectionState(state, gpa);
+            resetChatConnectionState(state, workspace, gpa);
             state.setConnectionFailure(err);
             break :changed true;
         },
         .sts_upgrading => changed: {
-            resetChatConnectionState(state, gpa);
+            resetChatConnectionState(state, workspace, gpa);
             state.status = "upgrading to TLS";
             break :changed true;
         },
     };
 }
 
-fn resetChatConnectionState(state: *ChatState, gpa: std.mem.Allocator) void {
+fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.Workspace, gpa: std.mem.Allocator) void {
     state.joined = false;
     state.join_requested = false;
     state.avatar_announced = false;
@@ -1638,6 +1643,16 @@ fn resetChatConnectionState(state: *ChatState, gpa: std.mem.Allocator) void {
     state.pending_udi.clearRetainingCapacity();
     for (state.pending_profiles.items) |nick| gpa.free(nick);
     state.pending_profiles.clearRetainingCapacity();
+    if (workspace) |rooms| rooms.markDisconnected();
+}
+
+fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
+    const connected = client orelse return;
+    connected.quit("Comic Chat") catch {};
+}
+
+fn roomCanSend(room_joined: bool, connected: bool) bool {
+    return connected and room_joined;
 }
 
 fn tickBackgroundFeatures(
@@ -1758,7 +1773,7 @@ fn runInteractivePollBackend(
         const timeout = if (has_client_side_repeat) @min(base_timeout, repeat_poll_timeout_ms) else base_timeout;
         _ = try posix.poll(&poll_fds, timeout);
         const now_ms = monotonicMilliseconds(io);
-        redraw = applyNetworkEvent(try network.tick(now_ms), &state, gpa) or redraw;
+        redraw = applyNetworkEvent(try network.tick(now_ms), &state, &workspace, gpa) or redraw;
         redraw = (try tickBackgroundFeatures(&view, &network, &state, &workspace, now_ms)) or redraw;
         poll_fds[1].fd = if (network.clientPtr()) |client| client.fd() else -1;
 
@@ -1776,7 +1791,10 @@ fn runInteractivePollBackend(
                 workspace.self_nick,
                 channel,
             );
-            if (!event_result.keep_running) return;
+            if (!event_result.keep_running) {
+                sendQuitBestEffort(network.clientPtr());
+                return;
+            }
             redraw = redraw or event_result.redraw;
         }
         if (has_client_side_repeat) {
@@ -1793,24 +1811,27 @@ fn runInteractivePollBackend(
                     workspace.self_nick,
                     channel,
                 );
-                if (!event_result.keep_running) return;
+                if (!event_result.keep_running) {
+                    sendQuitBestEffort(network.clientPtr());
+                    return;
+                }
                 redraw = redraw or event_result.redraw;
             }
         }
 
         if (network.clientPtr()) |client| if ((poll_fds[1].revents & posix.POLL.IN) != 0) {
             const maybe_received: ?bool = client.receive() catch |err| failed: {
-                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
+                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                 poll_fds[1].fd = -1;
                 break :failed null;
             };
             if (maybe_received) |received| {
                 if (!received) {
-                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, gpa) or redraw;
+                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, &workspace, gpa) or redraw;
                     poll_fds[1].fd = -1;
                 } else if (network.clientPtr()) |active| {
                     const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, &network, channel, &state) catch |err| failed: {
-                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
+                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                         poll_fds[1].fd = -1;
                         break :failed false;
                     };
@@ -1822,7 +1843,7 @@ fn runInteractivePollBackend(
         if (network.clientPtr() != null and
             (poll_fds[1].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL)) != 0)
         {
-            redraw = applyNetworkEvent(network.fail(now_ms, error.ConnectionResetByPeer), &state, gpa) or redraw;
+            redraw = applyNetworkEvent(network.fail(now_ms, error.ConnectionResetByPeer), &state, &workspace, gpa) or redraw;
             poll_fds[1].fd = -1;
         }
 
@@ -1851,7 +1872,7 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
     while (true) {
         var redraw = false;
         const now_ms = monotonicMilliseconds(io);
-        redraw = applyNetworkEvent(try network.tick(now_ms), &state, gpa) or redraw;
+        redraw = applyNetworkEvent(try network.tick(now_ms), &state, &workspace, gpa) or redraw;
         redraw = (try tickBackgroundFeatures(&view, &network, &state, &workspace, now_ms)) or redraw;
         while (try win.pollEvent()) |event| {
             const event_result = try handleWindowEvent(
@@ -1866,21 +1887,24 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
                 workspace.self_nick,
                 channel,
             );
-            if (!event_result.keep_running) return;
+            if (!event_result.keep_running) {
+                sendQuitBestEffort(network.clientPtr());
+                return;
+            }
             redraw = redraw or event_result.redraw;
         }
 
         if (network.clientPtr()) |client| {
             const receive_result = client.receiveTimeout(16) catch |err| disconnected: {
-                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
+                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                 break :disconnected null;
             };
             if (receive_result) |received| {
                 if (!received) {
-                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, gpa) or redraw;
+                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, &workspace, gpa) or redraw;
                 } else if (network.clientPtr()) |active| {
                     const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, &network, channel, &state) catch |err| failed: {
-                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, gpa) or redraw;
+                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                         break :failed false;
                     };
                     redraw = redraw or processed;
@@ -1939,7 +1963,7 @@ fn handleWindowEvent(
                         var expression_editor = cc.client.input.Editor.init(gpa);
                         defer expression_editor.deinit();
                         try expression_editor.paste("<Chr>");
-                        break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, room.joined or state.joined, state.ircx_data);
+                        break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, roomCanSend(room.joined, state.joined), state.ircx_data);
                     },
                     else => true,
                 };
@@ -2108,7 +2132,7 @@ fn handleWindowEvent(
                     var expression_editor = cc.client.input.Editor.init(gpa);
                     defer expression_editor.deinit();
                     try expression_editor.paste("<Chr>");
-                    break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, room.joined or state.joined, state.ircx_data);
+                    break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, roomCanSend(room.joined, state.joined), state.ircx_data);
                 },
                 .child_window => child: {
                     spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
@@ -2170,7 +2194,7 @@ fn loadStartupDocument(
     };
     if (locator.server) |server| if (!std.ascii.eqlIgnoreCase(server, network.host)) {
         try network.reconfigure(server, network.reconnect.port, network.effectiveOptions().security, monotonicMilliseconds(io));
-        resetChatConnectionState(state, workspace.gpa);
+        resetChatConnectionState(state, workspace, workspace.gpa);
     };
     try network.runtime.preferences.saveFile(io, network.runtime.preferences_path);
 }
@@ -2501,7 +2525,7 @@ fn applyDialogAction(
             view.setDialogNotice("Could not start that connection. Check the server and security mode.");
             return;
         };
-        resetChatConnectionState(state, workspace.gpa);
+        resetChatConnectionState(state, workspace, workspace.gpa);
         state.status = "connecting";
         _ = view.closeDialog();
         return;
@@ -2582,8 +2606,8 @@ fn applyDialogAction(
             _ = workspace.activate(index);
             if (maybe_client) |client| {
                 try client.create(value, creation_modes, limit, view.dialogValueAt(4));
-                const topic = view.dialogValueAt(1);
-                if (topic.len != 0) try client.setTopic(value, topic);
+                try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(4));
+                try workspace.rooms.items[index].setPendingTopic(workspace.gpa, view.dialogValueAt(1));
             }
         },
         .comics_view => {
@@ -2638,7 +2662,11 @@ fn applyDialogAction(
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (limit.len != 0) try client.setMode(room.name, "+l", limit);
             const key = view.dialogValueAt(3);
-            if (key.len != 0) try client.setMode(room.name, "+k", key);
+            if (key.len != 0) {
+                try client.setMode(room.name, "+k", key);
+                try room.setJoinKey(gpa, key);
+                client.setRestorationKey(room.name, key);
+            }
         },
         .ircx_properties => {
             if (!state.ircx_data) {
@@ -3092,7 +3120,7 @@ fn applyDialogAction(
                     view.setDialogNotice("The locator server could not be opened.");
                     return;
                 };
-                resetChatConnectionState(state, workspace.gpa);
+                resetChatConnectionState(state, workspace, workspace.gpa);
             };
             try preferences.saveFile(io, network.runtime.preferences_path);
         },
@@ -3408,10 +3436,16 @@ test "connection dialog validates a usable endpoint" {
 }
 
 test "connection failures remain actionable" {
+    var workspace = try cc.client.workspace.Workspace.init(std.testing.allocator, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
     var state: ChatState = .{ .joined = true, .join_requested = true, .ircx_data = true };
-    try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state, std.testing.allocator));
+    try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state, &workspace, std.testing.allocator));
     try std.testing.expect(!state.joined);
     try std.testing.expect(!state.ircx_data);
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!roomCanSend(workspace.rooms.items[root].joined, state.joined));
     try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") != null);
     try std.testing.expect(std.mem.indexOf(u8, state.status, "click for settings") != null);
 }
@@ -3516,7 +3550,7 @@ fn handleWorkspaceInputKey(
         }
     }
     const room = workspace.activeRoom() orelse return true;
-    return handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, room.joined or connected, ircx_data);
+    return handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, roomCanSend(room.joined, connected), ircx_data);
 }
 
 fn processWorkspaceMessages(
@@ -3565,6 +3599,23 @@ fn processWorkspaceMessages(
             if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, &active_room.transcript, preferences, "Invitation", who, room_name, "");
             if (std.ascii.eqlIgnoreCase(invited, workspace.self_nick))
                 redraw = (try appendInviteLine(workspace, who, room_name)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "KILL")) {
+            const victim = msg.param(0) orelse "";
+            if (std.ascii.eqlIgnoreCase(victim, workspace.self_nick)) {
+                const reason = msg.param(1) orelse "killed";
+                var buf: [280]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "Killed ({s})", .{reason}) catch "Killed.";
+                if (workspace.activeRoom()) |active| {
+                    try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+                }
+                state.status = "killed";
+                return error.IrcServerError;
+            }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "ACCOUNT") or
+            std.ascii.eqlIgnoreCase(msg.command, "CHGHOST") or
+            std.ascii.eqlIgnoreCase(msg.command, "SETNAME"))
+        {
+            redraw = (try appendIdentityLine(workspace, &msg)) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "RENAME")) {
             const old_name = msg.param(0) orelse "";
             const new_name = msg.param(1) orelse "";
@@ -3580,6 +3631,16 @@ fn processWorkspaceMessages(
             redraw = (try appendTopicLine(workspace, &msg)) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "MODE") or std.mem.eql(u8, msg.command, "324")) {
             redraw = (try appendModeLine(workspace, &msg)) or redraw;
+            if (try applyLiveChannelKey(workspace, client, &msg)) redraw = true;
+        } else if (isCommandFailureNumeric(msg.command)) {
+            redraw = (try applyCommandFailure(workspace, client, state, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "FAIL") or
+            std.ascii.eqlIgnoreCase(msg.command, "WARN") or
+            std.ascii.eqlIgnoreCase(msg.command, "NOTE"))
+        {
+            if (workspace.activeRoom()) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
+            if (std.ascii.eqlIgnoreCase(msg.command, "FAIL")) state.status = "command failed";
+            redraw = true;
         } else if (isJoinDeniedNumeric(msg.command)) {
             redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
         } else if (std.mem.eql(u8, msg.command, "432") or std.mem.eql(u8, msg.command, "436")) {
@@ -3637,6 +3698,10 @@ fn processWorkspaceMessages(
                 room.joined = true;
                 state.joined = true;
                 state.status = "connected";
+                if (room.pending_topic) |topic| {
+                    try client.setTopic(room.name, topic);
+                    try room.setPendingTopic(workspace.gpa, "");
+                }
                 try announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data);
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
@@ -3647,9 +3712,14 @@ fn processWorkspaceMessages(
         } else if (std.mem.eql(u8, msg.command, "366")) {
             const joined_channel = msg.param(1) orelse msg.param(0) orelse "";
             if (workspace.find(joined_channel)) |room_index| {
-                workspace.rooms.items[room_index].joined = true;
+                var joined_room = &workspace.rooms.items[room_index];
+                joined_room.joined = true;
                 state.joined = true;
                 state.status = "connected";
+                if (joined_room.pending_topic) |topic| {
+                    try client.setTopic(joined_room.name, topic);
+                    try joined_room.setPendingTopic(workspace.gpa, "");
+                }
                 redraw = true;
             }
         } else if (std.mem.eql(u8, msg.command, "DATA")) {
@@ -3685,7 +3755,7 @@ fn processWorkspaceMessages(
             room.transcript.trimTo(64);
             if (workspace.active != room_index) room.unread +|= 1;
             redraw = true;
-        } else if (std.mem.eql(u8, msg.command, "PRIVMSG")) {
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) {
             const target = msg.param(0) orelse continue;
             const is_private = std.ascii.eqlIgnoreCase(target, nick);
             const room_index = workspace.find(target) orelse if (is_private) workspace.active orelse continue else continue;
@@ -3836,6 +3906,116 @@ fn appendModeLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.
     }
     try workspace.rooms.items[room_index].transcript.addWithOptions("Mode", display.items, .{ .modes = cc.proto.udi.bm_action });
     return true;
+}
+
+fn applyLiveChannelKey(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    msg: *const cc.net.message.Message,
+) !bool {
+    if (!std.ascii.eqlIgnoreCase(msg.command, "MODE") or msg.param_count < 2) return false;
+    const channel = msg.params[0];
+    if (channel.len < 2 or (channel[0] != '#' and channel[0] != '&')) return false;
+    const modes = msg.params[1];
+    var adding = true;
+    var parameter_index: usize = 2;
+    var changed = false;
+    for (modes) |mode| switch (mode) {
+        '+' => adding = true,
+        '-' => adding = false,
+        'k' => {
+            const key = if (adding and parameter_index < msg.param_count) msg.params[parameter_index] else "";
+            if (parameter_index < msg.param_count) parameter_index += 1;
+            if (workspace.find(channel)) |room_index| {
+                try workspace.rooms.items[room_index].setJoinKey(workspace.gpa, key);
+                changed = true;
+            }
+            client.setRestorationKey(channel, key);
+        },
+        'q', 'a', 'o', 'h', 'v', 'b', 'e', 'I' => {
+            if (parameter_index < msg.param_count) parameter_index += 1;
+        },
+        'l' => {
+            if (adding and parameter_index < msg.param_count) parameter_index += 1;
+        },
+        else => {},
+    };
+    return changed;
+}
+
+fn isCommandFailureNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "401") or
+        std.mem.eql(u8, command, "404") or
+        std.mem.eql(u8, command, "441") or
+        std.mem.eql(u8, command, "442") or
+        std.mem.eql(u8, command, "467") or
+        std.mem.eql(u8, command, "472") or
+        std.mem.eql(u8, command, "478") or
+        std.mem.eql(u8, command, "481") or
+        std.mem.eql(u8, command, "482") or
+        std.mem.eql(u8, command, "501") or
+        std.mem.eql(u8, command, "502");
+}
+
+fn applyCommandFailure(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const subject = msg.param(1) orelse "";
+    const detail = msg.param(2) orelse msg.command;
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s} {s}: {s}", .{ msg.command, subject, detail }) catch "Command failed.";
+    if (std.mem.eql(u8, msg.command, "442") and subject.len > 0) {
+        _ = try applySelfLeftChannel(workspace, client, state, subject, detail);
+    }
+    if (workspace.find(subject)) |room_index| {
+        try workspace.rooms.items[room_index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    } else if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    if (std.mem.eql(u8, msg.command, "482") or std.mem.eql(u8, msg.command, "481"))
+        state.status = "not privileged";
+    return true;
+}
+
+fn appendIdentityLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else return false;
+    if (who.len == 0) return false;
+    var buf: [280]u8 = undefined;
+    const line = if (std.ascii.eqlIgnoreCase(msg.command, "ACCOUNT")) blk: {
+        const account = msg.param(0) orelse "*";
+        break :blk if (std.mem.eql(u8, account, "*"))
+            std.fmt.bufPrint(&buf, "{s} logged out", .{who}) catch "Account update."
+        else
+            std.fmt.bufPrint(&buf, "{s} is {s}", .{ who, account }) catch "Account update.";
+    } else if (std.ascii.eqlIgnoreCase(msg.command, "CHGHOST")) blk: {
+        const user = msg.param(0) orelse "";
+        const host = msg.param(1) orelse "";
+        break :blk std.fmt.bufPrint(&buf, "{s} is now {s}@{s}", .{ who, user, host }) catch "Host update.";
+    } else blk: {
+        const realname = msg.param(0) orelse "";
+        break :blk std.fmt.bufPrint(&buf, "{s} is now known as {s}", .{ who, realname }) catch "Name update.";
+    };
+    var wrote = false;
+    for (workspace.rooms.items) |*room| {
+        var present = std.ascii.eqlIgnoreCase(who, workspace.self_nick);
+        if (!present) for (room.transcript.roster.items) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.nick, who) and !entry.departed) {
+                present = true;
+                break;
+            }
+        };
+        if (!present) continue;
+        try room.transcript.addWithOptions(who, line, .{ .modes = cc.proto.udi.bm_action });
+        wrote = true;
+    }
+    if (!wrote) if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions(who, line, .{ .modes = cc.proto.udi.bm_action });
+        wrote = true;
+    };
+    return wrote;
 }
 
 fn isJoinDeniedNumeric(command: []const u8) bool {
@@ -4106,6 +4286,7 @@ fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
         std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or
         std.ascii.eqlIgnoreCase(msg.command, "DATA") or
         std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
+        std.ascii.eqlIgnoreCase(msg.command, "NOTICE") or
         std.ascii.eqlIgnoreCase(msg.command, "WHISPER")) return msg.param(0);
     if (std.mem.eql(u8, msg.command, "331") or
         std.mem.eql(u8, msg.command, "332") or
@@ -4575,7 +4756,7 @@ test "HeresInfo displays only after a matching profile request" {
     try std.testing.expect(state.takeProfileRequest(gpa, "ALICE"));
     try std.testing.expect(!state.takeProfileRequest(gpa, "Alice"));
     try state.rememberProfileRequest(gpa, "Bob");
-    resetChatConnectionState(&state, gpa);
+    resetChatConnectionState(&state, null, gpa);
     try std.testing.expect(!state.takeProfileRequest(gpa, "Bob"));
 }
 
@@ -4621,12 +4802,14 @@ test "live roster room lookup includes MODE KICK and topic numerics" {
     const no_topic = cc.net.message.parse(":server 331 me #root :No topic is set");
     const modes = cc.net.message.parse(":server 324 me #root +nt");
     const invite_only = cc.net.message.parse(":server 473 me #root :Cannot join channel (+i)");
+    const notice = cc.net.message.parse(":alice!u@h NOTICE #root :heads up");
     try std.testing.expectEqualStrings("#root", messageRoom(&kick).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&mode).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&topic).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&no_topic).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&modes).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&invite_only).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&notice).?);
 }
 
 test "channel mode and invite lines land in the matching room" {
@@ -4726,6 +4909,58 @@ test "nick collision and invalid nick numerics update status" {
     const collision = cc.net.message.parse(":server 436 me stolen :Nickname collision");
     try std.testing.expect(try appendNickNumericLine(&workspace, &state, &collision));
     try std.testing.expectEqualStrings("nickname collision", state.status);
+}
+
+test "live MODE key and command failures update membership state" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    var state: ChatState = .{ .joined = true, .status = "connected" };
+    defer state.deinit(gpa);
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try client.joinWithKey("#root", "old");
+    const set_key = cc.net.message.parse(":op!u@h MODE #root +k secret");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &set_key));
+    try std.testing.expectEqualStrings("secret", workspace.rooms.items[root].join_key.?);
+    const clear_key = cc.net.message.parse(":op!u@h MODE #root -k");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &clear_key));
+    try std.testing.expect(workspace.rooms.items[root].join_key == null);
+
+    const noton = cc.net.message.parse(":server 442 me #root :You're not on that channel");
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &noton));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!client.hasRestorationTargets());
+    const forbidden = cc.net.message.parse(":server 482 me #root :You're not channel operator");
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &forbidden));
+    try std.testing.expectEqualStrings("not privileged", state.status);
+
+    const account = cc.net.message.parse(":alice!u@h ACCOUNT aliceacct");
+    var join = cc.net.message.parse(":alice!u@h JOIN #root");
+    _ = try workspace.rooms.items[root].transcript.observeIrc(&join, "#root", "me");
+    try std.testing.expect(try appendIdentityLine(&workspace, &account));
+    try std.testing.expectEqualStrings("alice is aliceacct", workspace.rooms.items[root].transcript.lines.items[workspace.rooms.items[root].transcript.lines.items.len - 1].text);
 }
 
 test "IRCX DATA transport requires numeric 800 enabled state" {

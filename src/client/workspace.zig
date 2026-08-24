@@ -17,6 +17,8 @@ pub const Room = struct {
     join_key: ?[]u8 = null,
     /// Last IRCX CLIENT keystring observed for this room (`bk=...;...`).
     client_data: ?[]u8 = null,
+    /// TOPIC queued until the creating client actually joins the room.
+    pending_topic: ?[]u8 = null,
 
     fn deinit(self: *Room, gpa: std.mem.Allocator) void {
         self.transcript.deinit();
@@ -24,6 +26,7 @@ pub const Room = struct {
         gpa.free(self.name);
         if (self.join_key) |key| gpa.free(key);
         if (self.client_data) |value| gpa.free(value);
+        if (self.pending_topic) |topic| gpa.free(topic);
         self.* = undefined;
     }
 
@@ -34,6 +37,19 @@ pub const Room = struct {
         }
         if (key.len == 0) return;
         self.join_key = try gpa.dupe(u8, key);
+    }
+
+    pub fn setPendingTopic(self: *Room, gpa: std.mem.Allocator, topic: []const u8) !void {
+        if (self.pending_topic) |old| {
+            gpa.free(old);
+            self.pending_topic = null;
+        }
+        if (topic.len == 0) return;
+        self.pending_topic = try gpa.dupe(u8, topic);
+    }
+
+    pub fn markDisconnected(self: *Room) void {
+        self.joined = false;
     }
 
     pub fn setClientData(self: *Room, gpa: std.mem.Allocator, value: []const u8) !void {
@@ -139,6 +155,10 @@ pub const Workspace = struct {
         if (self.active != index) self.rooms.items[index].unread +|= 1;
     }
 
+    pub fn markDisconnected(self: *Workspace) void {
+        for (self.rooms.items) |*room| room.markDisconnected();
+    }
+
     pub fn setClipboard(self: *Workspace, text: []const u8) !void {
         self.clipboard.clearRetainingCapacity();
         try self.clipboard.appendSlice(self.gpa, text);
@@ -194,6 +214,13 @@ test "workspace retains a room join key for reconnect" {
     try std.testing.expectEqualStrings("swordfish", workspace.rooms.items[index].join_key.?);
     try workspace.rooms.items[index].setJoinKey(workspace.gpa, "");
     try std.testing.expect(workspace.rooms.items[index].join_key == null);
+    workspace.rooms.items[index].joined = true;
+    try workspace.rooms.items[index].setPendingTopic(workspace.gpa, "Welcome");
+    try std.testing.expectEqualStrings("Welcome", workspace.rooms.items[index].pending_topic.?);
+    workspace.markDisconnected();
+    try std.testing.expect(!workspace.rooms.items[index].joined);
+    try workspace.rooms.items[index].setPendingTopic(workspace.gpa, "");
+    try std.testing.expect(workspace.rooms.items[index].pending_topic == null);
 }
 
 test "workspace renames a room and updates the local nick" {
