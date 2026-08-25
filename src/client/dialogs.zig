@@ -183,7 +183,7 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
             .{ .label = "CAST rail", .hint = "CAST rail visibility", .kind = .choice },
             .{ .label = "CAST layout", .hint = "Portraits or compact list", .kind = .choice },
-            .{ .label = "Status details", .hint = "Activity panel density", .kind = .choice },
+            .{ .label = "Activity", .hint = "Activity panel density", .kind = .choice },
         },
         .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Sign-in name", .hint = "Visible sign-in name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
         .character => &.{
@@ -209,7 +209,7 @@ pub fn fields(id: Id) []const Field {
         .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban", .hint = "Optional name pattern" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
         .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
-        .notification_users => &.{ .{ .label = "On the wire now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Choose a live CAST member" }, .{ .label = "CAST action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
+        .notification_users => &.{ .{ .label = "On the wire now", .hint = "Watch again to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Choose a live CAST member" }, .{ .label = "CAST how", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound", .kind = .choice }, .{ .label = "With ink", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
@@ -217,7 +217,7 @@ pub fn fields(id: Id) []const Field {
         .comics_view => &.{ .{ .label = "Page view", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
         .automation => &.{ .{ .label = "Greeting how", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving CAST" }, .{ .label = "Repeat cap", .hint = "8" }, .{ .label = "Repeat window", .hint = "Seconds" } },
         .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Match text", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action text", .hint = "Message, room or sound" } },
-        .rule_sets => &.{ .{ .label = "Set action", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Rule file", .hint = "Optional .ccrules path" } },
+        .rule_sets => &.{ .{ .label = "Set how", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Rule file", .hint = "Optional .ccrules path" } },
         .add_to_sets => &.{ .{ .label = "Rule name" }, .{ .label = "Rule set" } },
         .rename_loaded_set, .rename_set => &.{ .{ .label = "Open set" }, .{ .label = "New set name" } },
         .create_set => &.{.{ .label = "Rule set name" }},
@@ -236,9 +236,9 @@ pub fn fields(id: Id) []const Field {
         .motd => &.{.{ .label = "Bulletin", .hint = "From the wire", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Note", .hint = "Optional" } },
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
-        .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Property action", .kind = .choice } },
-        .room_access => &.{ .{ .label = "Access action", .kind = .choice }, .{ .label = "Access", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout", .hint = "Minutes; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
-        .ircx_events => &.{ .{ .label = "Event action", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Event filter", .hint = "Optional; one word" } },
+        .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Property how", .kind = .choice } },
+        .room_access => &.{ .{ .label = "Access how", .kind = .choice }, .{ .label = "Access", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout", .hint = "Minutes; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
+        .ircx_events => &.{ .{ .label = "Event how", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Event filter", .hint = "Optional; one word" } },
         .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Safe link", .hint = "Portable safe-link invitation", .kind = .readonly } },
         .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Profile", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
@@ -267,7 +267,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             4 => &.{ "4 panels", "3 panels", "2 panels", "1 panel", "5 panels", "6 panels" },
             5 => &.{ "Shown", "Hidden" },
             6 => &.{ "Portraits", "List" },
-            7 => &.{ "Detailed", "Compact" },
+            7 => &.{ "Full", "Tight" },
             else => &.{},
         },
         .character => if (index == 0)
@@ -304,7 +304,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             &.{},
         .notifications => if (index == 4) &.{ "Page banner", "Sound and page", "Off" } else &.{},
         .file_transfer => if (index == 0) &.{ "Send file", "Receive offer" } else &.{},
-        .notification_users => if (index == 2) &.{ "Refresh", "Whisper", "Invite CAST", "Join room", "Clear list" } else &.{},
+        .notification_users => if (index == 2) &.{ "Watch again", "Whisper", "Invite CAST", "Join room", "Clear" } else &.{},
         .ircx_properties => if (index == 3) &.{ "Read", "Read common", "Write", "Remove" } else &.{},
         .room_access => if (index == 0)
             &.{ "Show", "Add", "Remove", "Clear all" }
@@ -484,7 +484,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Open or remove", fields(.recent_files)[1].label);
     try std.testing.expectEqualStrings("Join or save", fields(.favorite_rooms)[1].label);
     try std.testing.expectEqualStrings("After save", fields(.print_preview)[1].label);
-    try std.testing.expectEqualStrings("CAST action", fields(.notification_users)[2].label);
+    try std.testing.expectEqualStrings("CAST how", fields(.notification_users)[2].label);
     try std.testing.expectEqualStrings("Current ink", fields(.choose_color)[1].hint);
     try std.testing.expectEqualStrings("Wire account name", fields(.password)[0].hint);
     try std.testing.expectEqualStrings("From the wire", fields(.motd)[0].hint);
@@ -527,6 +527,8 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Room options", fields(.channel_properties)[1].label);
     try std.testing.expectEqualStrings("CAST rail", fields(.settings)[5].label);
     try std.testing.expectEqualStrings("CAST layout", fields(.settings)[6].label);
+    try std.testing.expectEqualStrings("Activity", fields(.settings)[7].label);
+    try std.testing.expectEqualStrings("Full", choiceOptions(.settings, 7)[0]);
     try std.testing.expectEqualStrings("Wire list", get(.servers).title);
     try std.testing.expectEqualStrings("CAST profile", get(.member_profile).title);
     try std.testing.expectEqualStrings("Kick CAST", get(.kick).title);
@@ -622,10 +624,10 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("ircx.us", choiceOptions(.servers, 0)[1]);
     try std.testing.expectEqualStrings("Verified TLS", choiceOptions(.servers, 2)[0]);
     try std.testing.expectEqualStrings("Host", fields(.setup)[0].label);
-    try std.testing.expectEqualStrings("Set action", fields(.rule_sets)[0].label);
-    try std.testing.expectEqualStrings("Property action", fields(.ircx_properties)[3].label);
-    try std.testing.expectEqualStrings("Access action", fields(.room_access)[0].label);
-    try std.testing.expectEqualStrings("Event action", fields(.ircx_events)[0].label);
+    try std.testing.expectEqualStrings("Set how", fields(.rule_sets)[0].label);
+    try std.testing.expectEqualStrings("Property how", fields(.ircx_properties)[3].label);
+    try std.testing.expectEqualStrings("Access how", fields(.room_access)[0].label);
+    try std.testing.expectEqualStrings("Event how", fields(.ircx_events)[0].label);
     try std.testing.expectEqualStrings("Action", fields(.rules)[3].label);
     try std.testing.expectEqualStrings("Account password", prompt(.password).?);
     try std.testing.expectEqualStrings("Room password", prompt(.channel_password).?);
@@ -735,6 +737,18 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Get common properties", &.{ "Read common", "Get common properties", "Read common properties" }));
     try std.testing.expect(matchesAny("Yes", &.{ "On", "Yes" }));
     try std.testing.expect(matchesAny("No", &.{ "Off", "No" }));
+    try std.testing.expect(matchesAny("Detailed", &.{ "Full", "Detailed" }));
+    try std.testing.expect(matchesAny("Compact", &.{ "Tight", "Compact" }));
+    try std.testing.expect(matchesAny("Status details", &.{ "Activity", "Status details" }));
+    try std.testing.expect(matchesAny("Property action", &.{ "Property how", "Property action" }));
+    try std.testing.expect(matchesAny("Access action", &.{ "Access how", "Access action" }));
+    try std.testing.expect(matchesAny("Event action", &.{ "Event how", "Event action" }));
+    try std.testing.expect(matchesAny("CAST action", &.{ "CAST how", "CAST action" }));
+    try std.testing.expect(matchesAny("Set action", &.{ "Set how", "Set action" }));
+    try std.testing.expect(matchesAny("Refresh", &.{ "Watch again", "Refresh" }));
+    try std.testing.expect(matchesAny("Clear list", &.{ "Clear", "Clear list" }));
+    try std.testing.expect(matchesAny("CAST actions", &.{ "CAST menu", "CAST actions" }));
+    try std.testing.expect(matchesAny("Figure actions", &.{ "Figure menu", "Figure actions" }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 

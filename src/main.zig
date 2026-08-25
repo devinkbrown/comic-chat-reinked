@@ -2175,7 +2175,7 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(4, try std.fmt.bufPrint(&panels, "{d} panels", .{view.shell.comic_columns}));
             try view.setDialogValueAt(5, if (view.shell.show_members) "Shown" else "Hidden");
             try view.setDialogValueAt(6, if (view.shell.member_view == .icons) "Portraits" else "List");
-            try view.setDialogValueAt(7, if (view.status_detailed) "Detailed" else "Compact");
+            try view.setDialogValueAt(7, if (view.status_detailed) "Full" else "Tight");
         },
         .about => {
             try view.setDialogValueAt(0, "Comic Chat");
@@ -2230,7 +2230,7 @@ fn prefillOpenedDialog(
             }
             try view.setDialogValueAt(0, if (online.items.len == 0) "No matching CAST on the last watch" else online.items);
             if (state.notification_current.items.len != 0) try view.setDialogValueAt(1, state.notification_current.items[0]);
-            try view.setDialogValueAt(2, "Refresh");
+            try view.setDialogValueAt(2, "Watch again");
         },
         .ircx_properties => try view.setDialogValueAt(0, ""),
         .ircx_events => try view.setDialogValueAt(0, "Show"),
@@ -2528,7 +2528,7 @@ fn applyDialogAction(
             const comic_columns = comicColumnsFromDialog(view.dialogValueAt(4));
             const members_visible = !std.ascii.eqlIgnoreCase(view.dialogValueAt(5), "Hidden");
             const member_list = std.ascii.eqlIgnoreCase(view.dialogValueAt(6), "List");
-            const status_detailed = !std.ascii.eqlIgnoreCase(view.dialogValueAt(7), "Compact");
+            const status_detailed = !cc.client.dialogs.matchesAny(view.dialogValueAt(7), &.{ "Tight", "Compact" });
             preferences.setUiLayout(text_mode, comic_columns, members_visible, member_list);
             preferences.setUiTheme(dark_mode, accent, high_contrast, status_detailed);
             try preferences.saveFile(io, network.runtime.preferences_path);
@@ -2908,13 +2908,13 @@ fn applyDialogAction(
         },
         .notification_users => {
             const operation = view.dialogValueAt(2);
-            if (std.ascii.eqlIgnoreCase(operation, "Refresh")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Watch again", "Refresh" })) {
                 state.notification_poll_pending = 0;
                 state.last_notification_poll_ms = 0;
                 view.setDialogNotice("Watch CAST will query the wire now.");
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Clear list")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear list" })) {
                 for (state.notification_current.items) |entry| gpa.free(entry);
                 state.notification_current.clearRetainingCapacity();
                 for (state.notification_previous.items) |entry| gpa.free(entry);

@@ -593,7 +593,7 @@ pub const View = struct {
         };
         const members = if (self.shell.show_members) "Shown" else "Hidden";
         const member_layout = if (self.shell.member_view == .list) "List" else "Portraits";
-        const details = if (self.status_detailed) "Detailed" else "Compact";
+        const details = if (self.status_detailed) "Full" else "Tight";
         const values = [_][]const u8{ theme, accent, contrast, page, panels, members, member_layout, details };
         for (values, 0..) |value, index| {
             self.dialog_editors[index].clear();
@@ -1092,12 +1092,20 @@ pub const View = struct {
                     self.focusDialogLastField(id);
                     return .none;
                 }
-                if (self.dialog_browse_focus) return .none;
+                if (self.dialog_browse_focus) {
+                    self.dialog_browse_focus = false;
+                    return .none;
+                }
                 if (dialogs.fields(id)[self.dialog_field].kind == .choice)
                     self.cycleDialogChoiceDirection(id, self.dialog_field, false);
             },
             .down => {
-                if (self.dialog_action_focus != null or self.dialog_browse_focus) return .none;
+                if (self.dialog_action_focus != null) return .none;
+                if (self.dialog_browse_focus) {
+                    self.dialog_browse_focus = false;
+                    self.dialog_action_focus = .primary;
+                    return .none;
+                }
                 if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
                     self.cycleDialogChoiceDirection(id, self.dialog_field, true);
                 } else if (isLastFocusableDialogField(id, self.dialog_field)) {
@@ -1807,7 +1815,7 @@ pub const View = struct {
         }
         if (self.context_menu) |kind| {
             const popup = ui.PopupLayout.anchored(self.canvas.width, self.canvas.height, self.context_x, self.context_y, 196, contextItemCount(kind));
-            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "CAST actions" else "Figure actions", .focused = true });
+            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "CAST menu" else "Figure menu", .focused = true });
             var item: u8 = 0;
             while (item < contextItemCount(kind)) : (item += 1) snapshot.append(.{
                 .id = contextSemanticId(kind, item),
@@ -4376,6 +4384,7 @@ test "extensive settings reveal focused controls in the compact dialog viewport"
     defer view.deinit();
     view.openDialog(.settings);
     try std.testing.expectEqualStrings("Portraits", view.dialogValueAt(6));
+    try std.testing.expectEqualStrings("Full", view.dialogValueAt(7));
     const layout = dialogLayout(view.width(), view.height(), dialogs.get(.settings));
     try std.testing.expect(layout.visibleRows() < dialogs.fields(.settings).len);
     var tabs: usize = 0;
@@ -5384,6 +5393,23 @@ test "dialog leftover Page Up and Page Down jump first field and last button" {
     try std.testing.expect(!view.dialog_browse_focus);
     try std.testing.expect(view.dialog_action_focus == null);
     try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+}
+
+test "dialog leftover browse Up returns to the field and Down jumps primary" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.file_transfer);
+    view.dialog_field = 2;
+    view.dialog_browse_focus = true;
+    view.dialog_action_focus = null;
+    _ = try view.handleDialogKey(.up, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 2), view.dialog_field);
+    view.dialog_browse_focus = true;
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
 }
 
 test "dialog leftover buttons move with Left and Right" {
