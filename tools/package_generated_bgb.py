@@ -77,6 +77,108 @@ def trim_paper_matte(image: Image.Image, threshold: float = 0.90) -> Image.Image
     return image.crop((left, top, right, bottom))
 
 
+def _is_ink(pixel: tuple[int, ...]) -> bool:
+    return max(pixel[:3]) < 45
+
+
+def _frame_bands(fracs: list[float], threshold: float = 0.80) -> list[tuple[int, int]]:
+    bands: list[tuple[int, int]] = []
+    index = 0
+    while index < len(fracs):
+        if fracs[index] < threshold:
+            index += 1
+            continue
+        start = index
+        while index < len(fracs) and fracs[index] >= threshold:
+            index += 1
+        bands.append((start, index))
+    return bands
+
+
+def _row_frac(image: Image.Image, predicate) -> list[float]:
+    pixels = image.load()
+    width, height = image.size
+    return [
+        sum(1 for x in range(width) if predicate(pixels[x, y])) / width
+        for y in range(height)
+    ]
+
+
+def _col_frac(image: Image.Image, predicate) -> list[float]:
+    pixels = image.load()
+    width, height = image.size
+    return [
+        sum(1 for y in range(height) if predicate(pixels[x, y])) / height
+        for x in range(width)
+    ]
+
+
+def _thin_edge_bands(fracs: list[float], threshold: float = 0.85, max_len: int = 4) -> list[tuple[int, int]]:
+    """Full-width ink rules only. Dark night sky is a long band, not a frame."""
+    return [band for band in _frame_bands(fracs, threshold) if band[1] - band[0] <= max_len]
+
+
+def crop_panel_interior(image: Image.Image) -> Image.Image:
+    """Drop the sheet's black frame and the next-panel sliver under it.
+
+    Color tiles are cut from a comic sheet. After the paper gutter is gone,
+    a 2px ink frame still sits at the panel edge, and 10–15px of the next
+    tile (palm, sky, gutter) still packages under the bottom rule. Crop to
+    the room inside that frame. A dark rooftop sky is not a frame.
+    """
+    paper_rows = _row_frac(image, _is_paper)
+    ink_rows = _row_frac(image, _is_ink)
+    ink_cols = _col_frac(image, _is_ink)
+    width, height = image.size
+    top, bottom = 0, height
+    left, right = 0, width
+    found = False
+
+    paper_bands = [band for band in _frame_bands(paper_rows, 0.70) if band[1] - band[0] >= 4]
+    for start, _end in paper_bands:
+        if start <= 20:
+            continue
+        bottom = start
+        cursor = start - 1
+        while cursor >= 0 and ink_rows[cursor] >= 0.80:
+            bottom = cursor
+            cursor -= 1
+        found = True
+        break
+
+    thin_rows = _thin_edge_bands(ink_rows)
+    if thin_rows and thin_rows[0][0] <= 4:
+        top = thin_rows[0][1]
+        found = True
+    if not paper_bands and thin_rows and thin_rows[-1][1] >= height - 6:
+        bottom = thin_rows[-1][0]
+        found = True
+
+    thin_cols = _thin_edge_bands(ink_cols)
+    if thin_cols and thin_cols[0][0] <= 4:
+        left = thin_cols[0][1]
+        found = True
+    if thin_cols and thin_cols[-1][1] >= width - 6:
+        right = thin_cols[-1][0]
+        found = True
+
+    if not found:
+        return image
+    top = min(height - 8, top)
+    left = min(width - 8, left)
+    bottom = max(top + 8, bottom)
+    right = max(left + 8, right)
+    if right - left < 200 or bottom - top < 200:
+        return image
+    return image.crop((left, top, right, bottom))
+
+
+def normalize_room(image: Image.Image) -> Image.Image:
+    return crop_panel_interior(trim_paper_matte(image.convert("RGB"))).resize(
+        (315, 315), Image.Resampling.LANCZOS
+    )
+
+
 def bmp24(image: Image.Image) -> bytes:
     image = image.convert("RGB")
     width, height = image.size
@@ -102,7 +204,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("image", type=Path)
     args = parser.parse_args()
-    image = trim_paper_matte(Image.open(args.image).convert("RGB")).resize((315, 315), Image.Resampling.LANCZOS)
+    image = normalize_room(Image.open(args.image))
     dib = bmp24(image)
     name_record = u16(AK_NAME) + args.name.encode("utf-8") + b"\0"
     copyright_record = variable_record(AK_COPYRIGHT, args.copyright_text.encode("utf-8") + b"\0")

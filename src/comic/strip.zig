@@ -2053,3 +2053,37 @@ test "Color wrap story panels fill the bezel without paper bleed" {
     }
     try std.testing.expect(checked >= 2);
 }
+
+test "Color apartment and cafe drop the next-panel sheet sliver" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-cafe.bgb"),
+    };
+    for (rooms) |encoded| {
+        var image = try bgb.decodeBackground(gpa, encoded);
+        defer image.deinit(gpa);
+        try std.testing.expectEqual(@as(u32, 315), image.width);
+        try std.testing.expectEqual(@as(u32, 315), image.height);
+
+        var wood_count: usize = 0;
+        var sky_count: usize = 0;
+        var y: u32 = image.height - 16;
+        while (y < image.height) : (y += 1) {
+            var x: u32 = 0;
+            while (x < image.width) : (x += 1) {
+                const pixel = image.pixels[y * image.width + x];
+                const red: u8 = @truncate(pixel >> 16);
+                const green: u8 = @truncate(pixel >> 8);
+                const blue: u8 = @truncate(pixel);
+                if (red < 95 and green > 115 and blue > 155)
+                    sky_count += 1
+                else if (red > 105 and green > 70 and blue < 90)
+                    wood_count += 1;
+            }
+        }
+        try std.testing.expect(wood_count > 80);
+        try std.testing.expect(wood_count > sky_count * 4);
+        try std.testing.expect(sky_count < 80);
+    }
+}
