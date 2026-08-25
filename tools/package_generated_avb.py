@@ -58,10 +58,30 @@ def variable_record(tag: int, payload: bytes) -> bytes:
     return u16(tag) + u16(len(payload)) + payload
 
 
+def _pixel_is_ink(pixel: tuple[int, ...]) -> bool:
+    """Match runtime `paperInkPixel`: near-gray AA is paper, not a wrap sliver."""
+    red, green, blue = pixel[:3]
+    if red == 255 and green == 255 and blue == 255:
+        return False
+    max_c = max(red, green, blue)
+    min_c = min(red, green, blue)
+    if min_c >= 228 and (max_c - min_c) < 18:
+        return False
+    return True
+
+
 def _column_has_ink(pixels, width: int, height: int, x: int) -> bool:
+    if x < 0 or x >= width:
+        return False
     for y in range(height):
-        red, green, blue = pixels[x, y]
-        if red < 245 or green < 245 or blue < 245:
+        if _pixel_is_ink(pixels[x, y]):
+            return True
+    return False
+
+
+def _row_has_ink(pixels, x0: int, x1: int, y: int) -> bool:
+    for col in range(x0, x1):
+        if _pixel_is_ink(pixels[col, y]):
             return True
     return False
 
@@ -87,11 +107,9 @@ def largest_ink_bbox(image: Image.Image) -> tuple[int, int, int, int]:
     x0, x1 = best
     top, bottom = height, 0
     for y in range(height):
-        for col in range(x0, x1):
-            red, green, blue = pixels[col, y]
-            if red < 245 or green < 245 or blue < 245:
-                top = min(top, y)
-                bottom = max(bottom, y + 1)
+        if _row_has_ink(pixels, x0, x1, y):
+            top = min(top, y)
+            bottom = max(bottom, y + 1)
     if top >= bottom:
         raise ValueError("image contains no visible pose")
 
@@ -102,13 +120,7 @@ def largest_ink_bbox(image: Image.Image) -> tuple[int, int, int, int]:
     band_start: int | None = None
     last_ink = top
     for y in range(top, bottom + 1):
-        row_ink = False
-        if y < bottom:
-            for col in range(x0, x1):
-                red, green, blue = pixels[col, y]
-                if red < 245 or green < 245 or blue < 245:
-                    row_ink = True
-                    break
+        row_ink = y < bottom and _row_has_ink(pixels, x0, x1, y)
         if row_ink:
             if band_start is None:
                 band_start = y
@@ -126,6 +138,31 @@ def largest_ink_bbox(image: Image.Image) -> tuple[int, int, int, int]:
     return (x0, best_y0, x1, best_y1)
 
 
+def padded_ink_crop(image: Image.Image, bbox: tuple[int, int, int, int], pad: int = 12) -> tuple[int, int, int, int]:
+    """Grow `bbox` by `pad` paper pixels. Stop at the next ink column-run."""
+    pixels = image.load()
+    width, height = image.size
+    left, top, right, bottom = bbox
+    grown_left = 0
+    while grown_left < pad and left > 0:
+        if _column_has_ink(pixels, width, height, left - 1):
+            break
+        left -= 1
+        grown_left += 1
+    grown_right = 0
+    while grown_right < pad and right < width:
+        if _column_has_ink(pixels, width, height, right):
+            break
+        right += 1
+        grown_right += 1
+    return (
+        left,
+        max(0, top - pad),
+        right,
+        min(height, bottom + pad),
+    )
+
+
 def normalize_pose(path: Path) -> Image.Image:
     """Crop a nearly-white generated card and return a compact white-matte pose."""
     source = Image.open(path).convert("RGB")
@@ -138,9 +175,8 @@ def normalize_pose(path: Path) -> Image.Image:
             if red >= 245 and green >= 245 and blue >= 245:
                 pixels[x, y] = (255, 255, 255)
 
-    left, top, right, bottom = largest_ink_bbox(source)
-    pad = 12
-    crop = source.crop((max(0, left - pad), max(0, top - pad), min(source.width, right + pad), min(source.height, bottom + pad)))
+    left, top, right, bottom = padded_ink_crop(source, largest_ink_bbox(source))
+    crop = source.crop((left, top, right, bottom))
     crop.thumbnail((210, 260), Image.Resampling.LANCZOS)
     canvas = Image.new("RGB", (240, 280), "white")
     canvas.paste(crop, ((canvas.width - crop.width) // 2, canvas.height - crop.height - 6))
