@@ -32,15 +32,15 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/2/9/15 and Markdown MIME,
+//!     still own CLIPBOARD), receive-only ISO-8859-1/2/5/7/9/15 and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear,
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
-//!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
+//!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
 //!     FocusIn/leaving-hidden expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
-//!     while hidden or fully obscured; MapNotify exposes), a scaled
+//!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes), a scaled
 //!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 (reinstalled on scale change), urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
@@ -178,6 +178,7 @@ const XConn = struct {
     net_wm_icon: u32 = 0,
     net_wm_state_attention: u32 = 0,
     net_wm_state_hidden: u32 = 0,
+    net_wm_state_shaded: u32 = 0,
     utf16_string: u32 = 0,
     mime_text_html: u32 = 0,
     mime_text_html_utf8: u32 = 0,
@@ -192,6 +193,7 @@ const XConn = struct {
     mime_rtf_app: u32 = 0,
     compound_text: u32 = 0,
     mime_kde5_urilist: u32 = 0,
+    mime_kde_suggestedfilename: u32 = 0,
     mime_moz_url_priv: u32 = 0,
     mime_text_latin1: u32 = 0,
     mime_text_latin1_alt: u32 = 0,
@@ -201,6 +203,10 @@ const XConn = struct {
     mime_text_latin2_alt: u32 = 0,
     mime_text_latin5: u32 = 0,
     mime_text_latin5_alt: u32 = 0,
+    mime_text_cyrillic: u32 = 0,
+    mime_text_cyrillic_alt: u32 = 0,
+    mime_text_greek: u32 = 0,
+    mime_text_greek_alt: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -438,6 +444,10 @@ pub const Window = struct {
     cursor_id: u32,
     wm_urgent: bool,
     wm_hidden: bool,
+    wm_net_hidden: bool,
+    wm_icccm_hidden: bool,
+    wm_unmapped: bool,
+    wm_shaded: bool,
     fully_obscured: bool,
     scale_source: ScaleSource,
     randr_crtcs: [max_randr_crtcs]RandrCrtc,
@@ -504,6 +514,10 @@ pub const Window = struct {
             .cursor_id = 0,
             .wm_urgent = false,
             .wm_hidden = false,
+            .wm_net_hidden = false,
+            .wm_icccm_hidden = false,
+            .wm_unmapped = false,
+            .wm_shaded = false,
             .fully_obscured = false,
             .scale_source = .fallback,
             .randr_crtcs = @splat(.{}),
@@ -769,12 +783,13 @@ pub const Window = struct {
             },
             18 => { // UnmapNotify
                 if (!self.structureEventIsOurs(event)) return .other;
-                self.wm_hidden = true;
+                self.wm_unmapped = true;
+                self.syncHidden();
                 return .other;
             },
             19 => { // MapNotify
                 if (!self.structureEventIsOurs(event)) return .other;
-                self.wm_hidden = false;
+                self.wm_unmapped = false;
                 self.readWmState();
                 self.refreshRandrCrtcs();
                 if (self.refreshOutputScale()) |ev| return ev;
@@ -1007,6 +1022,7 @@ pub const Window = struct {
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_file)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_kde_urilist)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_kde5_urilist)) |path| return path;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_kde_suggestedfilename)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_nautilus)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_url_priv)) |path| return path;
         if (self.readCompoundTextTarget(gpa, selection, self.conn.compound_text)) |text| return text;
@@ -1027,6 +1043,10 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2_alt, "ISO-8859-2")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin5, "ISO-8859-9")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin5_alt, "ISO-8859-9")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cyrillic, "ISO-8859-5")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cyrillic_alt, "ISO-8859-5")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_greek, "ISO-8859-7")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_greek_alt, "ISO-8859-7")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1118,6 +1138,16 @@ pub const Window = struct {
         }
         if (isLatin5Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-9") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCyrillicAtom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-5") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isGreekAtom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-7") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
@@ -1806,8 +1836,13 @@ pub const Window = struct {
             if (add) self.wm_fullscreen = true;
             if (remove) self.wm_fullscreen = false;
         } else if (atom == self.conn.net_wm_state_hidden) {
-            if (add) self.wm_hidden = true;
-            if (remove) self.wm_hidden = false;
+            if (add) self.wm_net_hidden = true;
+            if (remove) self.wm_net_hidden = false;
+            self.syncHidden();
+        } else if (atom == self.conn.net_wm_state_shaded) {
+            if (add) self.wm_shaded = true;
+            if (remove) self.wm_shaded = false;
+            self.syncHidden();
         }
     }
 
@@ -1815,8 +1850,13 @@ pub const Window = struct {
         if (atom == self.conn.net_wm_state_max_horz) return self.wm_max_horz;
         if (atom == self.conn.net_wm_state_max_vert) return self.wm_max_vert;
         if (atom == self.conn.net_wm_state_fullscreen) return self.wm_fullscreen;
-        if (atom == self.conn.net_wm_state_hidden) return self.wm_hidden;
+        if (atom == self.conn.net_wm_state_hidden) return self.wm_net_hidden;
+        if (atom == self.conn.net_wm_state_shaded) return self.wm_shaded;
         return false;
+    }
+
+    fn syncHidden(self: *Window) void {
+        self.wm_hidden = combinedWmHidden(self.wm_net_hidden, self.wm_icccm_hidden, self.wm_unmapped, self.wm_shaded);
     }
 
     fn demandAttention(self: *Window) void {
@@ -1839,27 +1879,32 @@ pub const Window = struct {
         self.wm_max_horz = false;
         self.wm_max_vert = false;
         self.wm_fullscreen = false;
-        self.wm_hidden = false;
+        self.wm_net_hidden = false;
+        self.wm_shaded = false;
         var off: usize = 0;
         while (off + 4 <= bytes.len) : (off += 4) {
             const atom = get32(bytes[off..][0..4]);
             if (atom == self.conn.net_wm_state_max_horz) self.wm_max_horz = true;
             if (atom == self.conn.net_wm_state_max_vert) self.wm_max_vert = true;
             if (atom == self.conn.net_wm_state_fullscreen) self.wm_fullscreen = true;
-            if (atom == self.conn.net_wm_state_hidden) self.wm_hidden = true;
+            if (atom == self.conn.net_wm_state_hidden) self.wm_net_hidden = true;
+            if (atom == self.conn.net_wm_state_shaded) self.wm_shaded = true;
         }
+        self.syncHidden();
     }
 
     fn readWmState(self: *Window) void {
+        defer self.syncHidden();
         if (self.conn.wm_state == 0) return;
         const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.wm_state, &self.pending_events) catch return;
         defer self.gpa.free(bytes);
         if (bytes.len < 4) return;
-        self.wm_hidden = wmStateIsHidden(get32(bytes[0..4]));
+        self.wm_icccm_hidden = wmStateIsHidden(get32(bytes[0..4]));
     }
 
     fn applyWmChangeState(self: *Window, event: [32]u8) void {
-        self.wm_hidden = wmStateIsHidden(get32(event[12..16]));
+        self.wm_icccm_hidden = wmStateIsHidden(get32(event[12..16]));
+        self.syncHidden();
     }
 
     fn handleRandrScreenChange(self: *Window, event: [32]u8) Event {
@@ -2548,6 +2593,7 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_icon = try internAtom(conn, "_NET_WM_ICON");
     conn.net_wm_state_attention = try internAtom(conn, "_NET_WM_STATE_DEMANDS_ATTENTION");
     conn.net_wm_state_hidden = try internAtom(conn, "_NET_WM_STATE_HIDDEN");
+    conn.net_wm_state_shaded = try internAtom(conn, "_NET_WM_STATE_SHADED");
     conn.utf16_string = try internAtom(conn, "UTF16_STRING");
     conn.mime_text_html = try internAtom(conn, "text/html");
     conn.mime_text_html_utf8 = try internAtom(conn, "text/html;charset=utf-8");
@@ -2562,6 +2608,7 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_rtf_app = try internAtom(conn, "application/rtf");
     conn.compound_text = try internAtom(conn, "COMPOUND_TEXT");
     conn.mime_kde5_urilist = try internAtom(conn, "application/x-kde5-urilist");
+    conn.mime_kde_suggestedfilename = try internAtom(conn, "application/x-kde-suggestedfilename");
     conn.mime_moz_url_priv = try internAtom(conn, "text/x-moz-url-priv");
     conn.mime_text_latin1 = try internAtom(conn, "text/plain;charset=ISO-8859-1");
     conn.mime_text_latin1_alt = try internAtom(conn, "text/plain;charset=iso-8859-1");
@@ -2571,6 +2618,10 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_latin2_alt = try internAtom(conn, "text/plain;charset=iso-8859-2");
     conn.mime_text_latin5 = try internAtom(conn, "text/plain;charset=ISO-8859-9");
     conn.mime_text_latin5_alt = try internAtom(conn, "text/plain;charset=iso-8859-9");
+    conn.mime_text_cyrillic = try internAtom(conn, "text/plain;charset=ISO-8859-5");
+    conn.mime_text_cyrillic_alt = try internAtom(conn, "text/plain;charset=iso-8859-5");
+    conn.mime_text_greek = try internAtom(conn, "text/plain;charset=ISO-8859-7");
+    conn.mime_text_greek_alt = try internAtom(conn, "text/plain;charset=iso-8859-7");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3261,6 +3312,10 @@ fn wmStateIsHidden(state: u32) bool {
     return state != 1; // ICCCM NormalState=1; Withdrawn=0, Iconic=3
 }
 
+fn combinedWmHidden(net_hidden: bool, icccm_hidden: bool, unmapped: bool, shaded: bool) bool {
+    return net_hidden or icccm_hidden or unmapped or shaded;
+}
+
 fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == 0) return 0;
     if (atom == conn.utf8_string) return 7;
@@ -3268,7 +3323,8 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
-    if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom) or isLatin5Atom(conn, atom)) return 3;
+    if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom) or isLatin5Atom(conn, atom) or
+        isCyrillicAtom(conn, atom) or isGreekAtom(conn, atom)) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3303,6 +3359,14 @@ fn isLatin5Atom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_latin5 or atom == conn.mime_text_latin5_alt);
 }
 
+fn isCyrillicAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cyrillic or atom == conn.mime_text_cyrillic_alt);
+}
+
+fn isGreekAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_greek or atom == conn.mime_text_greek_alt);
+}
+
 fn x11NotifyModeIsGrab(mode: u8) bool {
     return mode == notify_mode_grab or mode == notify_mode_ungrab;
 }
@@ -3317,8 +3381,8 @@ fn isMarkdownAtom(conn: *const XConn, atom: u32) bool {
 
 fn isDesktopFileAtom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_gnome_copied or atom == conn.mime_moz_url or atom == conn.mime_moz_file or
-        atom == conn.mime_kde_urilist or atom == conn.mime_kde5_urilist or atom == conn.mime_nautilus or
-        atom == conn.mime_moz_url_priv);
+        atom == conn.mime_kde_urilist or atom == conn.mime_kde5_urilist or atom == conn.mime_kde_suggestedfilename or
+        atom == conn.mime_nautilus or atom == conn.mime_moz_url_priv);
 }
 
 fn preferredTextAtom(conn: *const XConn, atoms: []const u8) ?u32 {
@@ -3344,7 +3408,8 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
         isDesktopFileAtom(conn, target) or target == conn.compound_text or
         isLatin1Atom(conn, target) or isLatin9Atom(conn, target) or
-        isLatin2Atom(conn, target) or isLatin5Atom(conn, target) or isMarkdownAtom(conn, target);
+        isLatin2Atom(conn, target) or isLatin5Atom(conn, target) or
+        isCyrillicAtom(conn, target) or isGreekAtom(conn, target) or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3599,6 +3664,11 @@ test "ICCCM WM_STATE treats only NormalState as visible" {
     try std.testing.expect(!wmStateIsHidden(1));
     try std.testing.expect(wmStateIsHidden(0));
     try std.testing.expect(wmStateIsHidden(3));
+    try std.testing.expect(!combinedWmHidden(false, false, false, false));
+    try std.testing.expect(combinedWmHidden(false, true, false, false));
+    try std.testing.expect(combinedWmHidden(false, false, true, false));
+    try std.testing.expect(combinedWmHidden(false, false, false, true));
+    try std.testing.expect(combinedWmHidden(true, false, false, false));
 }
 
 test "clipboard text targets include ICCCM and GTK MIME atoms" {
@@ -3632,6 +3702,7 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_rtf_app = 118,
         .compound_text = 119,
         .mime_kde5_urilist = 120,
+        .mime_kde_suggestedfilename = 136,
         .mime_moz_url_priv = 121,
         .mime_text_latin1 = 122,
         .mime_text_latin1_alt = 123,
@@ -3641,6 +3712,10 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_latin2_alt = 129,
         .mime_text_latin5 = 130,
         .mime_text_latin5_alt = 131,
+        .mime_text_cyrillic = 132,
+        .mime_text_cyrillic_alt = 133,
+        .mime_text_greek = 134,
+        .mime_text_greek_alt = 135,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -3705,8 +3780,19 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isLatin2Atom(&conn, 129));
     try std.testing.expect(isLatin5Atom(&conn, 130));
     try std.testing.expect(isLatin5Atom(&conn, 131));
+    try std.testing.expect(isCyrillicAtom(&conn, 132));
+    try std.testing.expect(isCyrillicAtom(&conn, 133));
+    try std.testing.expect(isGreekAtom(&conn, 134));
+    try std.testing.expect(isGreekAtom(&conn, 135));
+    try std.testing.expect(isDesktopFileAtom(&conn, 136));
     try std.testing.expect(isClipboardTextTarget(&conn, 130));
+    try std.testing.expect(isClipboardTextTarget(&conn, 132));
+    try std.testing.expect(isClipboardTextTarget(&conn, 134));
+    try std.testing.expect(isClipboardTextTarget(&conn, 136));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 130));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 132));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 134));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 136));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));

@@ -118,11 +118,12 @@ hash.
   X11 wheel button releases do not emit pointer up. NumLock XOR Shift selects keypad
   digits on both backends. X11 Mod3 Mode_switch selects group 2.
   Receive-only `COMPOUND_TEXT` decodes to UTF-8, including `ESC - B`
-  ISO-8859-2, `ESC - b` ISO-8859-15, and `ESC - M` ISO-8859-9. Invalid UTF-8 clipboard bytes
+  ISO-8859-2, `ESC - b` ISO-8859-15, `ESC - M` ISO-8859-9, `ESC - L`
+  ISO-8859-5, and `ESC - F` ISO-8859-7. Invalid UTF-8 clipboard bytes
   decode as Latin-1, including incoming DnD and Shift+Insert / middle-click
-  paste-as-keys. Receive-only ISO-8859-1/2/9/15 `text/plain` charset MIME
+  paste-as-keys. Receive-only ISO-8859-1/2/5/7/9/15 `text/plain` charset MIME
   (both common casings on X11) and Markdown decode to UTF-8. X11 extra
-  mouse buttons 6–9 do not synthesize pointer clicks. Extra KDE5 / Mozilla-priv file MIME yields a local
+  mouse buttons 6–9 do not synthesize pointer clicks. Extra KDE5 / Mozilla-priv / KDE suggested-filename file MIME yields a local
   path. Receive-only `text/html` strips tags to plain text.
   Clipboard text normalizes
   CR/LF to LF. `notify-send` uses `--urgency=normal` and
@@ -144,9 +145,10 @@ hash.
   honors `preferred_buffer_scale`, and can derive integer scale from
   output geometry millimeters when no scale event arrives. Keyboard enter
   arms client-side repeat for a held non-modifier key.   Both backends track maximized/fullscreen
-  window state; X11 also tracks `_NET_WM_STATE_HIDDEN` and ICCCM
-  `WM_STATE` / `WM_CHANGE_STATE` and skips `present()` while hidden or
-  fully obscured (MapNotify exposes), and Wayland records tiled/suspended xdg
+  window state; X11 also tracks `_NET_WM_STATE_HIDDEN` / `_NET_WM_STATE_SHADED` and ICCCM
+  `WM_STATE` / `WM_CHANGE_STATE` and skips `present()` while NET hidden, ICCCM
+  iconic, unmapped, shaded, or fully obscured (MapNotify exposes; a `_NET_WM_STATE`
+  without HIDDEN cannot clear ICCCM Iconic), and Wayland records tiled/suspended xdg
   states plus `wm_capabilities` / `configure_bounds` when xdg-shell is v5+
   and skips `present()` while suspended (leaving suspended or gaining
   activated exposes). X11 FocusIn and leaving hidden expose.

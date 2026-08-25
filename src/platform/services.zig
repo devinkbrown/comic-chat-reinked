@@ -7,7 +7,7 @@
 //! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
 //! printing. `xdg-open` can carry an outgoing activation / startup token.
 //! Incoming desktop file-list MIME, receive-only RTF, receive-only
-//! COMPOUND_TEXT (including ISO-8859-2/9/15), ISO-8859 charset MIME, Markdown,
+//! COMPOUND_TEXT (including ISO-8859-2/5/7/9/15), ISO-8859 charset MIME, Markdown,
 //! and invalid-UTF-8 Latin-1 fallback are parsed here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
 //! internal application fallback.
@@ -196,6 +196,7 @@ pub fn isDesktopFileMime(mime: []const u8) bool {
         std.ascii.eqlIgnoreCase(mime, "application/x-moz-file") or
         std.ascii.eqlIgnoreCase(mime, "application/x-kde4-urilist") or
         std.ascii.eqlIgnoreCase(mime, "application/x-kde5-urilist") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-kde-suggestedfilename") or
         std.ascii.eqlIgnoreCase(mime, "text/x-moz-url-priv");
 }
 
@@ -221,7 +222,7 @@ fn mimeTypeEquals(mime: []const u8, prefix: []const u8) bool {
 }
 
 /// First local path from `x-special/gnome-copied-files`, `text/x-moz-url`,
-/// a bare absolute path, or a `text/uri-list` body.
+/// KDE suggested-filename, a bare absolute path, or a `text/uri-list` body.
 pub fn firstPathFromDesktopFiles(text: []const u8, buf: []u8) ?[]const u8 {
     var rest = text;
     if (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
@@ -510,7 +511,7 @@ pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
 }
 
-/// Receive-only `text/plain;charset=...` (ISO-8859-1/2/9/15). Other charsets
+/// Receive-only `text/plain;charset=...` (ISO-8859-1/2/5/7/9/15). Other charsets
 /// fall back to `clipboardBytesToUtf8`.
 pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: []const u8) ![]u8 {
     if (isUtf8Charset(charset) or isAsciiCharset(charset)) {
@@ -520,6 +521,8 @@ pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: 
     if (isIso885915Charset(charset)) return iso885915ToUtf8(gpa, bytes);
     if (isIso88592Charset(charset)) return iso88592ToUtf8(gpa, bytes);
     if (isIso88599Charset(charset)) return iso88599ToUtf8(gpa, bytes);
+    if (isIso88595Charset(charset)) return iso88595ToUtf8(gpa, bytes);
+    if (isIso88597Charset(charset)) return iso88597ToUtf8(gpa, bytes);
     return clipboardBytesToUtf8(gpa, bytes);
 }
 
@@ -543,7 +546,8 @@ pub fn isMarkdownMime(mime: []const u8) bool {
 pub fn isLatinPlainMime(mime: []const u8) bool {
     const charset = mimeCharset(mime) orelse return false;
     return isIso88591Charset(charset) or isIso885915Charset(charset) or
-        isIso88592Charset(charset) or isIso88599Charset(charset);
+        isIso88592Charset(charset) or isIso88599Charset(charset) or
+        isIso88595Charset(charset) or isIso88597Charset(charset);
 }
 
 pub fn decodePlainMime(gpa: std.mem.Allocator, mime: []const u8, bytes: []const u8) ![]u8 {
@@ -586,6 +590,18 @@ fn isIso88599Charset(charset: []const u8) bool {
         std.ascii.eqlIgnoreCase(charset, "iso8859-9") or
         std.ascii.eqlIgnoreCase(charset, "latin5") or
         std.ascii.eqlIgnoreCase(charset, "latin-5");
+}
+
+fn isIso88595Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-5") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-5") or
+        std.ascii.eqlIgnoreCase(charset, "cyrillic");
+}
+
+fn isIso88597Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-7") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-7") or
+        std.ascii.eqlIgnoreCase(charset, "greek");
 }
 
 /// Receive-only ICCCM COMPOUND_TEXT. Default charset is ISO-8859-1. `ESC % G`
@@ -635,6 +651,14 @@ pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
                 try appendCodepoint(&out, gpa, iso88599Codepoint(bytes[i]));
                 i += 1;
             },
+            .cyrillic => {
+                try appendCodepoint(&out, gpa, iso88595Codepoint(bytes[i]));
+                i += 1;
+            },
+            .greek => {
+                try appendCodepoint(&out, gpa, iso88597Codepoint(bytes[i]));
+                i += 1;
+            },
             .utf8 => {
                 const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
                 if (i + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[i .. i + n])) {
@@ -650,7 +674,7 @@ pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
 }
 
-const CompoundCharset = enum { latin1, latin2, latin9, latin5, utf8, ascii };
+const CompoundCharset = enum { latin1, latin2, latin9, latin5, cyrillic, greek, utf8, ascii };
 
 const CompoundEscape = struct {
     consumed: usize,
@@ -680,6 +704,8 @@ fn parseCompoundEscape(text: []const u8) CompoundEscape {
                 'B' => .latin2,
                 'b' => .latin9,
                 'M' => .latin5,
+                'L' => .cyrillic,
+                'F' => .greek,
                 else => .latin1,
             },
             .skip = false,
@@ -719,6 +745,20 @@ fn iso88599ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (bytes) |c| try appendCodepoint(&out, gpa, iso88599Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88595ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88595Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88597ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88597Codepoint(c));
     return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
 }
 
@@ -766,6 +806,29 @@ fn iso88592Codepoint(c: u8) u21 {
     return iso88592_a0[c - 0xa0];
 }
 
+fn iso88595Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xa0 => 0x00a0,
+        0xa1...0xac => 0x0401 + @as(u21, c - 0xa1),
+        0xad => 0x00ad,
+        0xae => 0x040e,
+        0xaf => 0x040f,
+        0xb0...0xcf => 0x0410 + @as(u21, c - 0xb0),
+        0xd0...0xef => 0x0430 + @as(u21, c - 0xd0),
+        0xf0 => 0x2116,
+        0xf1...0xfc => 0x0451 + @as(u21, c - 0xf1),
+        0xfd => 0x00a7,
+        0xfe => 0x045e,
+        0xff => 0x045f,
+        else => c,
+    };
+}
+
+fn iso88597Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso88597_a0[c - 0xa0];
+}
+
 const iso88592_a0 = [_]u21{
     0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
     0x00a8, 0x0160, 0x015e, 0x0164, 0x0179, 0x00ad, 0x017d, 0x017b,
@@ -779,6 +842,21 @@ const iso88592_a0 = [_]u21{
     0x010d, 0x00e9, 0x0119, 0x00eb, 0x011b, 0x00ed, 0x00ee, 0x010f,
     0x0111, 0x0144, 0x0148, 0x00f3, 0x00f4, 0x0151, 0x00f6, 0x00f7,
     0x0159, 0x016f, 0x00fa, 0x0171, 0x00fc, 0x00fd, 0x0163, 0x02d9,
+};
+
+const iso88597_a0 = [_]u21{
+    0x00a0, 0x2018, 0x2019, 0x00a3, 0x20ac, 0x20af, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x037a, 0x00ab, 0x00ac, 0x00ad, 0xfffd, 0x2015,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x0384, 0x0385, 0x0386, 0x00b7,
+    0x0388, 0x0389, 0x038a, 0x00bb, 0x038c, 0x00bd, 0x038e, 0x038f,
+    0x0390, 0x0391, 0x0392, 0x0393, 0x0394, 0x0395, 0x0396, 0x0397,
+    0x0398, 0x0399, 0x039a, 0x039b, 0x039c, 0x039d, 0x039e, 0x039f,
+    0x03a0, 0x03a1, 0xfffd, 0x03a3, 0x03a4, 0x03a5, 0x03a6, 0x03a7,
+    0x03a8, 0x03a9, 0x03aa, 0x03ab, 0x03ac, 0x03ad, 0x03ae, 0x03af,
+    0x03b0, 0x03b1, 0x03b2, 0x03b3, 0x03b4, 0x03b5, 0x03b6, 0x03b7,
+    0x03b8, 0x03b9, 0x03ba, 0x03bb, 0x03bc, 0x03bd, 0x03be, 0x03bf,
+    0x03c0, 0x03c1, 0x03c2, 0x03c3, 0x03c4, 0x03c5, 0x03c6, 0x03c7,
+    0x03c8, 0x03c9, 0x03ca, 0x03cb, 0x03cc, 0x03cd, 0x03ce, 0xfffd,
 };
 
 /// Decode `UTF16_STRING` / UTF-16 clipboard bytes. Honors a BOM when present,
@@ -1514,6 +1592,7 @@ test "desktop file-list MIME yields a local path and skips copy/cut headers" {
     try std.testing.expect(isDesktopFileMime("application/x-moz-file"));
     try std.testing.expect(isDesktopFileMime("application/x-kde4-urilist"));
     try std.testing.expect(isDesktopFileMime("application/x-kde5-urilist"));
+    try std.testing.expect(isDesktopFileMime("application/x-kde-suggestedfilename"));
     try std.testing.expect(isDesktopFileMime("text/x-moz-url-priv"));
     try std.testing.expect(isCompoundTextMime("COMPOUND_TEXT"));
     try std.testing.expect(isCompoundTextMime("compound_text"));
@@ -1537,6 +1616,8 @@ test "desktop file-list MIME yields a local path and skips copy/cut headers" {
         firstPathFromDesktopFiles("file:///tmp/photo.png\nPhoto title\n", &buf).?,
     );
     try std.testing.expect(firstPathFromDesktopFiles("copy\nhttps://example.test/a\n", &buf) == null);
+    try std.testing.expectEqualStrings("/tmp/name.png", firstPathFromDesktopFiles("/tmp/name.png\n", &buf).?);
+    try std.testing.expect(firstPathFromDesktopFiles("name.png\n", &buf) == null);
 }
 
 test "XSETTINGS prefers Gdk/WindowScalingFactor then Xft/DPI" {
@@ -1640,6 +1721,21 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     defer gpa.free(dotted);
     try std.testing.expectEqualStrings("İ", dotted);
     try std.testing.expect(isLatinPlainMime("text/plain;charset=latin5"));
+    const a_cyr = try decodePlainByCharset(gpa, "\xb0", "ISO-8859-5");
+    defer gpa.free(a_cyr);
+    try std.testing.expectEqualStrings("А", a_cyr);
+    const a_cyr_lc = try decodePlainByCharset(gpa, "\xb0", "iso-8859-5");
+    defer gpa.free(a_cyr_lc);
+    try std.testing.expectEqualStrings("А", a_cyr_lc);
+    const alpha = try decodePlainByCharset(gpa, "\xc1", "ISO-8859-7");
+    defer gpa.free(alpha);
+    try std.testing.expectEqualStrings("Α", alpha);
+    const alpha_lc = try decodePlainByCharset(gpa, "\xc1", "iso-8859-7");
+    defer gpa.free(alpha_lc);
+    try std.testing.expectEqualStrings("Α", alpha_lc);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=ISO-8859-5"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cyrillic"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=greek"));
 }
 
 test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n sets" {
@@ -1665,6 +1761,12 @@ test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n se
     const latin5 = try compoundTextToUtf8(gpa, "\x1b-M" ++ "\xdd");
     defer gpa.free(latin5);
     try std.testing.expectEqualStrings("İ", latin5);
+    const cyrillic = try compoundTextToUtf8(gpa, "\x1b-L" ++ "\xb0");
+    defer gpa.free(cyrillic);
+    try std.testing.expectEqualStrings("А", cyrillic);
+    const greek = try compoundTextToUtf8(gpa, "\x1b-F" ++ "\xc1");
+    defer gpa.free(greek);
+    try std.testing.expectEqualStrings("Α", greek);
 }
 
 test "notify-send uses a normal urgency hint" {

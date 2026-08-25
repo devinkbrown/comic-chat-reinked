@@ -41,8 +41,8 @@
 //! Pointer leave and incoming DnD motion emit pointer moves so hover
 //! tracks the seat. NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
 //! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
-//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/9/15 `text/plain` charset MIME,
-//! Markdown, and extra KDE5/Mozilla-priv file MIME are accepted.
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/5/7/9/15 `text/plain` charset MIME,
+//! Markdown, and extra KDE5/Mozilla-priv/KDE suggested-filename file MIME are accepted.
 //! `present()` skips
 //! commits while the toplevel is suspended; leaving suspended or gaining
 //! xdg activated exposes, and text-input disables when not activated.
@@ -227,6 +227,7 @@ const desktop_file_mime_types = [_][]const u8{
     "application/x-moz-file",
     "application/x-kde4-urilist",
     "application/x-kde5-urilist",
+    "application/x-kde-suggestedfilename",
     "text/x-moz-url-priv",
 };
 
@@ -248,6 +249,10 @@ const latin_mime_types = [_][]const u8{
     "text/plain;charset=ISO-8859-9",
     "text/plain;charset=iso-8859-9",
     "text/plain;charset=latin5",
+    "text/plain;charset=ISO-8859-5",
+    "text/plain;charset=iso-8859-5",
+    "text/plain;charset=ISO-8859-7",
+    "text/plain;charset=iso-8859-7",
 };
 
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
@@ -3665,6 +3670,7 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("application/x-moz-file"));
     try std.testing.expect(isPlainTextMime("application/x-kde4-urilist"));
     try std.testing.expect(isPlainTextMime("application/x-kde5-urilist"));
+    try std.testing.expect(isPlainTextMime("application/x-kde-suggestedfilename"));
     try std.testing.expect(isPlainTextMime("text/x-moz-url-priv"));
     try std.testing.expect(isPlainTextMime("text/x-uri-list"));
     try std.testing.expect(isPlainTextMime("text/rtf"));
@@ -3673,6 +3679,8 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-1"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-15"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-9"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-5"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-7"));
     try std.testing.expect(isPlainTextMime("text/markdown"));
     try std.testing.expect(isPlainTextMime("text/x-markdown"));
     try std.testing.expect(!isPlainTextMime("image/png"));
