@@ -175,6 +175,15 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 45 leftovers in scope
+
+- CTCP replies, profile/avatar announces, and dest `MODE` after `470` ignore
+  `TxBackpressure`/`InvalidUtf8` instead of tearing the receive loop
+- Remaining live dialogs (sound, backdrop, call, profile, PROP, ACCESS,
+  EVENT) use `rejectDialogIrc` so a busy connection stays English
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 44 leftovers in scope
 
 - 001 reconnect JOIN, CREATE pending TOPIC, automatic greetings, and

@@ -1522,7 +1522,10 @@ fn finishJoin(
     state.joined = true;
     state.status = "connected";
     if (state.avatar_announced) return;
-    try announceRoomAvatar(client, channel, transcript.resolvedAvatar(nick), state.ircx_data);
+    announceRoomAvatar(client, channel, transcript.resolvedAvatar(nick), state.ircx_data) catch |err| switch (err) {
+        error.UnknownAvatar => {},
+        else => try ignoreTransientSend(err),
+    };
     state.avatar_announced = true;
 }
 
@@ -2848,7 +2851,13 @@ fn applyDialogAction(
         .character => {
             const selected = cc.comic.session.bundledAvatarByName(value) orelse return;
             try room.transcript.setAvatar(nick, selected);
-            if (maybe_client) |client| try announceRoomAvatar(client, room.name, selected, state.ircx_data);
+            if (maybe_client) |client| announceRoomAvatar(client, room.name, selected, state.ircx_data) catch |err| switch (err) {
+                error.UnknownAvatar => {},
+                else => {
+                    try rejectDialogIrc(view, err, "That character could not be announced.");
+                    return;
+                },
+            };
         },
         .background => {
             const selected = cc.comic.session.bundledBackdropByName(value) orelse {
@@ -2859,8 +2868,14 @@ fn applyDialogAction(
             try preferences.setBackdrop(selected);
             try preferences.saveFile(io, network.runtime.preferences_path);
             if (maybe_client) |client| {
-                try client.syncBackdrop(room.name, selected, null, state.ircx_data);
-                if (state.ircx_data) try publishClientBackdrop(client, room, gpa, selected);
+                client.syncBackdrop(room.name, selected, null, state.ircx_data) catch |err| {
+                    try rejectDialogIrc(view, err, "That backdrop could not be sent.");
+                    return;
+                };
+                if (state.ircx_data) publishClientBackdrop(client, room, gpa, selected) catch |err| {
+                    try rejectDialogIrc(view, err, "That backdrop could not be sent.");
+                    return;
+                };
             }
         },
         .personal => {
@@ -2954,7 +2969,10 @@ fn applyDialogAction(
                 return;
             }
             if (std.ascii.eqlIgnoreCase(operation, "Get common")) {
-                try client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG");
+                client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG") catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a comma-separated list of property names.");
+                    return;
+                };
             } else if (std.ascii.eqlIgnoreCase(operation, "Get")) {
                 if (property.len == 0) {
                     view.setDialogNotice("Enter one or more comma-separated property names.");
@@ -2988,7 +3006,10 @@ fn applyDialogAction(
             const level = view.dialogValueAt(1);
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.ascii.eqlIgnoreCase(operation, "List")) {
-                try client.accessList(room.name);
+                client.accessList(room.name) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                    return;
+                };
             } else if (std.ascii.eqlIgnoreCase(operation, "Delete") or std.ascii.eqlIgnoreCase(operation, "Clear")) {
                 if (mask.len == 0 and !std.ascii.eqlIgnoreCase(operation, "Clear")) {
                     view.setDialogNotice("Enter the nickname mask to delete.");
@@ -3045,13 +3066,19 @@ fn applyDialogAction(
                 return;
             }
             if (std.ascii.eqlIgnoreCase(operation, "List")) {
-                try client.eventList(event);
+                client.eventList(event) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter one IRCX event name.");
+                    return;
+                };
             } else {
                 if (event.len == 0 or std.mem.indexOfAny(u8, event, " \r\n\x00") != null) {
                     view.setDialogNotice("Enter one IRCX event name.");
                     return;
                 }
-                try client.eventChange(std.ascii.eqlIgnoreCase(operation, "Add"), event, mask);
+                client.eventChange(std.ascii.eqlIgnoreCase(operation, "Add"), event, mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter one IRCX event name.");
+                    return;
+                };
             }
         },
         .automation => {
@@ -3277,7 +3304,10 @@ fn applyDialogAction(
                 view.setDialogNotice("That member is not in the current room.");
                 return;
             }
-            try client.sendCallLink(value, link);
+            client.sendCallLink(value, link) catch |err| {
+                try rejectDialogIrc(view, err, "That call link could not be sent.");
+                return;
+            };
         },
         .member_profile => {
             const client = maybe_client orelse {
@@ -3289,7 +3319,10 @@ fn applyDialogAction(
                 return;
             }
             try state.rememberProfileRequest(gpa, value);
-            try client.requestProfile(value, state.ircx_data);
+            client.requestProfile(value, state.ircx_data) catch |err| {
+                try rejectDialogIrc(view, err, "That profile request could not be sent.");
+                return;
+            };
             try room.transcript.addWithOptions("Profile", "Profile request sent; the reply will appear here.", .{ .modes = cc.proto.udi.bm_action });
         },
         .sound => {
@@ -3318,7 +3351,10 @@ fn applyDialogAction(
                 }
                 break :target room.transcript.roster.items[member_index].nick;
             } else room.name;
-            try client.sendSound(target, value, accompanying_message);
+            client.sendSound(target, value, accompanying_message) catch |err| {
+                try rejectDialogIrc(view, err, "That sound could not be sent.");
+                return;
+            };
 
             var display: std.ArrayList(u8) = .empty;
             defer display.deinit(gpa);
@@ -4474,7 +4510,7 @@ fn processWorkspaceMessages(
             redraw = (try applyChannelForward(workspace, client, state, &msg)) or redraw;
             if (msg.param(2)) |dest| {
                 if (dest.len > 1 and workspace.chantypes.contains(dest[0]))
-                    try client.queryMode(dest);
+                    client.queryMode(dest) catch |err| try ignoreTransientSend(err);
             }
         } else if (isNickFailureNumeric(msg.command)) {
             redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
@@ -4554,7 +4590,10 @@ fn processWorkspaceMessages(
                 if (room.pending_topic) |topic| {
                     try applyPendingTopic(client, room, workspace.gpa, topic);
                 }
-                try announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data);
+                announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data) catch |err| switch (err) {
+                    error.UnknownAvatar => {},
+                    else => try ignoreTransientSend(err),
+                };
                 if (state.away_message) |message| client.sendAwayControl(room.name, message) catch {};
                 republishRoomClientData(client, room, state.ircx_data);
                 redraw = true;
@@ -6183,6 +6222,13 @@ fn appendSessionNotice(workspace: *cc.client.workspace.Workspace, line: []const 
     }
 }
 
+fn ignoreTransientSend(err: anyerror) !void {
+    switch (err) {
+        error.TxBackpressure, error.InvalidUtf8 => {},
+        else => return err,
+    }
+}
+
 fn dialogIrcNotice(err: anyerror, notice: []const u8) ?[]const u8 {
     return switch (err) {
         error.InvalidIrcParameter => notice,
@@ -7125,7 +7171,7 @@ fn processComicControl(
         .not_control => {},
         .get_info => {
             const saved = if (preferences) |prefs| prefs.profileText() else source_default_profile;
-            try client.sendProfile(who, if (hasWireControl(saved)) source_default_profile else saved);
+            client.sendProfile(who, if (hasWireControl(saved)) source_default_profile else saved) catch |err| try ignoreTransientSend(err);
             return true;
         },
         .get_char_info => {
@@ -7134,7 +7180,10 @@ fn processComicControl(
                 reply_target
             else
                 who;
-            try announceRoomAvatar(client, dest, transcript.resolvedAvatar(self_nick), ircx_data);
+            announceRoomAvatar(client, dest, transcript.resolvedAvatar(self_nick), ircx_data) catch |err| switch (err) {
+                error.UnknownAvatar => {},
+                else => try ignoreTransientSend(err),
+            };
             return true;
         },
         .heres_info => |profile| {
@@ -7164,11 +7213,11 @@ fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8
     const payload = if (separator) |index| body[index + 1 ..] else null;
 
     if (std.ascii.eqlIgnoreCase(command, "VERSION") and payload == null) {
-        try client.ctcpReply(who, "VERSION", "ComicChat Zig Comic mode");
+        client.ctcpReply(who, "VERSION", "ComicChat Zig Comic mode") catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "PING")) {
-        try client.ctcpReply(who, "PING", payload orelse "");
+        client.ctcpReply(who, "PING", payload orelse "") catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "TIME") and payload == null) {
@@ -7191,25 +7240,25 @@ fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8
                 day_seconds.getSecondsIntoMinute(),
             },
         );
-        try client.ctcpReply(who, "TIME", value);
+        client.ctcpReply(who, "TIME", value) catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "EMAIL") and payload == null) {
         const saved = if (preferences) |prefs| prefs.email.items else "";
-        try client.ctcpReply(who, "EMAIL", if (hasWireControl(saved)) "" else saved);
+        client.ctcpReply(who, "EMAIL", if (hasWireControl(saved)) "" else saved) catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "URL") and payload == null) {
         const saved = if (preferences) |prefs| prefs.homepage.items else "";
-        try client.ctcpReply(who, "URL", if (hasWireControl(saved)) "" else saved);
+        client.ctcpReply(who, "URL", if (hasWireControl(saved)) "" else saved) catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "CLIENTINFO") and payload == null) {
-        try client.ctcpReply(who, "CLIENTINFO", "ACTION AWAY CLIENTINFO DCC EMAIL PING SOUND TIME URL VERSION X-COMICCHAT-CALL");
+        client.ctcpReply(who, "CLIENTINFO", "ACTION AWAY CLIENTINFO DCC EMAIL PING SOUND TIME URL VERSION X-COMICCHAT-CALL") catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "NETMEET")) {
-        try client.refuseLegacyNetMeeting(who);
+        client.refuseLegacyNetMeeting(who) catch |err| try ignoreTransientSend(err);
         return true;
     }
     // The source explicitly ignores X-VCHAT. Unknown CTCP must still be
@@ -7330,7 +7379,12 @@ fn handleInputKey(
                 const requested = composerSlashRest(line);
                 const selected = cc.comic.session.bundledAvatarByName(requested) orelse return true;
                 try transcript.setAvatar(nick, selected);
-                try announceRoomAvatar(client, channel, selected, ircx_data);
+                announceRoomAvatar(client, channel, selected, ircx_data) catch |err| switch (err) {
+                    error.UnknownAvatar => {},
+                    error.TxBackpressure => try transcript.addWithOptions("Server", "The connection is busy. Try again in a moment.", .{ .modes = cc.proto.udi.bm_action }),
+                    error.InvalidUtf8 => try transcript.addWithOptions("Server", "That text is not valid UTF-8.", .{ .modes = cc.proto.udi.bm_action }),
+                    else => return err,
+                };
                 return true;
             }
             const selected_mode = view.shell.say_mode;
@@ -8063,6 +8117,9 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expectEqualStrings("The connection is busy. Try again in a moment.", dialogIrcNotice(error.TxBackpressure, "nope").?);
     try std.testing.expectEqualStrings("nope", dialogIrcNotice(error.InvalidIrcParameter, "nope").?);
     try std.testing.expect(dialogIrcNotice(error.OutOfMemory, "nope") == null);
+    try ignoreTransientSend(error.TxBackpressure);
+    try ignoreTransientSend(error.InvalidUtf8);
+    try std.testing.expectError(error.OutOfMemory, ignoreTransientSend(error.OutOfMemory));
     try std.testing.expect(isVisibleServerWorkflowReply("REGISTER"));
     try std.testing.expect(isVisibleServerWorkflowReply("SASLINFO"));
     try std.testing.expect(isVisibleServerWorkflowReply("MEMO"));
