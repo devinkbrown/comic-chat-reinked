@@ -1724,7 +1724,7 @@ pub fn drawStatusBar(c: *Canvas, x: i32, y: i32, width: i32, height: i32, status
     if (hovered) c.fillRect(x + 4, y + 4, @max(1, badge_x - x - 10), @max(1, height - 8), current.navigation_hover);
     drawInkChip(c, .{ .x = badge_x, .y = y + 3, .w = badge_w, .h = @max(1, height - 6) }, members, false);
     const needs_connect = statusTone(status) != .success;
-    const action = if (needs_connect) "Connect" else "Live";
+    const action = if (needs_connect) "Wire" else "Live";
     const action_w = if (needs_connect or hovered or badge_x - x >= 220) Canvas.uiTextWidth(action) + 28 else 0;
     drawEllipsized(c, status, x + 24, y + 5, badge_x - x - 34 - action_w, current.navigation_ink);
     if (action_w > 0) drawInkChip(c, .{ .x = badge_x - action_w - 6, .y = y + 3, .w = action_w, .h = @max(1, height - 6) }, action, needs_connect or hovered);
@@ -1735,7 +1735,7 @@ pub fn statusTone(status: []const u8) NoticeTone {
     if (std.mem.indexOf(u8, status, "connected") != null and std.mem.indexOf(u8, status, "reconnecting") == null) return .success;
     if (std.mem.indexOf(u8, status, "error") != null or std.mem.indexOf(u8, status, "failed") != null) return .failure;
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return .warning;
-    if (std.mem.indexOf(u8, status, "reconnect") != null or std.mem.indexOf(u8, status, "offline") != null) return .warning;
+    if (std.mem.indexOf(u8, status, "reconnect") != null or std.mem.indexOf(u8, status, "offline") != null or std.mem.indexOf(u8, status, "Disconnected") != null or std.mem.indexOf(u8, status, "disconnected") != null) return .warning;
     return .info;
 }
 
@@ -1859,6 +1859,7 @@ test "semantic feedback primitives classify status and button targets" {
     try std.testing.expectEqual(NoticeTone.success, statusTone("On the wire"));
     try std.testing.expectEqual(NoticeTone.warning, statusTone("reconnecting"));
     try std.testing.expectEqual(NoticeTone.warning, statusTone("nickname in use"));
+    try std.testing.expectEqual(NoticeTone.warning, statusTone("Disconnected"));
     try std.testing.expectEqual(NoticeTone.failure, statusTone("connection failed"));
     try std.testing.expectEqual(DialogButton.primary, dialogButtonAt(layout, layout.primary.x + 1, layout.primary.y + 1).?);
     try std.testing.expectEqual(DialogButton.cancel, dialogButtonAt(layout, layout.cancel.x + 1, layout.cancel.y + 1).?);

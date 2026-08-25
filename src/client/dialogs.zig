@@ -80,7 +80,7 @@ pub const Field = struct { label: []const u8, hint: []const u8 = "", kind: Field
 
 pub const specs = [_]Spec{
     .{ .id = .about, .resource = "IDD_ABOUTBOX", .title = "About Comic Chat", .group = .files, .source_w = 279, .source_h = 137 },
-    .{ .id = .room_list, .resource = "IDD_ROOMLIST", .title = "Room list", .group = .rooms, .source_w = 400, .source_h = 255 },
+    .{ .id = .room_list, .resource = "IDD_ROOMLIST", .title = "Browse rooms", .group = .rooms, .source_w = 400, .source_h = 255 },
     .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Settings", .group = .application, .source_w = 360, .source_h = 300 },
     .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "CAST card", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose character", .group = .connection, .source_w = 360, .source_h = 260 },
@@ -89,7 +89,7 @@ pub const specs = [_]Spec{
     .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Sign-in name", .group = .connection, .source_w = 188, .source_h = 71 },
     .{ .id = .channel, .resource = "IDD_CHANNEL", .title = "Join room", .group = .rooms, .source_w = 144, .source_h = 110 },
     .{ .id = .channel_properties, .resource = "IDD_CHANNELPROP", .title = "Room properties", .group = .rooms, .source_w = 186, .source_h = 196 },
-    .{ .id = .ban, .resource = "IDD_BAN", .title = "Ban or unban", .group = .rooms, .source_w = 186, .source_h = 170 },
+    .{ .id = .ban, .resource = "IDD_BAN", .title = "Ban or release", .group = .rooms, .source_w = 186, .source_h = 170 },
     .{ .id = .invite, .resource = "IDD_INVITE", .title = "Invite CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .sound, .resource = "IDD_SOUND_DLG", .title = "Send sound", .group = .rooms, .source_w = 188, .source_h = 228 },
     .{ .id = .set_text_font, .resource = "IDD_SETTEXTFONT", .title = "Text font", .group = .connection, .source_w = 264, .source_h = 261 },
@@ -125,7 +125,7 @@ pub const specs = [_]Spec{
     .{ .id = .ircx_properties, .resource = "PORTABLE_IRCX_PROPERTIES", .title = "Named properties", .group = .rooms, .source_w = 300, .source_h = 210 },
     .{ .id = .room_access, .resource = "PORTABLE_ROOM_ACCESS", .title = "Room access", .group = .rooms, .source_w = 300, .source_h = 236 },
     .{ .id = .ircx_events, .resource = "PORTABLE_IRCX_EVENTS", .title = "Room events", .group = .rooms, .source_w = 300, .source_h = 184 },
-    .{ .id = .call_link, .resource = "PORTABLE_CALL_LINK", .title = "Call link", .group = .connection, .source_w = 300, .source_h = 184 },
+    .{ .id = .call_link, .resource = "PORTABLE_CALL_LINK", .title = "Send call link", .group = .connection, .source_w = 300, .source_h = 184 },
     .{ .id = .member_profile, .resource = "PORTABLE_MEMBER_PROFILE", .title = "CAST profile", .group = .connection, .source_w = 300, .source_h = 132 },
     .{ .id = .open_locator, .resource = "PORTABLE_OPEN_LOCATOR", .title = "Open locator", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .recent_files, .resource = "PORTABLE_RECENT_FILES", .title = "Recent conversations", .group = .files, .source_w = 340, .source_h = 150 },
@@ -490,6 +490,9 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Topic, greeting, or other room properties", fields(.ircx_properties)[1].hint);
     try std.testing.expectEqualStrings("Account pattern", fields(.notifications)[1].label);
     try std.testing.expectEqualStrings("Address pattern", fields(.notifications)[2].label);
+    try std.testing.expectEqualStrings("Browse rooms", get(.room_list).title);
+    try std.testing.expectEqualStrings("Ban or release", get(.ban).title);
+    try std.testing.expectEqualStrings("Send call link", get(.call_link).title);
     try std.testing.expectEqualStrings("Voice", choiceOptions(.room_access, 1)[0]);
     try std.testing.expectEqualStrings("Read common properties", choiceOptions(.ircx_properties, 3)[1]);
     try std.testing.expectEqualStrings("Show", choiceOptions(.room_access, 0)[0]);

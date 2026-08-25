@@ -335,8 +335,8 @@ pub const View = struct {
                 self.hovered_context_item = null;
                 self.focused_context_item = null;
             },
-            .up => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse 0, false, self.can_moderate, self.wire_live),
-            .down => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate, self.wire_live),
+            .up, .left => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse 0, false, self.can_moderate, self.wire_live),
+            .down, .right => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate, self.wire_live),
             .home => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live),
             .end => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate, self.wire_live),
             .enter => return self.activateFocusedContextItem(),
@@ -2111,8 +2111,8 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             else => "Settings",
         },
         2 => switch (item) {
-            0 => "Comic view",
-            1 => "Text view",
+            0 => "Sunday page",
+            1 => "Conversation",
             2 => "Show CAST",
             3 => "CAST icons",
             4 => "CAST list",
@@ -2129,7 +2129,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             else => "Underline selection",
         },
         4 => switch (item) {
-            0 => "Room list",
+            0 => "Browse rooms",
             1 => "Join room",
             2 => "Create room",
             3 => "Room properties",
@@ -2147,7 +2147,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Whisper",
             3 => "Invite CAST",
             4 => "Kick CAST",
-            5 => "Ban or unban",
+            5 => "Ban or release",
             6 => "File transfer",
             else => "Send call link",
         },
@@ -2362,9 +2362,9 @@ fn contextItemLabel(kind: ContextKind, item: u8, frozen: bool) []const u8 {
         .member => switch (item) {
             0 => "Whisper",
             1 => "CAST profile",
-            2 => "Invite to room",
-            3 => "Kick from room",
-            else => "Ban or unban",
+            2 => "Invite CAST",
+            3 => "Kick CAST",
+            else => "Ban or release",
         },
         .body_camera => switch (item) {
             0 => if (frozen) "Unfreeze expression" else "Freeze expression",
@@ -2461,8 +2461,8 @@ fn toolbarLabel(index: u8) []const u8 {
         2 => "Join room",
         3 => "Leave room",
         4 => "Create room",
-        5 => "Comic view",
-        6 => "Text view",
+        5 => "Sunday page",
+        6 => "Conversation",
         7 => "Browse rooms",
         8 => "Show or hide CAST",
         9 => "Favorite rooms",
@@ -2947,7 +2947,7 @@ fn drawStatusTabTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8)
 
 fn drawStatusBarTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
     const label = statusBarLabel(status);
-    const hint = if (ui.statusTone(status) == .success) "Live" else "Connect";
+    const hint = if (ui.statusTone(status) == .success) "Live" else "Wire";
     const width = @min(260, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
     const x = std.math.clamp(layout.status.x + 8, 6, @max(6, layout.status.right() - width - 6));
     ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.status.y - 34, .w = width, .h = 28 }, label, hint);
@@ -3033,8 +3033,8 @@ const EmptyPageCopy = struct { title: []const u8, detail: []const u8, waiting: b
 
 fn emptyPageCopy(status: []const u8) EmptyPageCopy {
     const tone = ui.statusTone(status);
-    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - click Connect", .waiting = true };
-    if (std.mem.indexOf(u8, status, "offline") != null) return .{ .title = "Sunday page is offline", .detail = "Connect to ink the first balloon", .waiting = true };
+    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - open Connection setup", .waiting = true };
+    if (isOfflineStatus(status)) return .{ .title = "Sunday page is offline", .detail = "Connect to ink the first balloon", .waiting = true };
     if (tone != .success) return .{ .title = "Sunday page is waiting", .detail = "Waiting for the wire", .waiting = true };
     return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
 }
@@ -3049,7 +3049,7 @@ fn emptyCastCopy(status: []const u8) []const u8 {
 fn composerPlaceholder(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .failure) return "Wire failed - Connect, then ink...";
-    if (std.mem.indexOf(u8, status, "offline") != null) return "Connect, then ink the next balloon...";
+    if (isOfflineStatus(status)) return "Connect, then ink the next balloon...";
     if (tone != .success) return "Waiting on the wire...";
     return "Ink the next balloon...";
 }
@@ -3059,7 +3059,7 @@ fn statusTabLabel(status: []const u8) []const u8 {
     if (tone == .success) return "Live";
     if (tone == .failure) return "Fail";
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Name";
-    if (std.mem.indexOf(u8, status, "offline") != null) return "Off";
+    if (isOfflineStatus(status)) return "Off";
     return "Wait";
 }
 
@@ -3068,7 +3068,7 @@ fn statusPanelHeading(status: []const u8) []const u8 {
     if (tone == .success) return "On the wire";
     if (tone == .failure) return "Wire failed";
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken";
-    if (std.mem.indexOf(u8, status, "offline") != null) return "Sunday page is offline";
+    if (isOfflineStatus(status)) return "Sunday page is offline";
     if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
@@ -3081,7 +3081,7 @@ fn statusPanelDetail(status: []const u8) []const u8 {
     if (tone == .success) return "Live";
     if (tone == .failure) return failureStatusLabel(status);
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Choose another sign-in name";
-    if (std.mem.indexOf(u8, status, "offline") != null) return "Connect to ink the first balloon";
+    if (isOfflineStatus(status)) return "Connect to ink the first balloon";
     return "Waiting for the wire";
 }
 
@@ -3089,8 +3089,8 @@ fn statusBarLabel(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "On the wire";
     if (tone == .failure) return failureStatusLabel(status);
-    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - click Connect";
-    if (std.mem.indexOf(u8, status, "offline") != null) return "Sunday page is offline";
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - open Connection setup";
+    if (isOfflineStatus(status)) return "Sunday page is offline - open Connection setup";
     if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
@@ -3098,13 +3098,17 @@ fn statusBarLabel(status: []const u8) []const u8 {
     return "Waiting on the wire";
 }
 
+fn isOfflineStatus(status: []const u8) bool {
+    return std.mem.indexOf(u8, status, "offline") != null or std.mem.indexOf(u8, status, "Disconnected") != null or std.mem.indexOf(u8, status, "disconnected") != null;
+}
+
 fn failureStatusLabel(status: []const u8) []const u8 {
-    if (std.mem.indexOf(u8, status, "(refused)") != null) return "Wire failed (refused) - click Connect";
-    if (std.mem.indexOf(u8, status, "(timeout)") != null) return "Wire failed (timeout) - click Connect";
-    if (std.mem.indexOf(u8, status, "(reset)") != null) return "Wire failed (reset) - click Connect";
-    if (std.mem.indexOf(u8, status, "(TLS)") != null) return "Wire failed (TLS) - click Connect";
-    if (std.mem.indexOf(u8, status, "(unreachable)") != null) return "Wire failed (unreachable) - click Connect";
-    return "Wire failed - click Connect";
+    if (std.mem.indexOf(u8, status, "(refused)") != null) return "Wire failed (refused) - open Connection setup";
+    if (std.mem.indexOf(u8, status, "(timeout)") != null) return "Wire failed (timeout) - open Connection setup";
+    if (std.mem.indexOf(u8, status, "(reset)") != null) return "Wire failed (reset) - open Connection setup";
+    if (std.mem.indexOf(u8, status, "(TLS)") != null) return "Wire failed (TLS) - open Connection setup";
+    if (std.mem.indexOf(u8, status, "(unreachable)") != null) return "Wire failed (unreachable) - open Connection setup";
+    return "Wire failed - open Connection setup";
 }
 
 fn drawEmptyBuffer(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8, columns: u8) void {
@@ -3374,6 +3378,14 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
             else => "",
         },
         .ban => if (index == 0) "NAME" else "",
+        .kick => if (index == 0) "CAST" else "",
+        .call_link => if (index == 0) "CALL" else "",
+        .member_profile => if (index == 0) "CARD" else "",
+        .sound => if (index == 0) "PLAY" else "",
+        .invitation => if (index == 0) "JOIN" else "",
+        .comics_view => if (index == 0) "PAGE" else "",
+        .character => if (index == 0) "PAGE" else "",
+        .motd => if (index == 0) "LIST" else "",
         else => "",
     };
 }
@@ -3391,21 +3403,24 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
     }
     return switch (id) {
         .setup, .servers => "Verified TLS on 6697 is the Sunday default",
-        .connection_features => if (std.mem.eql(u8, first_value, "Offline") or std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "",
-        .room_list => "Search rooms after the wire is live",
-        .user_list => "Pick a CAST member after the wire is live",
-        .channel, .channel_create => "Join after the wire is live",
-        .whisper => "Whisper after the wire is live",
-        .invite => "Invite after the wire is live",
-        .kick, .ban, .room_access, .ircx_properties => "Moderation after the wire is live",
-        .ircx_events => "Watch room, CAST, server, or wire events after the wire is live",
-        .invitation => "Accept after the wire is live",
-        .channel_properties => "Room topic and limits after the wire is live",
-        .file_transfer => "Offer or accept a file after the wire is live",
-        .call_link => "Send a meeting link after the wire is live",
-        .member_profile => "Request a profile after the wire is live",
-        .notifications, .notification_users => "Watch who comes online after the wire is live",
-        .sound => "Play a sound after the wire is live",
+        .connection_features => if (std.mem.eql(u8, first_value, "Offline") or std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "What this wire is offering",
+        .room_list => "Search by name or size, then join",
+        .user_list => "Choose a CAST member from the list",
+        .channel, .channel_create => "Enter a room beginning with # or &",
+        .whisper => "Send a quiet balloon to one CAST member",
+        .invite => "Invite CAST to this room",
+        .kick => "Remove CAST from this room",
+        .ban => "Keep a name pattern off this room",
+        .room_access => "Grant, deny, or show room access",
+        .ircx_properties => "Read or write named room properties",
+        .ircx_events => "Watch room, CAST, server, or wire events",
+        .invitation => "Accept an invitation to a room",
+        .channel_properties => "Topic, options, and CAST limit for this room",
+        .file_transfer => "Offer or accept a file with CAST",
+        .call_link => "Send a meeting link to CAST",
+        .member_profile => "Request a CAST profile",
+        .notifications, .notification_users => "Watch who comes onto the wire",
+        .sound => "Play a sound with the next balloon",
         .personal => "Shown on your CAST card",
         .nickname => "Used on the wire and the Sunday page",
         .away => "Posted while you are away",
@@ -3422,6 +3437,8 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .create_set => "Name a new rule set",
         .advanced_event_params => "How often this rule may fire",
         .advanced_rule_settings => "Enable matching and case",
+        .recent_files => "Open a recent conversation",
+        .favorite_rooms => "Join or update a favorite room",
         .open_conversation => "Open a saved conversation",
         .save_conversation => "Save this conversation",
         .export_image => "Export the Sunday page as an image",
@@ -3453,6 +3470,14 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .sound => "Choose a sound and message",
         .comics_view => "Sunday page or conversation",
         .about => "Portable Ink Sunday client",
+        .room_list => "Search rooms, then join",
+        .whisper => "A quiet balloon for one CAST member",
+        .kick => "Remove CAST from this room",
+        .ban => "Keep a name pattern off this room",
+        .invite => "Invite CAST to this room",
+        .invitation => "Accept an invitation to a room",
+        .call_link => "Send a meeting link to CAST",
+        .member_profile => "Request a CAST profile",
         else => switch (spec.group) {
             .application => "Ink Sunday preferences",
             .connection => "Wire, identity, and appearance",
@@ -3790,6 +3815,10 @@ test "context menu keyboard skips disabled moderation controls" {
     view.openContextMenu(.member, 200, 200);
     try std.testing.expectEqual(@as(?u8, 0), view.focused_context_item);
     _ = view.handleContextMenuKey(.end);
+    try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
+    _ = view.handleContextMenuKey(.left);
+    try std.testing.expectEqual(@as(?u8, 1), view.focused_context_item);
+    _ = view.handleContextMenuKey(.right);
     try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
     _ = view.handleContextMenuKey(.escape);
     try std.testing.expect(view.context_menu == null);
@@ -4454,7 +4483,7 @@ test "view menu layout commands ask the host to persist settings" {
 test "empty page, CAST, composer, and status copy follow the wire" {
     const failed = emptyPageCopy("Connection failed - click for settings");
     try std.testing.expectEqualStrings("Sunday page could not connect", failed.title);
-    try std.testing.expectEqualStrings("Wire failed - click Connect", failed.detail);
+    try std.testing.expectEqualStrings("Wire failed - open Connection setup", failed.detail);
     try std.testing.expect(failed.waiting);
     try std.testing.expectEqualStrings("Wire failed", emptyCastCopy("Connection failed - click for settings"));
     try std.testing.expectEqualStrings("Wire failed - Connect, then ink...", composerPlaceholder("Connection failed - click for settings"));
@@ -4479,10 +4508,12 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Ink the next balloon...", composerPlaceholder("connected"));
     try std.testing.expectEqualStrings("On the wire", statusPanelHeading("connected"));
     try std.testing.expectEqualStrings("On the wire", statusBarLabel("connected"));
-    try std.testing.expectEqualStrings("Sunday page is offline", statusBarLabel("offline"));
+    try std.testing.expectEqualStrings("Sunday page is offline - open Connection setup", statusBarLabel("offline"));
+    try std.testing.expectEqualStrings("Sunday page is offline - open Connection setup", statusBarLabel("Disconnected"));
+    try std.testing.expectEqualStrings("Off", statusTabLabel("Disconnected"));
     try std.testing.expectEqualStrings("Waiting on the wire", statusBarLabel("reconnecting"));
-    try std.testing.expectEqualStrings("Wire failed (refused) - click Connect", statusBarLabel("Connection failed (refused) - click for settings"));
-    try std.testing.expectEqualStrings("Wire failed (refused) - click Connect", statusPanelDetail("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - open Connection setup", statusBarLabel("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - open Connection setup", statusPanelDetail("Connection failed (refused) - click for settings"));
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
     try std.testing.expectEqualStrings("Live", statusTabLabel("connected"));
     try std.testing.expectEqualStrings("Off", statusTabLabel("offline"));
@@ -4493,13 +4524,13 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
     try std.testing.expectEqualStrings("Name", statusTabLabel("nickname in use"));
     try std.testing.expectEqualStrings("Sign-in name is taken", statusPanelHeading("nickname in use"));
-    try std.testing.expectEqualStrings("Sign-in name is taken - click Connect", statusBarLabel("nickname in use"));
+    try std.testing.expectEqualStrings("Sign-in name is taken - open Connection setup", statusBarLabel("nickname in use"));
     try std.testing.expectEqualStrings("Signing in on the wire", statusBarLabel("registering"));
     try std.testing.expectEqualStrings("Joining the Sunday page", statusBarLabel("joining"));
     try std.testing.expectEqualStrings("Opening a verified wire", statusBarLabel("upgrading to TLS"));
     try std.testing.expectEqualStrings("Connecting to the wire", statusBarLabel("connecting"));
     try std.testing.expectEqualStrings("Show or hide CAST", toolbarLabel(8));
-    try std.testing.expectEqualStrings("Search rooms after the wire is live", dialogHelper(.room_list, ""));
+    try std.testing.expectEqualStrings("Search by name or size, then join", dialogHelper(.room_list, ""));
     try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
     try std.testing.expectEqualStrings("Bulletin", menuItemLabel(4, 5));
     try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
@@ -4518,7 +4549,20 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Backdrop", menuItemLabel(3, 2));
     try std.testing.expectEqualStrings("Open a saved locator", dialogHelper(.open_locator, ""));
     try std.testing.expectEqualStrings("CAST profile", menuItemLabel(5, 1));
-    try std.testing.expectEqualStrings("Watch room, CAST, server, or wire events after the wire is live", dialogHelper(.ircx_events, ""));
+    try std.testing.expectEqualStrings("Watch room, CAST, server, or wire events", dialogHelper(.ircx_events, ""));
+    try std.testing.expectEqualStrings("Sunday page", menuItemLabel(2, 0));
+    try std.testing.expectEqualStrings("Conversation", menuItemLabel(2, 1));
+    try std.testing.expectEqualStrings("Sunday page", toolbarLabel(5));
+    try std.testing.expectEqualStrings("Conversation", toolbarLabel(6));
+    try std.testing.expectEqualStrings("Browse rooms", menuItemLabel(4, 0));
+    try std.testing.expectEqualStrings("Ban or release", menuItemLabel(5, 5));
+    try std.testing.expectEqualStrings("Invite CAST", contextItemLabel(.member, 2, false));
+    try std.testing.expectEqualStrings("Kick CAST", contextItemLabel(.member, 3, false));
+    try std.testing.expectEqualStrings("Ban or release", contextItemLabel(.member, 4, false));
+    try std.testing.expectEqualStrings("Send a quiet balloon to one CAST member", dialogHelper(.whisper, ""));
+    try std.testing.expectEqualStrings("Keep a name pattern off this room", dialogHelper(.ban, ""));
+    try std.testing.expectEqualStrings("Send a meeting link to CAST", dialogHelper(.call_link, ""));
+    try std.testing.expectEqualStrings("CALL", settingsKicker(.call_link, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
     try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 6));
