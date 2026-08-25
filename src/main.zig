@@ -4382,6 +4382,7 @@ fn applyLiveChannelKey(
 
 fn isCommandFailureNumeric(command: []const u8) bool {
     return std.mem.eql(u8, command, "401") or
+        std.mem.eql(u8, command, "403") or
         std.mem.eql(u8, command, "404") or
         std.mem.eql(u8, command, "412") or
         std.mem.eql(u8, command, "417") or
@@ -4487,9 +4488,9 @@ fn applyCommandFailure(
     const detail = msg.param(2) orelse msg.command;
     var buf: [280]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s} {s}: {s}", .{ msg.command, subject, detail }) catch "Command failed.";
-    if (std.mem.eql(u8, msg.command, "442") and subject.len > 0) {
-        // TOPIC/MODE/KICK 442 means the seat is gone, not that the user left.
-        // Keep want_rejoin and restoration so 001 still JOINs the room.
+    if ((std.mem.eql(u8, msg.command, "442") or std.mem.eql(u8, msg.command, "403")) and subject.len > 0) {
+        // TOPIC/MODE/KICK 442 or Ban/send 403 on a seated room means the seat
+        // is gone, not that the user left. Keep want_rejoin and restoration.
         if (workspace.find(subject)) |room_index|
             workspace.rooms.items[room_index].joined = false;
         refreshJoinedState(workspace, state, "joining");
@@ -4543,8 +4544,7 @@ fn appendIdentityLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.
 }
 
 fn isJoinDeniedNumeric(command: []const u8) bool {
-    return std.mem.eql(u8, command, "403") or
-        std.mem.eql(u8, command, "405") or
+    return std.mem.eql(u8, command, "405") or
         std.mem.eql(u8, command, "471") or
         std.mem.eql(u8, command, "473") or
         std.mem.eql(u8, command, "474") or
@@ -4560,7 +4560,7 @@ fn isJoinDeniedReply(msg: *const cc.net.message.Message, workspace: *const cc.cl
     if (std.mem.eql(u8, msg.command, "437") or
         std.mem.eql(u8, msg.command, "476") or
         std.mem.eql(u8, msg.command, "477")) return true;
-    if (!std.mem.eql(u8, msg.command, "489")) return false;
+    if (!std.mem.eql(u8, msg.command, "403") and !std.mem.eql(u8, msg.command, "489")) return false;
     if (workspace.find(target)) |index| return !workspace.rooms.items[index].joined;
     return true;
 }
@@ -5863,6 +5863,11 @@ test "live roster room lookup includes MODE KICK and topic numerics" {
     workspace.rooms.items[root].joined = true;
     try std.testing.expect(!isJoinDeniedReply(&secure, &workspace));
     try std.testing.expect(isCommandFailureNumeric("489"));
+    const missing = cc.net.message.parse(":server 403 me #ghost :No such channel");
+    try std.testing.expect(isJoinDeniedReply(&missing, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("403"));
+    const seated = cc.net.message.parse(":server 403 me #root :No such channel");
+    try std.testing.expect(!isJoinDeniedReply(&seated, &workspace));
 }
 
 test "channel mode and invite lines land in the matching room" {
@@ -5987,6 +5992,18 @@ test "self leave and join denial clear membership without a live socket" {
     try std.testing.expect(!isJoinDeniedReply(&bad_mask, &workspace));
     try std.testing.expect(isCommandFailureNumeric("476"));
     try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &bad_mask));
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
+
+    const nosuch_join = cc.net.message.parse(":server 403 me #ghost :No such channel");
+    try std.testing.expect(isJoinDeniedReply(&nosuch_join, &workspace));
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &nosuch_join));
+
+    workspace.rooms.items[root].joined = true;
+    workspace.rooms.items[root].setWantRejoin(true);
+    const nosuch_send = cc.net.message.parse(":server 403 me #root :No such channel");
+    try std.testing.expect(!isJoinDeniedReply(&nosuch_send, &workspace));
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &nosuch_send));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
     try std.testing.expect(workspace.rooms.items[root].want_rejoin);
 }
 
