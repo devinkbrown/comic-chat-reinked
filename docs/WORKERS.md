@@ -81,8 +81,11 @@ hash.
   system `%L`, capped file size/entries/include depth). A US evdev fallback
   remains before the first keymap arrives or for an out-of-scope keysym. Do
   not claim a full input-method editor — committed IME text uses
-  text-input-v3 when advertised; see `xkb.zig` and `compose_file.zig` for
-  the exact parsing scope.
+  text-input-v3 when advertised, with a multiline hint and a bounded
+  composer-strip cursor rectangle. X11 claims focus via `WM_TAKE_FOCUS` /
+  FocusIn and does not speak XIM. See `xkb.zig` and `compose_file.zig` for
+  the exact parsing scope. Do not add an AT-SPI bus or a Wayland→X11
+  fallback.
 
 ## Change rules
 

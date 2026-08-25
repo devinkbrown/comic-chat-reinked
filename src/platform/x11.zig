@@ -12,8 +12,10 @@
 //!     translation (GetKeyboardMapping, including Mod5/AltGr and bounded
 //!     dead-key/Multi_key compose plus optional XCompose locale tables),
 //!     integer HiDPI scale, ICCCM CLIPBOARD+PRIMARY (INCR, UTF8_STRING then
-//!     STRING/TEXT), EWMH ping/type/icon name/user time, WM size hints, and
-//!     resize/close events, suitable for a poll(2)-driven client event loop.
+//!     STRING/TEXT/GTK text MIME, TIMESTAMP, clipboard-manager handoff),
+//!     EWMH ping/type/icon name/user time/allowed actions, WM_TAKE_FOCUS,
+//!     WM_LOCALE_NAME, WM size hints, and resize/close events, suitable for
+//!     a poll(2)-driven client event loop.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -33,6 +35,7 @@ const event_button_release: u32 = 1 << 3;
 const event_pointer_motion: u32 = 1 << 6;
 const event_exposure: u32 = 1 << 15;
 const event_structure: u32 = 1 << 17;
+const event_focus_change: u32 = 1 << 21;
 const event_property_change: u32 = 1 << 22;
 
 const cw_back_pixel: u32 = 1 << 1;
@@ -44,6 +47,7 @@ const gc_background: u32 = 1 << 3;
 
 const atom_atom = 4;
 const atom_cardinal = 6;
+const atom_integer = 19;
 const atom_string = 31;
 const atom_primary = 1;
 const atom_wm_class = 67;
@@ -91,7 +95,15 @@ const XConn = struct {
     net_wm_user_time: u32 = 0,
     net_wm_window_type: u32 = 0,
     net_wm_window_type_normal: u32 = 0,
+    net_wm_allowed_actions: u32 = 0,
+    wm_take_focus: u32 = 0,
+    wm_locale_name: u32 = 0,
     text: u32 = 0,
+    timestamp: u32 = 0,
+    clipboard_manager: u32 = 0,
+    save_targets: u32 = 0,
+    mime_text_plain: u32 = 0,
+    mime_text_utf8: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -246,6 +258,8 @@ pub const Window = struct {
     incr_property: u32,
     incr_target: u32,
     incr_offset: usize,
+    clipboard_time: u32,
+    last_user_time: u32,
     compose_table: ?xkb.ComposeTable,
     compose: xkb.Compose,
 
@@ -290,6 +304,8 @@ pub const Window = struct {
             .incr_property = 0,
             .incr_target = 0,
             .incr_offset = 0,
+            .clipboard_time = 0,
+            .last_user_time = 0,
             .compose_table = null,
             .compose = .{},
         };
@@ -320,6 +336,8 @@ pub const Window = struct {
         try setNetWmPid(&self.conn, self.window);
         try setWmHints(&self.conn, self.window);
         try setNetWmWindowType(&self.conn, self.window);
+        try setAllowedActions(&self.conn, self.window);
+        try setWmLocaleName(&self.conn, self.window, env);
         try setClientMachine(&self.conn, self.window);
         try setSizeHints(&self.conn, self.window, w, h);
         self.keymap = try fetchKeymap(gpa, &self.conn);
@@ -329,6 +347,7 @@ pub const Window = struct {
     }
 
     pub fn deinit(self: *Window) void {
+        self.handoverClipboard();
         if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         self.keymap.deinit(self.gpa);
         self.conn.stream.close(self.conn.io);
@@ -459,6 +478,7 @@ pub const Window = struct {
                     self.last_primary_x = x;
                     self.last_primary_y = y;
                 }
+                if (kind == 4) self.claimFocus(get32(event[4..8]));
                 return .{ .pointer = .{
                     .kind = if (kind == 4) .down else .up,
                     .x = x,
@@ -467,6 +487,11 @@ pub const Window = struct {
                     .clicks = clicks,
                 } };
             },
+            9 => { // FocusIn
+                self.claimFocus(self.last_user_time);
+                return .other;
+            },
+            10 => return .other, // FocusOut
             12 => return .expose,
             17 => return .close, // DestroyNotify
             22 => { // ConfigureNotify
@@ -503,6 +528,9 @@ pub const Window = struct {
                     if (self.conn.net_wm_ping != 0 and protocol == self.conn.net_wm_ping) {
                         self.replyNetWmPing(event) catch {};
                     }
+                    if (self.conn.wm_take_focus != 0 and protocol == self.conn.wm_take_focus) {
+                        self.claimFocus(get32(event[16..20]));
+                    }
                 }
                 return .other;
             },
@@ -516,8 +544,9 @@ pub const Window = struct {
         const copy = try self.gpa.dupe(u8, text);
         if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         self.clipboard_text = copy;
-        try setSelectionOwner(&self.conn, self.window, self.conn.clipboard);
-        try setSelectionOwner(&self.conn, self.window, atom_primary);
+        self.clipboard_time = if (self.last_user_time != 0) self.last_user_time else 1;
+        try setSelectionOwner(&self.conn, self.window, self.conn.clipboard, self.clipboard_time);
+        try setSelectionOwner(&self.conn, self.window, atom_primary, self.clipboard_time);
         self.owns_clipboard = true;
         self.owns_primary = true;
     }
@@ -547,6 +576,14 @@ pub const Window = struct {
                 gpa.free(bytes);
             }
         } else |_| {}
+        if (self.conn.mime_text_utf8 != 0) {
+            if (self.convertTarget(gpa, selection, self.conn.mime_text_utf8, self.conn.mime_text_utf8)) |text| {
+                if (text) |bytes| {
+                    if (bytes.len != 0) return bytes;
+                    gpa.free(bytes);
+                }
+            } else |_| {}
+        }
         if (self.conn.text == 0) return null;
         return self.convertTarget(gpa, selection, self.conn.text, self.conn.text);
     }
@@ -610,8 +647,14 @@ pub const Window = struct {
     }
 
     fn noteUserTime(self: *Window, time: u32) void {
+        if (time != 0) self.last_user_time = time;
         if (self.conn.net_wm_user_time == 0 or time == 0) return;
         changeProperty32(&self.conn, self.window, self.conn.net_wm_user_time, atom_cardinal, &.{time}) catch {};
+    }
+
+    fn claimFocus(self: *Window, time: u32) void {
+        const stamp = if (time != 0) time else self.last_user_time;
+        setInputFocus(&self.conn, self.window, stamp) catch {};
     }
 
     fn replyNetWmPing(self: *Window, event: [32]u8) !void {
@@ -709,10 +752,43 @@ pub const Window = struct {
         var served: u32 = 0;
         if (ours and property != 0) {
             if (target == self.conn.targets) {
-                const atoms = [_]u32{ self.conn.targets, self.conn.utf8_string, atom_string, self.conn.text, self.conn.incr };
-                try changePropertyAtoms(&self.conn, requestor, property, &atoms);
+                var atoms: [8]u32 = undefined;
+                var n: usize = 0;
+                atoms[n] = self.conn.targets;
+                n += 1;
+                if (self.conn.timestamp != 0) {
+                    atoms[n] = self.conn.timestamp;
+                    n += 1;
+                }
+                if (self.conn.utf8_string != 0) {
+                    atoms[n] = self.conn.utf8_string;
+                    n += 1;
+                }
+                atoms[n] = atom_string;
+                n += 1;
+                if (self.conn.text != 0) {
+                    atoms[n] = self.conn.text;
+                    n += 1;
+                }
+                if (self.conn.mime_text_utf8 != 0) {
+                    atoms[n] = self.conn.mime_text_utf8;
+                    n += 1;
+                }
+                if (self.conn.mime_text_plain != 0) {
+                    atoms[n] = self.conn.mime_text_plain;
+                    n += 1;
+                }
+                if (self.conn.incr != 0) {
+                    atoms[n] = self.conn.incr;
+                    n += 1;
+                }
+                try changePropertyAtoms(&self.conn, requestor, property, atoms[0..n]);
                 served = property;
-            } else if (target == self.conn.utf8_string or target == atom_string or target == self.conn.text) {
+            } else if (target == self.conn.timestamp) {
+                const stamp = if (self.clipboard_time != 0) self.clipboard_time else 1;
+                try changeProperty32(&self.conn, requestor, property, atom_integer, &.{stamp});
+                served = property;
+            } else if (isClipboardTextTarget(&self.conn, target)) {
                 if (self.clipboard_text.len > incrThreshold(&self.conn) and self.conn.incr != 0) {
                     try selectPropertyNotify(&self.conn, requestor);
                     const size: u32 = @intCast(self.clipboard_text.len);
@@ -753,6 +829,44 @@ pub const Window = struct {
         const n = @min(self.clipboard_text.len - start, incr_chunk_bytes);
         try changePropertyBytes(&self.conn, self.incr_requestor, self.incr_property, self.incr_target, self.clipboard_text[start .. start + n]);
         self.incr_offset = start + n;
+    }
+
+    fn handoverClipboard(self: *Window) void {
+        if (!self.owns_clipboard or self.clipboard_text.len == 0) return;
+        if (self.conn.clipboard_manager == 0 or self.conn.save_targets == 0) return;
+        const owner = getSelectionOwner(&self.conn, self.conn.clipboard_manager) catch return;
+        if (owner == 0) return;
+        var targets: [5]u32 = undefined;
+        var n: usize = 0;
+        if (self.conn.utf8_string != 0) {
+            targets[n] = self.conn.utf8_string;
+            n += 1;
+        }
+        targets[n] = atom_string;
+        n += 1;
+        if (self.conn.text != 0) {
+            targets[n] = self.conn.text;
+            n += 1;
+        }
+        if (self.conn.mime_text_utf8 != 0) {
+            targets[n] = self.conn.mime_text_utf8;
+            n += 1;
+        }
+        if (self.conn.mime_text_plain != 0) {
+            targets[n] = self.conn.mime_text_plain;
+            n += 1;
+        }
+        changePropertyAtoms(&self.conn, self.window, self.conn.save_targets, targets[0..n]) catch return;
+        convertSelection(&self.conn, self.window, self.conn.clipboard_manager, self.conn.save_targets, self.conn.save_targets) catch return;
+        var attempts: u16 = 0;
+        while (attempts < 32) : (attempts += 1) {
+            var raw: [32]u8 = undefined;
+            readExact(&self.conn, &raw) catch return;
+            const kind = raw[0] & 0x7f;
+            if (kind == 31) return;
+            _ = self.handleProtocolEvent(raw);
+            if (kind == 0) return;
+        }
     }
 };
 
@@ -895,7 +1009,7 @@ fn createWindow(conn: *XConn, window: u32, w: u16, h: u16) !void {
         conn.screen.black_pixel,
         event_key_press | event_button_press | event_button_release |
             event_pointer_motion | event_exposure | event_structure |
-            event_property_change,
+            event_focus_change | event_property_change,
     };
     const value_mask = cw_back_pixel | cw_border_pixel | cw_event_mask;
     var req: [44]u8 = @splat(0);
@@ -931,20 +1045,10 @@ fn installWmClose(conn: *XConn, window: u32) !void {
     conn.wm_protocols = try internAtom(conn, "WM_PROTOCOLS");
     conn.wm_delete_window = try internAtom(conn, "WM_DELETE_WINDOW");
     if (conn.net_wm_ping == 0) conn.net_wm_ping = try internAtom(conn, "_NET_WM_PING");
+    if (conn.wm_take_focus == 0) conn.wm_take_focus = try internAtom(conn, "WM_TAKE_FOCUS");
 
-    const atoms = [_]u32{ conn.wm_delete_window, conn.net_wm_ping };
-    var req: [32]u8 = @splat(0);
-    req[0] = 18;
-    req[1] = prop_replace;
-    put16(req[2..4], @intCast(req.len / 4));
-    put32(req[4..8], window);
-    put32(req[8..12], conn.wm_protocols);
-    put32(req[12..16], atom_atom);
-    req[16] = 32;
-    put32(req[20..24], atoms.len);
-    put32(req[24..28], atoms[0]);
-    put32(req[28..32], atoms[1]);
-    try writeAll(conn, &req);
+    const atoms = [_]u32{ conn.wm_delete_window, conn.net_wm_ping, conn.wm_take_focus };
+    try changePropertyAtoms(conn, window, conn.wm_protocols, &atoms);
 }
 
 fn setTitle(conn: *XConn, window: u32, title: []const u8) !void {
@@ -987,6 +1091,31 @@ fn setWmHints(conn: *XConn, window: u32) !void {
 fn setNetWmWindowType(conn: *XConn, window: u32) !void {
     if (conn.net_wm_window_type == 0 or conn.net_wm_window_type_normal == 0) return;
     try changeProperty32(conn, window, conn.net_wm_window_type, atom_atom, &.{conn.net_wm_window_type_normal});
+}
+
+fn setAllowedActions(conn: *XConn, window: u32) !void {
+    if (conn.net_wm_allowed_actions == 0) return;
+    const move = internAtom(conn, "_NET_WM_ACTION_MOVE") catch return;
+    const resize = internAtom(conn, "_NET_WM_ACTION_RESIZE") catch return;
+    const minimize = internAtom(conn, "_NET_WM_ACTION_MINIMIZE") catch return;
+    const maximize_horz = internAtom(conn, "_NET_WM_ACTION_MAXIMIZE_HORZ") catch return;
+    const maximize_vert = internAtom(conn, "_NET_WM_ACTION_MAXIMIZE_VERT") catch return;
+    const fullscreen = internAtom(conn, "_NET_WM_ACTION_FULLSCREEN") catch return;
+    const close = internAtom(conn, "_NET_WM_ACTION_CLOSE") catch return;
+    try changePropertyAtoms(conn, window, conn.net_wm_allowed_actions, &.{
+        move, resize, minimize, maximize_horz, maximize_vert, fullscreen, close,
+    });
+}
+
+fn setWmLocaleName(conn: *XConn, window: u32, env: []const u8) !void {
+    if (conn.wm_locale_name == 0) return;
+    const locale = services.environValue(env, "LC_ALL") orelse
+        services.environValue(env, "LC_CTYPE") orelse
+        services.environValue(env, "LANG") orelse
+        "C";
+    const trimmed = std.mem.trim(u8, locale, " \t");
+    if (trimmed.len == 0 or trimmed.len > 64) return;
+    try changePropertyBytes(conn, window, conn.wm_locale_name, atom_string, trimmed);
 }
 
 fn setClientMachine(conn: *XConn, window: u32) !void {
@@ -1265,6 +1394,14 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_window_type = try internAtom(conn, "_NET_WM_WINDOW_TYPE");
     conn.net_wm_window_type_normal = try internAtom(conn, "_NET_WM_WINDOW_TYPE_NORMAL");
     conn.text = try internAtom(conn, "TEXT");
+    conn.timestamp = try internAtom(conn, "TIMESTAMP");
+    conn.clipboard_manager = try internAtom(conn, "CLIPBOARD_MANAGER");
+    conn.save_targets = try internAtom(conn, "SAVE_TARGETS");
+    conn.mime_text_plain = try internAtom(conn, "text/plain");
+    conn.mime_text_utf8 = try internAtom(conn, "text/plain;charset=utf-8");
+    conn.net_wm_allowed_actions = try internAtom(conn, "_NET_WM_ALLOWED_ACTIONS");
+    conn.wm_take_focus = try internAtom(conn, "WM_TAKE_FOCUS");
+    conn.wm_locale_name = try internAtom(conn, "WM_LOCALE_NAME");
 }
 
 fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8) !u32 {
@@ -1492,12 +1629,39 @@ fn changeProperty32(conn: *XConn, window: u32, property: u32, typ: u32, values: 
     try writeAll(conn, req[0..total]);
 }
 
-fn setSelectionOwner(conn: *XConn, window: u32, selection: u32) !void {
+fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
+    if (target == 0) return false;
+    return target == conn.utf8_string or target == atom_string or target == conn.text or
+        target == conn.mime_text_plain or target == conn.mime_text_utf8;
+}
+
+fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
     var req: [16]u8 = @splat(0);
     req[0] = 22;
     put16(req[2..4], 4);
     put32(req[4..8], window);
     put32(req[8..12], selection);
+    put32(req[12..16], time);
+    try writeAll(conn, &req);
+}
+
+fn getSelectionOwner(conn: *XConn, selection: u32) !u32 {
+    var req: [8]u8 = @splat(0);
+    req[0] = 23;
+    put16(req[2..4], 2);
+    put32(req[4..8], selection);
+    try writeAll(conn, &req);
+    const reply = try readReply(conn);
+    return get32(reply[8..12]);
+}
+
+fn setInputFocus(conn: *XConn, window: u32, time: u32) !void {
+    var req: [12]u8 = @splat(0);
+    req[0] = 42;
+    req[1] = 1; // revert to PointerRoot
+    put16(req[2..4], 3);
+    put32(req[4..8], window);
+    put32(req[8..12], time);
     try writeAll(conn, &req);
 }
 
@@ -1698,6 +1862,28 @@ test "x11 setup parser reads spec offsets (vendor@16, screens@20, keycodes@26)" 
     try std.testing.expectEqual(@as(u8, 8), setup.min_keycode);
     try std.testing.expectEqual(@as(u8, 255), setup.max_keycode);
     try std.testing.expectEqual(@as(u32, 0xffffff), setup.screen.white_pixel);
+}
+
+test "clipboard text targets include ICCCM and GTK MIME atoms" {
+    const conn = XConn{
+        .io = undefined,
+        .stream = undefined,
+        .next_id = 0,
+        .resource_mask = 0,
+        .screen = undefined,
+        .max_request_units = 0,
+        .min_keycode = 0,
+        .max_keycode = 0,
+        .utf8_string = 100,
+        .text = 101,
+        .mime_text_plain = 102,
+        .mime_text_utf8 = 103,
+        .timestamp = 104,
+    };
+    try std.testing.expect(isClipboardTextTarget(&conn, 100));
+    try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
+    try std.testing.expect(isClipboardTextTarget(&conn, 103));
+    try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 }
 
 test "x11 dead keysyms stay non-character until the composer combines them" {

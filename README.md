@@ -268,7 +268,8 @@ pass a host and/or channel to override either default.
 The direct Wayland client parses compositor XKB keymaps (base, Shift, and
 AltGr/ISO Level3 when listed), implements configured key repeat, composes
 bounded dead-key / Multi_key accents and optional XCompose locale tables,
-accepts committed IME text through text-input-v3, maps native touch contacts
+accepts committed IME text through text-input-v3 (multiline hint, composer-strip
+cursor rectangle, confirming-key de-dupe), maps native touch contacts
 to the shared interaction contract, tracks entered `wl_output` integer scale
 plus `wp_fractional_scale_v1` / `wp_viewporter` when advertised, advertises
 xdg-shell min/max size, and copies through `wl_data_device` and
@@ -276,8 +277,10 @@ xdg-shell min/max size, and copies through `wl_data_device` and
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi`, owns ICCCM CLIPBOARD+PRIMARY including
-INCR with STRING/TEXT fallbacks, sets `_NET_WM_ICON_NAME` and
-`_NET_WM_USER_TIME`, and replies to `_NET_WM_PING`.
+INCR with STRING/TEXT/GTK text MIME and `TIMESTAMP`, hands CLIPBOARD to
+`CLIPBOARD_MANAGER` on exit when present, claims focus via `WM_TAKE_FOCUS`,
+sets `_NET_WM_ICON_NAME`, `_NET_WM_USER_TIME`, `_NET_WM_ALLOWED_ACTIONS`,
+and `WM_LOCALE_NAME`, and replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,
 scaled presentation, keyboard/pointer input, IRC traffic, and clean close

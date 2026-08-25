@@ -18,7 +18,9 @@
 //! names (see `xkb.Compose`), including an optional bounded XCompose locale
 //! table. Committed IME text is received through text-input-v3 when the
 //! compositor advertises it; IME preedit suppresses the keyboard/compose
-//! path. Fractional buffer scale uses `wp_fractional_scale_v1` +
+//! path. text-input-v3 also gets a multiline content hint and a bounded
+//! cursor rectangle so IME candidate windows sit on the composer strip.
+//! Fractional buffer scale uses `wp_fractional_scale_v1` +
 //! `wp_viewporter` when advertised, otherwise the entered `wl_output`
 //! integer scale. Clipboard uses `wl_data_device` and
 //! `zwp_primary_selection_v1` when present. xdg-shell min/max size matches
@@ -96,6 +98,16 @@ const xdg_min_width: u32 = 160;
 const xdg_min_height: u32 = 120;
 const xdg_max_width: u32 = 8192;
 const xdg_max_height: u32 = 8192;
+const xdg_state_activated: u32 = 4;
+const text_input_destroy: u16 = 0;
+const text_input_enable: u16 = 1;
+const text_input_disable: u16 = 2;
+const text_input_set_content_type: u16 = 5;
+const text_input_set_cursor_rectangle: u16 = 6;
+const text_input_commit: u16 = 7;
+const text_input_hint_multiline: u32 = 0x400;
+const ime_cursor_height: i32 = 24;
+const ime_cursor_margin: i32 = 8;
 
 const text_mime_types = [_][]const u8{
     "text/plain;charset=utf-8",
@@ -702,7 +714,7 @@ pub const Window = struct {
     /// a burst of catch-up repeats once it resumes.
     pub fn checkRepeat(self: *Window) ?Event {
         if (self.takeCommittedKey()) |event| return event;
-        if (self.ime_composing or self.last_committed != null) return null;
+        if (self.ime_composing) return null;
         const code = self.held_key_code orelse return null;
         if (self.repeat_rate_per_sec <= 0) return null;
         const now = nowMs(self.conn.io);
@@ -833,6 +845,9 @@ pub const Window = struct {
                     const array_len: usize = @intCast(get32(msg.body[8..12]));
                     if (array_len > msg.body.len - 12) return error.InvalidWaylandMessage;
                     if (12 + pad4(array_len) != msg.body.len) return error.InvalidWaylandMessage;
+                    if (configureContainsState(msg.body[12 .. 12 + array_len], xdg_state_activated)) {
+                        self.refreshTextInput() catch {};
+                    }
                     return null;
                 },
                 1 => return Event.close,
@@ -851,8 +866,10 @@ pub const Window = struct {
             self.pending_height = 0;
             self.configured = true;
             if (self.width != old_w or self.height != old_h) {
+                self.refreshTextInput() catch {};
                 return .{ .resize = .{ .w = self.width, .h = self.height } };
             }
+            self.refreshTextInput() catch {};
             return Event.expose;
         }
         if (msg.object == self.surface_id) return try self.surfaceEvent(msg.opcode, msg.body);
@@ -943,15 +960,14 @@ pub const Window = struct {
         switch (opcode) {
             0 => { // enter(surface)
                 if (body.len != 4 or get32(body) != self.surface_id) return error.InvalidWaylandMessage;
-                try sendEmpty(&self.conn, self.text_input_id, 1); // enable
-                try sendTwoU32(&self.conn, self.text_input_id, 5, 0, 0); // normal text
-                try sendEmpty(&self.conn, self.text_input_id, 7); // commit state
+                try self.enableTextInput();
             },
             1 => { // leave(surface)
                 if (body.len != 4) return error.InvalidWaylandMessage;
                 self.ime_composing = false;
-                try sendEmpty(&self.conn, self.text_input_id, 2); // disable
-                try sendEmpty(&self.conn, self.text_input_id, 7);
+                self.last_committed = null;
+                try sendEmpty(&self.conn, self.text_input_id, text_input_disable);
+                try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
             },
             2 => { // preedit_string(text, cursor_begin, cursor_end)
                 const text = try parseLeadingString(body);
@@ -977,6 +993,33 @@ pub const Window = struct {
             else => {},
         }
         return null;
+    }
+
+    fn enableTextInput(self: *Window) !void {
+        if (self.text_input_id == 0) return;
+        try sendEmpty(&self.conn, self.text_input_id, text_input_enable);
+        try sendTwoU32(&self.conn, self.text_input_id, text_input_set_content_type, text_input_hint_multiline, 0);
+        try self.sendCursorRectangle();
+        try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
+    }
+
+    fn refreshTextInput(self: *Window) !void {
+        if (self.text_input_id == 0 or !self.configured) return;
+        try self.sendCursorRectangle();
+        try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
+    }
+
+    fn sendCursorRectangle(self: *Window) !void {
+        const rect = imeCursorRect(self.width, self.height);
+        try sendFourI32(
+            &self.conn,
+            self.text_input_id,
+            text_input_set_cursor_rectangle,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+        );
     }
 
     fn takeCommittedKey(self: *Window) ?Event {
@@ -1143,14 +1186,21 @@ pub const Window = struct {
                     }
                 }
                 if (!down) {
-                    self.last_committed = null;
                     return null;
                 }
                 if (is_modifier) return null;
-                if (self.ime_composing or self.last_committed != null) return null;
+                if (self.ime_composing) return null;
                 const shifted = self.shift_left or self.shift_right;
                 const control = self.control_left or self.control_right;
                 const key = self.translateComposed(code, shifted, control);
+                if (key) |translated| {
+                    if (shouldSuppressImeDuplicate(self.last_committed, translated)) {
+                        self.last_committed = null;
+                        self.held_key_code = null;
+                        return null;
+                    }
+                    self.last_committed = null;
+                }
                 if (key == null) {
                     self.held_key_code = null;
                     return null;
@@ -1597,7 +1647,7 @@ pub const Window = struct {
         if (self.viewporter_id != 0) try sendEmpty(&self.conn, self.viewporter_id, 0);
         if (self.fractional_manager_id != 0) try sendEmpty(&self.conn, self.fractional_manager_id, 0);
         if (self.primary_manager_id != 0) try sendEmpty(&self.conn, self.primary_manager_id, 2);
-        if (self.text_input_id != 0) try sendEmpty(&self.conn, self.text_input_id, 0);
+        if (self.text_input_id != 0) try sendEmpty(&self.conn, self.text_input_id, text_input_destroy);
         if (self.text_input_manager_id != 0) try sendEmpty(&self.conn, self.text_input_manager_id, 0);
         if (self.xdg_toplevel_id != 0) try sendEmpty(&self.conn, self.xdg_toplevel_id, xdg_toplevel_destroy);
         if (self.xdg_surface_id != 0) try sendEmpty(&self.conn, self.xdg_surface_id, xdg_surface_destroy);
@@ -1750,6 +1800,16 @@ fn sendTwoU32(conn: *Connection, object: u32, opcode: u16, a: u32, b: u32) !void
     try conn.writeAll(&req);
 }
 
+fn sendFourI32(conn: *Connection, object: u32, opcode: u16, a: i32, b: i32, c: i32, d: i32) !void {
+    var req: [24]u8 = @splat(0);
+    header(&req, object, opcode);
+    putI32(req[8..12], a);
+    putI32(req[12..16], b);
+    putI32(req[16..20], c);
+    putI32(req[20..24], d);
+    try conn.writeAll(&req);
+}
+
 fn sendAttach(conn: *Connection, surface: u32, buffer: u32) !void {
     var req: [20]u8 = @splat(0);
     header(&req, surface, surface_attach);
@@ -1802,6 +1862,34 @@ fn namedKeyToKey(named: xkb.NamedKey) Key {
         .page_down => .page_down,
         .delete => .delete,
     };
+}
+
+fn imeCursorRect(width: u32, height: u32) struct { x: i32, y: i32, w: i32, h: i32 } {
+    const margin = ime_cursor_margin;
+    const strip = ime_cursor_height;
+    const w: i32 = @intCast(width);
+    const h: i32 = @intCast(height);
+    const box_w = if (w > margin * 2) w - margin * 2 else w;
+    const box_h = if (h >= strip) strip else h;
+    const y = if (h > box_h) h - box_h else 0;
+    const x = if (w > box_w) margin else 0;
+    return .{ .x = x, .y = y, .w = box_w, .h = box_h };
+}
+
+fn shouldSuppressImeDuplicate(last: ?u21, key: Key) bool {
+    const committed = last orelse return false;
+    return switch (key) {
+        .char => |ch| ch == committed,
+        else => false,
+    };
+}
+
+fn configureContainsState(bytes: []const u8, state: u32) bool {
+    var off: usize = 0;
+    while (off + 4 <= bytes.len) : (off += 4) {
+        if (get32(bytes[off..][0..4]) == state) return true;
+    }
+    return false;
 }
 
 fn isPlainTextMime(mime: []const u8) bool {
@@ -2491,5 +2579,31 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("TEXT"));
     try std.testing.expect(isPlainTextMime("UTF8_STRING"));
     try std.testing.expect(!isPlainTextMime("image/png"));
+}
+
+test "IME cursor rectangle sits on the bottom composer strip" {
+    const rect = imeCursorRect(640, 480);
+    try std.testing.expectEqual(@as(i32, 8), rect.x);
+    try std.testing.expectEqual(@as(i32, 456), rect.y);
+    try std.testing.expectEqual(@as(i32, 624), rect.w);
+    try std.testing.expectEqual(@as(i32, 24), rect.h);
+    const tiny = imeCursorRect(10, 10);
+    try std.testing.expectEqual(@as(i32, 0), tiny.y);
+    try std.testing.expectEqual(@as(i32, 10), tiny.h);
+}
+
+test "IME de-dupe swallows only the confirming committed character" {
+    try std.testing.expect(shouldSuppressImeDuplicate(0xe9, .{ .char = 0xe9 }));
+    try std.testing.expect(!shouldSuppressImeDuplicate(0xe9, .{ .char = 'e' }));
+    try std.testing.expect(!shouldSuppressImeDuplicate(0xe9, .enter));
+    try std.testing.expect(!shouldSuppressImeDuplicate(null, .{ .char = 'a' }));
+}
+
+test "xdg toplevel configure states include activated" {
+    var states: [8]u8 = undefined;
+    put32(states[0..4], 1);
+    put32(states[4..8], 4);
+    try std.testing.expect(configureContainsState(&states, xdg_state_activated));
+    try std.testing.expect(!configureContainsState(states[0..4], xdg_state_activated));
 }
 const pointer_release: u16 = 1;
