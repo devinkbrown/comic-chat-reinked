@@ -122,7 +122,7 @@ hash.
   ISO-8859-15, `ESC - M` ISO-8859-9, `ESC - L` ISO-8859-5, `ESC - F`
   ISO-8859-7, `ESC - G` ISO-8859-6, and `ESC - H` ISO-8859-8. Invalid UTF-8 clipboard bytes
   decode as Latin-1, including incoming DnD and Shift+Insert / middle-click
-  paste-as-keys. Receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15 and Windows-1252 `text/plain` charset MIME
+  paste-as-keys. Receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15 and Windows-1251/1252 `text/plain` charset MIME
   (both common casings on X11) and Markdown decode to UTF-8. X11 extra
   mouse buttons 6–9 do not synthesize pointer clicks. Extra KDE5 / Mozilla-priv / KDE suggested-filename file MIME yields a local
   path. Receive-only `text/html` strips tags to plain text.

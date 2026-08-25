@@ -32,7 +32,7 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15, Windows-1252, and Markdown MIME,
+//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15, Windows-1251/1252, and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear,
@@ -217,6 +217,8 @@ const XConn = struct {
     mime_text_hebrew_alt: u32 = 0,
     mime_text_cp1252: u32 = 0,
     mime_text_cp1252_alt: u32 = 0,
+    mime_text_cp1251: u32 = 0,
+    mime_text_cp1251_alt: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -1067,6 +1069,8 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_hebrew_alt, "ISO-8859-8")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1252, "windows-1252")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1252_alt, "windows-1252")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1251, "windows-1251")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1251_alt, "windows-1251")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1193,6 +1197,11 @@ pub const Window = struct {
         }
         if (isCp1252Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1252") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCp1251Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1251") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
@@ -2677,6 +2686,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_hebrew_alt = try internAtom(conn, "text/plain;charset=iso-8859-8");
     conn.mime_text_cp1252 = try internAtom(conn, "text/plain;charset=windows-1252");
     conn.mime_text_cp1252_alt = try internAtom(conn, "text/plain;charset=cp1252");
+    conn.mime_text_cp1251 = try internAtom(conn, "text/plain;charset=windows-1251");
+    conn.mime_text_cp1251_alt = try internAtom(conn, "text/plain;charset=cp1251");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3380,7 +3391,7 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
     if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom) or isLatin5Atom(conn, atom) or
         isCyrillicAtom(conn, atom) or isGreekAtom(conn, atom) or isLatin3Atom(conn, atom) or isLatin4Atom(conn, atom) or
-        isArabicAtom(conn, atom) or isHebrewAtom(conn, atom) or isCp1252Atom(conn, atom)) return 3;
+        isArabicAtom(conn, atom) or isHebrewAtom(conn, atom) or isCp1252Atom(conn, atom) or isCp1251Atom(conn, atom)) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3443,6 +3454,10 @@ fn isCp1252Atom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_cp1252 or atom == conn.mime_text_cp1252_alt);
 }
 
+fn isCp1251Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cp1251 or atom == conn.mime_text_cp1251_alt);
+}
+
 fn x11NotifyModeIsGrab(mode: u8) bool {
     return mode == notify_mode_grab or mode == notify_mode_ungrab;
 }
@@ -3488,7 +3503,7 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         isCyrillicAtom(conn, target) or isGreekAtom(conn, target) or
         isLatin3Atom(conn, target) or isLatin4Atom(conn, target) or
         isArabicAtom(conn, target) or isHebrewAtom(conn, target) or
-        isCp1252Atom(conn, target) or isMarkdownAtom(conn, target);
+        isCp1252Atom(conn, target) or isCp1251Atom(conn, target) or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3805,6 +3820,8 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_hebrew_alt = 144,
         .mime_text_cp1252 = 145,
         .mime_text_cp1252_alt = 146,
+        .mime_text_cp1251 = 147,
+        .mime_text_cp1251_alt = 148,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -3891,6 +3908,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 145));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 137));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 145));
+    try std.testing.expect(isCp1251Atom(&conn, 147));
+    try std.testing.expect(isClipboardTextTarget(&conn, 147));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 147));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));
