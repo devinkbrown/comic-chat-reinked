@@ -224,6 +224,9 @@ pub const SessionLimits = struct {
     modes: usize = 0,
     maxlist: usize = 0,
     bot: u8 = 0,
+    excepts: u8 = 0,
+    invex: u8 = 0,
+    chathistory: usize = 0,
     whox: bool = false,
     utf8only: bool = false,
 
@@ -293,6 +296,15 @@ pub const Extban = struct {
             parsed.types_len += 1;
         }
         return parsed;
+    }
+
+    pub fn addType(self: *Extban, kind: u8) void {
+        if (kind <= ' ') return;
+        if (self.present and self.allows(kind)) return;
+        self.present = true;
+        if (self.types_len == self.types.len) return;
+        self.types[self.types_len] = kind;
+        self.types_len += 1;
     }
 
     pub fn allows(self: Extban, kind: u8) bool {
@@ -433,4 +445,12 @@ test "session limits parse CHANLIMIT and clip outgoing text" {
     try std.testing.expect(muted.negated);
     try std.testing.expectEqual(@as(u8, 'm'), muted.kind);
     try std.testing.expect(extban.parseMask("alice!*@*") == null);
+    var account_only = Extban{};
+    account_only.addType('a');
+    try std.testing.expect(account_only.present);
+    try std.testing.expectEqual(@as(u8, '$'), account_only.prefix);
+    try std.testing.expect(account_only.allows('a'));
+    try std.testing.expect(!account_only.allows('c'));
+    account_only.addType('a');
+    try std.testing.expectEqual(@as(u8, 1), account_only.types_len);
 }

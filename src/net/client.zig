@@ -575,7 +575,12 @@ pub const Client = struct {
 
     pub fn setAway(self: *Client, message_text: []const u8) !void {
         const clipped = irc_map.SessionLimits.clip(self.advertisedLimits().awaylen, message_text);
-        if (clipped.len == 0) try self.appendCommand("AWAY", &.{}) else try self.appendCommandTrailing("AWAY", &.{clipped});
+        if (clipped.len == 0) {
+            try self.appendCommand("AWAY", &.{});
+        } else {
+            try self.validateOutgoingText(clipped);
+            try self.appendCommandTrailing("AWAY", &.{clipped});
+        }
         try self.queueOut(.interactive, true, false);
     }
 
@@ -583,6 +588,7 @@ pub const Client = struct {
         // The source always includes the trailing reason, including an empty
         // one: `KICK <room> <nick> :<reason>`.
         const clipped = irc_map.SessionLimits.clip(self.advertisedLimits().kicklen, reason);
+        try self.validateOutgoingText(clipped);
         try self.appendCommandTrailing("KICK", &.{ channel, nick, clipped });
         try self.queueOut(.interactive, true, false);
     }
@@ -608,38 +614,42 @@ pub const Client = struct {
     }
 
     pub fn setException(self: *Client, channel: []const u8, mask: []const u8) !void {
-        try self.appendCommand("MODE", &.{ channel, "+e", mask });
-        try self.queueOut(.interactive, true, false);
+        try self.appendListMode(channel, '+', self.exceptsLetter(), mask);
     }
 
     pub fn clearException(self: *Client, channel: []const u8, mask: []const u8) !void {
-        try self.appendCommand("MODE", &.{ channel, "-e", mask });
-        try self.queueOut(.interactive, true, false);
+        try self.appendListMode(channel, '-', self.exceptsLetter(), mask);
     }
 
     pub fn listExceptions(self: *Client, channel: []const u8) !void {
-        try self.appendCommand("MODE", &.{ channel, "+e" });
-        try self.queueOut(.interactive, true, false);
+        try self.appendListMode(channel, '+', self.exceptsLetter(), null);
     }
 
     pub fn setInviteMask(self: *Client, channel: []const u8, mask: []const u8) !void {
-        try self.appendCommand("MODE", &.{ channel, "+I", mask });
-        try self.queueOut(.interactive, true, false);
+        try self.appendListMode(channel, '+', self.invexLetter(), mask);
     }
 
     pub fn clearInviteMask(self: *Client, channel: []const u8, mask: []const u8) !void {
-        try self.appendCommand("MODE", &.{ channel, "-I", mask });
-        try self.queueOut(.interactive, true, false);
+        try self.appendListMode(channel, '-', self.invexLetter(), mask);
     }
 
     pub fn listInviteMasks(self: *Client, channel: []const u8) !void {
-        try self.appendCommand("MODE", &.{ channel, "+I" });
-        try self.queueOut(.interactive, true, false);
+        try self.appendListMode(channel, '+', self.invexLetter(), null);
     }
 
     pub fn setTopic(self: *Client, channel: []const u8, topic: []const u8) !void {
         const clipped = irc_map.SessionLimits.clip(self.advertisedLimits().topiclen, topic);
+        try self.validateOutgoingText(clipped);
         try self.appendCommandTrailing("TOPIC", &.{ channel, clipped });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    /// IRCv3 `SETNAME :<realname>` when the `setname` capability is ACK'd.
+    pub fn setName(self: *Client, realname: []const u8) !void {
+        try self.requireCapability("setname");
+        if (realname.len == 0) return error.InvalidIrcParameter;
+        try self.validateOutgoingText(realname);
+        try self.appendCommandTrailing("SETNAME", &.{realname});
         try self.queueOut(.interactive, true, false);
     }
 
@@ -1515,6 +1525,7 @@ pub const Client = struct {
     pub fn sendService(self: *Client, command: []const u8, args: []const []const u8) !void {
         if (command.len == 0 or std.mem.indexOfAny(u8, command, " \r\n\x00") != null)
             return error.InvalidIrcParameter;
+        for (args) |arg| try self.validateOutgoingText(arg);
         if (args.len == 0)
             try self.appendCommand(command, &.{})
         else
@@ -1591,7 +1602,7 @@ pub const Client = struct {
         if (self.capabilityEnabled("onyx/session-sync")) return;
         const restoration = if (self.restoration) |*value| value else return;
         if (restoration.targetCount() == 0) return;
-        const history_limit: u16 = if (self.capabilityEnabled("draft/chathistory")) 100 else 0;
+        const history_limit: u16 = self.advertisedChatHistoryLimit();
         try restoration.appendCommands(&self.out, self.gpa, history_limit);
         try self.queueOut(.interactive, true, false);
     }
@@ -1671,6 +1682,32 @@ pub const Client = struct {
 
     fn advertisedLimits(self: *const Client) irc_map.SessionLimits {
         return if (self.featureState()) |state| state.session_limits else .{};
+    }
+
+    fn exceptsLetter(self: *const Client) u8 {
+        const letter = self.advertisedLimits().excepts;
+        return if (letter == 0) 'e' else letter;
+    }
+
+    fn invexLetter(self: *const Client) u8 {
+        const letter = self.advertisedLimits().invex;
+        return if (letter == 0) 'I' else letter;
+    }
+
+    fn advertisedChatHistoryLimit(self: *const Client) u16 {
+        if (!self.capabilityEnabled("draft/chathistory")) return 0;
+        const advertised = self.advertisedLimits().chathistory;
+        if (advertised == 0) return 100;
+        return @intCast(@min(advertised, 65535));
+    }
+
+    fn appendListMode(self: *Client, channel: []const u8, sign: u8, letter: u8, mask: ?[]const u8) !void {
+        const flag = [_]u8{ sign, letter };
+        if (mask) |value|
+            try self.appendCommand("MODE", &.{ channel, &flag, value })
+        else
+            try self.appendCommand("MODE", &.{ channel, &flag });
+        try self.queueOut(.interactive, true, false);
     }
 
     fn rejectSessionLimits(self: *const Client, channel: []const u8, key: []const u8) !void {
@@ -3069,6 +3106,56 @@ test "session-sync skips restoration JOINs and MODES splits advertised lines" {
     const before = client.tx.items.items.len;
     try client.queueRestoration();
     try std.testing.expectEqual(before, client.tx.items.items.len);
+}
+
+test "advertised ACCOUNTEXTBAN, CHATHISTORY, EXCEPTS, and UTF-8 stay live" {
+    const gpa = std.testing.allocator;
+    const owned_host = try gpa.dupe(u8, "eshmaki.me");
+    var client = Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{ .security = .plaintext },
+        .framer = irc.LineFramer.init(gpa),
+        .tx = policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = policy.Deadlines.init(0, .{}),
+        .aggregator = features_mod.Aggregator.init(gpa, .{}),
+    };
+    client.features = try features_mod.State.init(gpa, "me", .{});
+    client.registration = Registration.init(gpa, owned_host, .plaintext, .{});
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.registration.?.deinit();
+        client.features.?.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    if (client.features) |*state|
+        _ = try state.observe(&message.parse(":irc 005 me UTF8ONLY CHATHISTORY=50 EXCEPTS=x INVEX=y ACCOUNTEXTBAN=a :are supported"));
+    try std.testing.expect(client.features.?.extban.allows('a'));
+    try std.testing.expectError(error.InvalidUtf8, client.setTopic("#root", &.{0xff}));
+    try std.testing.expectError(error.InvalidUtf8, client.setAway(&.{0xff}));
+    try client.setException("#root", "alice!*@*");
+    try client.setInviteMask("#root", "bob!*@*");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 2].bytes, "MODE #root +x alice!*@*") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +y bob!*@*") != null);
+
+    try client.registration.?.cap.begin(&client.out);
+    client.out.clearRetainingCapacity();
+    _ = try client.registration.?.cap.handle(&client.out, message.parse(":irc CAP * LS :setname draft/chathistory"));
+    client.out.clearRetainingCapacity();
+    _ = try client.registration.?.cap.handle(&client.out, message.parse(":irc CAP * ACK :setname draft/chathistory"));
+    try client.setName("Alice Example");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SETNAME :Alice Example") != null);
+    try client.ownedRestoration().remember("#hist", "msgid=msg-1");
+    const hist_before = client.tx.items.items.len;
+    try client.queueRestoration();
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[hist_before].bytes, "CHATHISTORY AFTER #hist msgid=msg-1 50") != null);
 }
 
 test "IRCX tagged data rejects malformed draft tags" {

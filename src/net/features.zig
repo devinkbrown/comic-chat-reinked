@@ -440,12 +440,30 @@ pub const State = struct {
         if (self.isupport("BOT")) |token| if (token.value) |value| {
             self.session_limits.bot = if (value.len != 0) value[0] else 0;
         };
+        if (self.isupport("EXCEPTS")) |token| {
+            self.session_limits.excepts = if (token.value) |value|
+                if (value.len != 0) value[0] else 'e'
+            else
+                'e';
+        }
+        if (self.isupport("INVEX")) |token| {
+            self.session_limits.invex = if (token.value) |value|
+                if (value.len != 0) value[0] else 'I'
+            else
+                'I';
+        }
+        if (self.isupport("CHATHISTORY")) |token| if (token.value) |value| {
+            self.session_limits.chathistory = irc_map.SessionLimits.parseCount(value);
+        };
         self.session_limits.whox = self.isupport("WHOX") != null;
         self.session_limits.utf8only = self.isupport("UTF8ONLY") != null;
         self.extban = if (self.isupport("EXTBAN")) |token|
             if (token.value) |value| irc_map.Extban.parse(value) else .{}
         else
             .{};
+        if (self.isupport("ACCOUNTEXTBAN")) |token| if (token.value) |value| {
+            if (value.len != 0) self.extban.addType(value[0]);
+        };
         self.network_len = 0;
         if (self.isupport("NETWORK")) |token| if (token.value) |value| {
             const n = @min(value.len, self.network.len);
@@ -939,6 +957,7 @@ test "capability state tracks identity, rename, marker, metadata, and standard r
     _ = try state.observe(&message.parse(":irc 005 self UTF8ONLY CHATHISTORY=100 CLIENTTAGDENY=typing draft/ICON=https://example/icon.png :are supported"));
     try std.testing.expect(state.isupport("utf8only") != null);
     try std.testing.expectEqualStrings("100", state.isupport("CHATHISTORY").?.value.?);
+    try std.testing.expectEqual(@as(usize, 100), state.session_limits.chathistory);
     try std.testing.expectEqualStrings("https://example/icon.png", state.isupport("draft/icon").?.value.?);
     _ = try state.observe(&message.parse(":irc 005 self -UTF8ONLY :are supported"));
     try std.testing.expect(state.isupport("UTF8ONLY") == null);
@@ -955,7 +974,7 @@ test "capability state tracks identity, rename, marker, metadata, and standard r
     try std.testing.expectEqual(@as(usize, 64), state.session_limits.nicklen);
     try std.testing.expectEqual(@as(usize, 50), state.session_limits.chanlimit);
     try std.testing.expectEqual(@as(usize, 390), state.session_limits.topiclen);
-    _ = try state.observe(&message.parse(":irc 005 self NETWORK=Onyx MAXTARGETS=4 MONITOR=128 SILENCE=32 MODES=1 MAXLIST=beIZ:100 EXTBAN=$,acgmrz BOT=B WHOX :are supported"));
+    _ = try state.observe(&message.parse(":irc 005 self NETWORK=Onyx MAXTARGETS=4 MONITOR=128 SILENCE=32 MODES=1 MAXLIST=beIZ:100 EXTBAN=$,cgmrz ACCOUNTEXTBAN=a EXCEPTS=e INVEX=I BOT=B WHOX :are supported"));
     try std.testing.expectEqualStrings("Onyx", state.networkName());
     try std.testing.expectEqual(@as(usize, 4), state.session_limits.maxtargets);
     try std.testing.expectEqual(@as(usize, 128), state.session_limits.monitor);
@@ -964,7 +983,10 @@ test "capability state tracks identity, rename, marker, metadata, and standard r
     try std.testing.expectEqual(@as(usize, 100), state.session_limits.maxlist);
     try std.testing.expect(state.session_limits.whox);
     try std.testing.expectEqual(@as(u8, 'B'), state.session_limits.bot);
+    try std.testing.expectEqual(@as(u8, 'e'), state.session_limits.excepts);
+    try std.testing.expectEqual(@as(u8, 'I'), state.session_limits.invex);
     try std.testing.expect(state.extban.allows('a'));
+    try std.testing.expect(state.extban.allows('c'));
     try std.testing.expect(!state.extban.allows('x'));
     _ = try state.observe(&message.parse(":irc 005 self -NICKLEN :are supported"));
     try std.testing.expectEqual(@as(usize, 0), state.session_limits.nicklen);

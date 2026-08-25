@@ -3332,7 +3332,13 @@ fn applyDialogAction(
                 view.setDialogNotice("The away message must stay on one line.");
                 return;
             }
-            try client.setAway(value);
+            client.setAway(value) catch |err| switch (err) {
+                error.InvalidUtf8 => {
+                    view.setDialogNotice("That text is not valid UTF-8.");
+                    return;
+                },
+                else => return err,
+            };
             if (value.len == 0) {
                 if (state.away_message) |old| {
                     gpa.free(old);
@@ -4255,28 +4261,8 @@ fn processWorkspaceMessages(
                 try workspace.setSelfNick(assigned);
                 try network.adoptNick(assigned);
             }
-            if (client.projectsSessionChannels()) {
-                for (workspace.rooms.items) |*room| room.joined = false;
-            } else if (client.hasRestorationTargets()) {
-                for (workspace.rooms.items) |*room| {
-                    room.joined = false;
-                    try requestReconnectJoin(workspace, client, room);
-                }
-            } else if (workspace.rooms.items.len == 0) {
-                // Open the startup room before MOTD/LUSERS so those numerics
-                // have a transcript. JOIN confirmation still marks it joined.
-                const startup = try workspace.ensure(channel);
-                if (try requestMarkedJoinWithKey(
-                    client,
-                    workspace,
-                    startup,
-                    channel,
-                    workspace.rooms.items[startup].join_key orelse "",
-                )) |notice| try appendSessionNotice(workspace, notice);
-            } else for (workspace.rooms.items) |*room| {
-                room.joined = false;
-                try requestReconnectJoin(workspace, client, room);
-            }
+            if (try applyWelcomeJoins(workspace, client, channel)) |notice|
+                try appendSessionNotice(workspace, notice);
             state.join_requested = true;
             state.status = "joining";
             resubscribeSessionControls(client, state);
@@ -4300,18 +4286,17 @@ fn processWorkspaceMessages(
                 state.joined = true;
                 state.status = "connected";
                 if (room.pending_topic) |topic| {
-                    client.setTopic(room.name, topic) catch |err| switch (err) {
-                        error.InvalidIrcParameter => {},
-                        else => return err,
-                    };
-                    try room.setPendingTopic(workspace.gpa, "");
+                    try applyPendingTopic(client, room, workspace.gpa, topic);
                 }
                 try announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data);
                 if (state.away_message) |message| client.sendAwayControl(room.name, message) catch {};
                 republishRoomClientData(client, room, state.ircx_data);
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
-                try sendAutomaticGreeting(client, preferences, joined_channel, who);
+                sendAutomaticGreeting(client, preferences, joined_channel, who) catch |err| switch (err) {
+                    error.InvalidUtf8 => {},
+                    else => return err,
+                };
                 _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Join", who, joined_channel, "");
                 redraw = true;
             }
@@ -4324,11 +4309,7 @@ fn processWorkspaceMessages(
                 state.joined = true;
                 state.status = "connected";
                 if (joined_room.pending_topic) |topic| {
-                    client.setTopic(joined_room.name, topic) catch |err| switch (err) {
-                        error.InvalidIrcParameter => {},
-                        else => return err,
-                    };
-                    try joined_room.setPendingTopic(workspace.gpa, "");
+                    try applyPendingTopic(client, joined_room, workspace.gpa, topic);
                 }
                 redraw = true;
             }
@@ -4712,7 +4693,7 @@ fn isCommandFailureNumeric(command: []const u8) bool {
 
 fn isOnyxServiceReply(command: []const u8) bool {
     const names = .{
-        "REGISTER",    "VERIFY",     "RESETPASS", "IDENTIFY", "LOGOUT",   "DROP",
+        "REGISTER",    "VERIFY",     "RESETPASS", "SETPASS",  "IDENTIFY", "LOGOUT",   "DROP",
         "ACCOUNTINFO", "ACCOUNTSET", "SASLINFO",  "GHOST",    "RECOVER",  "RELEASE",
         "CHANNEL",     "CS",         "AUTOJOIN",  "GROUP",    "SEEN",     "MEMO",
         "TEGAMI",      "VHOST",      "CERTADD",   "CERTLIST", "CERTDEL",  "SESSIONTOKEN",
@@ -5005,6 +4986,52 @@ fn sendOnyxServiceSlash(
         };
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "knock")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /knock <#channel> [reason]");
+            return true;
+        }
+        const reason = if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else "";
+        client.knock(words[0], if (reason.len == 0) null else reason) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "search")) {
+        if (rest.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /search [#channel] <query>");
+            return true;
+        }
+        const target, const query = if (count > 1 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]))
+            .{ words[0], std.mem.trim(u8, rest[words[0].len..], " \t") }
+        else if (workspace.activeRoom()) |room|
+            .{ room.name, rest }
+        else {
+            try appendSessionNotice(workspace, "Search needs a room or target.");
+            return true;
+        };
+        if (query.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /search [#channel] <query>");
+            return true;
+        }
+        client.search(target, query) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "setname")) {
+        if (rest.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /setname <real name>");
+            return true;
+        }
+        client.setName(rest) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
     if (std.ascii.eqlIgnoreCase(verb, "ghost") or std.ascii.eqlIgnoreCase(verb, "drop")) {
         if (count < 2) {
             try appendSessionNotice(workspace, "Usage: /ghost|/drop <nick-or-account> <password>");
@@ -5057,7 +5084,8 @@ fn sendOnyxServiceSlash(
 fn isOnyxServiceSlash(verb: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(verb, "clear")) return false;
     return isOnyxServiceReply(verb) or std.ascii.eqlIgnoreCase(verb, "identify") or
-        std.ascii.eqlIgnoreCase(verb, "session");
+        std.ascii.eqlIgnoreCase(verb, "session") or std.ascii.eqlIgnoreCase(verb, "knock") or
+        std.ascii.eqlIgnoreCase(verb, "search") or std.ascii.eqlIgnoreCase(verb, "setname");
 }
 
 fn rejectServiceIrc(workspace: *cc.client.workspace.Workspace, err: anyerror) !void {
@@ -5065,6 +5093,7 @@ fn rejectServiceIrc(workspace: *cc.client.workspace.Workspace, err: anyerror) !v
         error.InvalidIrcParameter => "That account command is not allowed.",
         error.AccountRegistrationRequiresTls => "Account commands require a TLS connection.",
         error.AccountRegistrationNotEnabled => "This server did not advertise account registration.",
+        error.CapabilityNotEnabled => "This server did not advertise that command.",
         error.InvalidUtf8 => "That text is not valid UTF-8.",
         else => return err,
     };
@@ -5124,6 +5153,46 @@ fn requestMarkedJoinWithKey(
         return notice;
     }
     return null;
+}
+
+fn applyWelcomeJoins(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    startup_channel: []const u8,
+) !?[]const u8 {
+    if (workspace.rooms.items.len == 0 and !client.projectsSessionChannels()) {
+        const startup = try workspace.ensure(startup_channel);
+        return requestMarkedJoinWithKey(
+            client,
+            workspace,
+            startup,
+            startup_channel,
+            workspace.rooms.items[startup].join_key orelse "",
+        );
+    }
+    for (workspace.rooms.items) |*room| {
+        room.joined = false;
+        try requestReconnectJoin(workspace, client, room);
+    }
+    return null;
+}
+
+fn applyPendingTopic(
+    client: *cc.net.client.Client,
+    room: *cc.client.workspace.Room,
+    gpa: std.mem.Allocator,
+    topic: []const u8,
+) !void {
+    client.setTopic(room.name, topic) catch |err| switch (err) {
+        error.InvalidIrcParameter => {},
+        error.InvalidUtf8 => try room.transcript.addWithOptions(
+            "Server",
+            "That topic is not valid UTF-8.",
+            .{ .modes = cc.proto.udi.bm_action },
+        ),
+        else => return err,
+    };
+    try room.setPendingTopic(gpa, "");
 }
 
 fn requestReconnectJoin(
@@ -5806,12 +5875,18 @@ fn runPersistentRules(
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Notify")) {
             try transcript.addWithOptions("Automation", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Reply")) {
-            if (value.len != 0) try client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value);
+            if (value.len != 0) client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value) catch |err| switch (err) {
+                error.InvalidUtf8 => {},
+                else => return err,
+            };
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Action")) {
             if (value.len != 0) {
                 const wire = try std.fmt.allocPrint(gpa, "\x01ACTION {s}\x01", .{value});
                 defer gpa.free(wire);
-                try client.privmsg(channel, wire);
+                client.privmsg(channel, wire) catch |err| switch (err) {
+                    error.InvalidUtf8 => {},
+                    else => return err,
+                };
             }
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Sound")) {
             if (value.len != 0) try client.sendSound(channel, value, "");
@@ -6894,6 +6969,12 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceReply("SESSION"));
     try std.testing.expect(isOnyxServiceReply("TOTP"));
     try std.testing.expect(isOnyxServiceReply("HELP"));
+    try std.testing.expect(isOnyxServiceReply("SETPASS"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SETPASS"));
+    try std.testing.expect(isOnyxServiceSlash("setpass"));
+    try std.testing.expect(isOnyxServiceSlash("knock"));
+    try std.testing.expect(isOnyxServiceSlash("search"));
+    try std.testing.expect(isOnyxServiceSlash("setname"));
     try std.testing.expect(isVisibleServerWorkflowReply("REGISTER"));
     try std.testing.expect(isVisibleServerWorkflowReply("SASLINFO"));
     try std.testing.expect(isVisibleServerWorkflowReply("MEMO"));
@@ -7437,8 +7518,43 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "HELP") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/totp status"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOTP") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/setpass old newpassword99"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SETPASS old") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/knock #locked please"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KNOCK #locked :please") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/search checklist"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[0].transcript.lines.items[workspace.rooms.items[0].transcript.lines.items.len - 1].text, "did not advertise") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/setname Alice Example"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[0].transcript.lines.items[workspace.rooms.items[0].transcript.lines.items.len - 1].text, "did not advertise") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/clear"));
     try std.testing.expect(!client.projectsSessionChannels());
+
+    const first = try workspace.ensure("#first");
+    workspace.rooms.items[first].setWantRejoin(true);
+    try client.joinWithKey("#root", "");
+    try std.testing.expect(client.restoresChannel("#root"));
+    workspace.rooms.items[workspace.find("#root").?].setWantRejoin(true);
+    const before = client.tx.items.items.len;
+    try std.testing.expect((try applyWelcomeJoins(&workspace, &client, "#root")) == null);
+    try std.testing.expect(!workspace.rooms.items[workspace.find("#root").?].joined);
+    try std.testing.expect(!workspace.rooms.items[first].joined);
+    var saw_first = false;
+    var saw_root = false;
+    for (client.tx.items.items[before..]) |item| {
+        if (std.mem.indexOf(u8, item.bytes, "JOIN #first") != null) saw_first = true;
+        if (std.mem.indexOf(u8, item.bytes, "JOIN #root") != null) saw_root = true;
+    }
+    try std.testing.expect(saw_first);
+    try std.testing.expect(!saw_root);
+
+    client.features = try cc.net.features.State.init(gpa, "me", .{});
+    defer if (client.features) |*owned_features| owned_features.deinit();
+    if (client.features) |*state|
+        _ = try state.observe(&cc.net.message.parse(":irc 005 me UTF8ONLY :are supported"));
+    try workspace.rooms.items[first].setPendingTopic(gpa, &.{0xff});
+    try applyPendingTopic(&client, &workspace.rooms.items[first], gpa, workspace.rooms.items[first].pending_topic.?);
+    try std.testing.expect(workspace.rooms.items[first].pending_topic == null);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[first].transcript.lines.items[workspace.rooms.items[first].transcript.lines.items.len - 1].text, "UTF-8") != null);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {
