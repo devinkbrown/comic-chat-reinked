@@ -203,14 +203,22 @@ pub const View = struct {
             return true;
         }
         switch (self.shell.focus) {
-            .members => switch (key) {
-                .up => self.shell.moveMemberSelection(member_count, -1),
-                .down => self.shell.moveMemberSelection(member_count, 1),
-                .page_up => self.shell.moveMemberSelection(member_count, -5),
-                .page_down => self.shell.moveMemberSelection(member_count, 5),
-                .home => if (member_count > 0) self.shell.selectMember(0),
-                .end => if (member_count > 0) self.shell.selectMember(member_count - 1),
-                else => return false,
+            .members => {
+                const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, self.shell.content_mode == .comic, self.shell.show_members);
+                const viewport = memberViewport(layout.members, self.shell.member_view == .icons);
+                const step: i32 = @intCast(viewport.step);
+                const page: i32 = @intCast(@max(1, viewport.visible));
+                switch (key) {
+                    .up => self.shell.moveMemberSelection(member_count, -step),
+                    .down => self.shell.moveMemberSelection(member_count, step),
+                    .left => if (self.shell.member_view == .icons) self.shell.moveMemberSelection(member_count, -1) else return false,
+                    .right => if (self.shell.member_view == .icons) self.shell.moveMemberSelection(member_count, 1) else return false,
+                    .page_up => self.shell.moveMemberSelection(member_count, -page),
+                    .page_down => self.shell.moveMemberSelection(member_count, page),
+                    .home => if (member_count > 0) self.shell.selectMember(0),
+                    .end => if (member_count > 0) self.shell.selectMember(member_count - 1),
+                    else => return false,
+                }
             },
             .emotion => switch (key) {
                 .left => self.shell.moveEmotion(-1, 0),
@@ -2107,7 +2115,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             3 => "Rules",
             4 => "Rule sets",
             5 => "Online notifications",
-            6 => "Online members",
+            6 => "Online CAST",
             else => "About Comic Chat",
         },
         else => "Settings",
@@ -4453,7 +4461,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
     try std.testing.expectEqualStrings("Room events", menuItemLabel(4, 8));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
-    try std.testing.expectEqualStrings("Online members", menuItemLabel(6, 6));
+    try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 6));
     try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 6, true));
     try std.testing.expectEqualStrings("Wire", toolbarHint(0));
@@ -4689,9 +4697,25 @@ test "member keyboard pages through the CAST" {
     var view = try View.init(std.testing.allocator, 960, 720);
     defer view.deinit();
     view.shell.focus = .members;
+    view.shell.member_view = .icons;
+    view.shell.selected_member = 1;
+    try std.testing.expect(view.handleFocusedKey(.left, 12));
+    try std.testing.expectEqual(@as(?usize, 0), view.shell.selected_member);
+    try std.testing.expect(view.handleFocusedKey(.right, 12));
+    try std.testing.expectEqual(@as(?usize, 1), view.shell.selected_member);
+
+    const layout = geometry.Layout.compute(view.width(), view.height(), true, true);
+    const viewport = memberViewport(layout.members, true);
     view.shell.selected_member = 0;
     try std.testing.expect(view.handleFocusedKey(.page_down, 12));
-    try std.testing.expectEqual(@as(?usize, 5), view.shell.selected_member);
+    try std.testing.expectEqual(@as(?usize, @min(11, viewport.visible)), view.shell.selected_member);
     try std.testing.expect(view.handleFocusedKey(.page_up, 12));
     try std.testing.expectEqual(@as(?usize, 0), view.shell.selected_member);
+
+    view.shell.member_view = .list;
+    try std.testing.expect(!view.handleFocusedKey(.left, 12));
+    try std.testing.expect(!view.handleFocusedKey(.right, 12));
+    view.shell.selected_member = 0;
+    try std.testing.expect(view.handleFocusedKey(.down, 12));
+    try std.testing.expectEqual(@as(?usize, 1), view.shell.selected_member);
 }

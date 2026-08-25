@@ -86,7 +86,7 @@ pub const specs = [_]Spec{
     .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose character", .group = .connection, .source_w = 360, .source_h = 260 },
     .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Background", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick member", .group = .rooms, .source_w = 186, .source_h = 89 },
-    .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Nickname", .group = .connection, .source_w = 188, .source_h = 71 },
+    .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Sign-in name", .group = .connection, .source_w = 188, .source_h = 71 },
     .{ .id = .channel, .resource = "IDD_CHANNEL", .title = "Join room", .group = .rooms, .source_w = 144, .source_h = 110 },
     .{ .id = .channel_properties, .resource = "IDD_CHANNELPROP", .title = "Room properties", .group = .rooms, .source_w = 186, .source_h = 196 },
     .{ .id = .ban, .resource = "IDD_BAN", .title = "Ban or unban", .group = .rooms, .source_w = 186, .source_h = 170 },
@@ -115,7 +115,7 @@ pub const specs = [_]Spec{
     .{ .id = .rename_set, .resource = "IDD_RENAMESET", .title = "Rename rule set", .group = .automation, .source_w = 226, .source_h = 79 },
     .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Online notifications", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule settings", .group = .automation, .source_w = 186, .source_h = 95 },
-    .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Online members", .group = .automation, .source_w = 262, .source_h = 111 },
+    .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Online CAST", .group = .automation, .source_w = 262, .source_h = 111 },
     .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Servers", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Password", .group = .connection, .source_w = 198, .source_h = 127 },
     .{ .id = .create_set, .resource = "IDD_CREATESET", .title = "Create rule set", .group = .automation, .source_w = 226, .source_h = 79 },
@@ -148,7 +148,7 @@ pub fn fromResource(name: []const u8) ?Id {
 pub fn prompt(id: Id) ?[]const u8 {
     return switch (id) {
         .channel, .channel_create => "Room name",
-        .nickname => "Nickname",
+        .nickname => "Sign-in name",
         .kick, .ban, .invite, .whisper, .call_link, .member_profile => "CAST member",
         .away => "Away message",
         .password, .channel_password => "Password",
@@ -183,14 +183,14 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Member layout", .hint = "Portraits or compact list", .kind = .choice },
             .{ .label = "Status details", .hint = "Activity panel density", .kind = .choice },
         },
-        .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Display name", .hint = "Visible nickname" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
+        .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Display name", .hint = "Visible sign-in name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
         .character => &.{
             .{ .label = "Character", .kind = .choice },
             .{ .label = "Expression preview", .kind = .choice },
             .{ .label = "Character gallery", .hint = "Previous, selected, and next", .kind = .preview },
         },
         .background => &.{ .{ .label = "Backdrop name", .kind = .choice }, .{ .label = "Preview", .hint = "Bundled background", .kind = .preview } },
-        .nickname => &.{.{ .label = "Nickname", .hint = "Visible on the Sunday page" }},
+        .nickname => &.{.{ .label = "Sign-in name", .hint = "Visible on the Sunday page" }},
         .password => &.{ .{ .label = "Account", .hint = "Server account name" }, .{ .label = "Password", .hint = "Account password", .kind = .password } },
         .channel => &.{ .{ .label = "Room name", .hint = "#room" }, .{ .label = "Optional password", .hint = "If the room is locked", .kind = .password } },
         .channel_create => &.{
@@ -343,7 +343,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .choose_color => "Apply color",
         .comics_view => "Apply layout",
         .room_list => "Join room",
-        .user_list => "Select member",
+        .user_list => "Select CAST",
         .channel => "Join room",
         .channel_create => "Create room",
         .kick => "Kick",
@@ -367,7 +367,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .call_link => "Send call link",
         .member_profile => "Request profile",
         .about, .motd, .connection_features => "Close",
-        .nickname => "Set nickname",
+        .nickname => "Set sign-in name",
         .password => "Sign in",
         .channel_password => "Unlock room",
         .invitation => "Accept",
@@ -444,7 +444,10 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Whisper", get(.whisper).title);
     try std.testing.expectEqualStrings("Connection setup", get(.setup).title);
     try std.testing.expectEqualStrings("Sign in", primaryLabel(.password));
-    try std.testing.expectEqualStrings("Set nickname", primaryLabel(.nickname));
+    try std.testing.expectEqualStrings("Set sign-in name", primaryLabel(.nickname));
+    try std.testing.expectEqualStrings("Sign-in name", get(.nickname).title);
+    try std.testing.expectEqualStrings("Sign-in name", fields(.nickname)[0].label);
+    try std.testing.expectEqualStrings("Select CAST", primaryLabel(.user_list));
     try std.testing.expectEqualStrings("Send", primaryLabel(.sound));
     try std.testing.expectEqualStrings("Join room", primaryLabel(.channel));
     try std.testing.expectEqualStrings("Save profile", primaryLabel(.personal));
@@ -477,7 +480,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Sign-in", fields(.connection_features)[1].label);
     try std.testing.expectEqualStrings("Enabled features", fields(.connection_features)[3].label);
     try std.testing.expectEqualStrings("Away message", get(.away).title);
-    try std.testing.expectEqualStrings("Online members", get(.notification_users).title);
+    try std.testing.expectEqualStrings("Online CAST", get(.notification_users).title);
     try std.testing.expectEqualStrings("Rename open set", get(.rename_loaded_set).title);
     try std.testing.expectEqualStrings("Page mode", fields(.comics_view)[0].label);
     try std.testing.expectEqualStrings("Sunday page or conversation", fields(.settings)[3].hint);
