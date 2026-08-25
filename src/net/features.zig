@@ -76,6 +76,8 @@ pub const State = struct {
     chanmodes: irc_map.ChanModes = .default,
     statusmsg: irc_map.StatusMsg = .default,
     session_limits: irc_map.SessionLimits = .{},
+    network: [64]u8 = @splat(0),
+    network_len: u8 = 0,
     redacted_ids: std.ArrayList([]u8) = .empty,
     pending_echoes: std.ArrayList(Echo) = .empty,
     outstanding_labels: std.ArrayList(Label) = .empty,
@@ -351,6 +353,10 @@ pub const State = struct {
         self.refreshAdvertisedMaps();
     }
 
+    pub fn networkName(self: *const State) []const u8 {
+        return self.network[0..self.network_len];
+    }
+
     pub fn advertised(self: *const State) irc_map.Advertised {
         return .{
             .casemapping = self.casemapping,
@@ -404,6 +410,21 @@ pub const State = struct {
         };
         if (self.isupport("CHANLIMIT")) |token| if (token.value) |value| {
             self.session_limits.chanlimit = irc_map.SessionLimits.parseChanlimit(value);
+        };
+        if (self.isupport("MAXTARGETS")) |token| if (token.value) |value| {
+            self.session_limits.maxtargets = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("MONITOR")) |token| if (token.value) |value| {
+            self.session_limits.monitor = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("SILENCE")) |token| if (token.value) |value| {
+            self.session_limits.silence = irc_map.SessionLimits.parseCount(value);
+        };
+        self.network_len = 0;
+        if (self.isupport("NETWORK")) |token| if (token.value) |value| {
+            const n = @min(value.len, self.network.len);
+            @memcpy(self.network[0..n], value[0..n]);
+            self.network_len = @intCast(n);
         };
     }
 
@@ -895,9 +916,15 @@ test "capability state tracks identity, rename, marker, metadata, and standard r
     try std.testing.expectEqual(@as(usize, 64), state.session_limits.nicklen);
     try std.testing.expectEqual(@as(usize, 50), state.session_limits.chanlimit);
     try std.testing.expectEqual(@as(usize, 390), state.session_limits.topiclen);
+    _ = try state.observe(&message.parse(":irc 005 self NETWORK=Onyx MAXTARGETS=4 MONITOR=128 SILENCE=32 :are supported"));
+    try std.testing.expectEqualStrings("Onyx", state.networkName());
+    try std.testing.expectEqual(@as(usize, 4), state.session_limits.maxtargets);
+    try std.testing.expectEqual(@as(usize, 128), state.session_limits.monitor);
+    try std.testing.expectEqual(@as(usize, 32), state.session_limits.silence);
     _ = try state.observe(&message.parse(":irc 005 self -NICKLEN :are supported"));
     try std.testing.expectEqual(@as(usize, 0), state.session_limits.nicklen);
     try std.testing.expectEqual(@as(usize, 50), state.session_limits.chanlimit);
+    try std.testing.expectEqualStrings("Onyx", state.networkName());
 }
 
 test "echo dedupe, redaction tombstones, and labels are bounded owned state" {

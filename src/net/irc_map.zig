@@ -218,6 +218,9 @@ pub const SessionLimits = struct {
     kicklen: usize = 0,
     keylen: usize = 0,
     chanlimit: usize = 0,
+    maxtargets: usize = 0,
+    monitor: usize = 0,
+    silence: usize = 0,
 
     pub fn parseCount(value: []const u8) usize {
         return std.fmt.parseUnsigned(usize, value, 10) catch 0;
@@ -242,6 +245,19 @@ pub const SessionLimits = struct {
 
     pub fn exceeds(limit: usize, value: []const u8) bool {
         return limit != 0 and value.len > limit;
+    }
+
+    pub fn exceedsCount(limit: usize, count: usize) bool {
+        return limit != 0 and count > limit;
+    }
+
+    pub fn targetCount(list: []const u8) usize {
+        if (list.len == 0) return 0;
+        var count: usize = 1;
+        for (list) |ch| {
+            if (ch == ',') count += 1;
+        }
+        return count;
     }
 };
 
@@ -339,4 +355,8 @@ test "session limits parse CHANLIMIT and clip outgoing text" {
     try std.testing.expectEqualStrings("hello", SessionLimits.clip(0, "hello"));
     try std.testing.expect(SessionLimits.exceeds(4, "alice"));
     try std.testing.expect(!SessionLimits.exceeds(0, "alice"));
+    try std.testing.expectEqual(@as(usize, 3), SessionLimits.targetCount("anna,bob,carol"));
+    try std.testing.expectEqual(@as(usize, 1), SessionLimits.targetCount("anna"));
+    try std.testing.expect(SessionLimits.exceedsCount(4, 5));
+    try std.testing.expect(!SessionLimits.exceedsCount(0, 20));
 }

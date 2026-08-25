@@ -745,6 +745,7 @@ pub const Client = struct {
         if (operation == .add or operation == .remove) {
             const names = nicks orelse return error.InvalidIrcParameter;
             if (!validMonitorList(names)) return error.InvalidIrcParameter;
+            try self.rejectTooManyTargets(names);
             try self.appendCommand("MONITOR", &.{ verb, names });
         } else {
             if (nicks != null) return error.InvalidIrcParameter;
@@ -1276,6 +1277,7 @@ pub const Client = struct {
     /// peer to display the whisper in its channel context.
     pub fn whisper(self: *Client, channel: []const u8, recipients: []const u8, text: []const u8) !void {
         if (channel.len == 0 or recipients.len == 0) return error.InvalidIrcParameter;
+        try self.rejectTooManyTargets(recipients);
         try self.validateOutgoingText(text);
         try self.appendCommandTrailing("WHISPER", &.{ channel, recipients, text });
         try self.queueOut(.interactive, false, false);
@@ -1571,6 +1573,12 @@ pub const Client = struct {
             const current = if (self.restoration) |restoration| restoration.targetCount() else 0;
             if (current >= limits.chanlimit) return error.InvalidIrcParameter;
         }
+    }
+
+    fn rejectTooManyTargets(self: *const Client, list: []const u8) !void {
+        const cap = self.advertisedLimits().maxtargets;
+        if (irc_map.SessionLimits.exceedsCount(cap, irc_map.SessionLimits.targetCount(list)))
+            return error.InvalidIrcParameter;
     }
 
     pub fn takeStsUpgradePort(self: *Client) ?u16 {

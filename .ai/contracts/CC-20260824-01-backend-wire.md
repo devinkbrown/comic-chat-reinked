@@ -85,6 +85,13 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Show leftover live numerics 256-259, 302, 303, 321, 369, 371, 374 and send failures 406, 468, 524
 - Reset the new maps and limits on disconnect with the rest of ISUPPORT
 
+## Wave 13 leftovers in scope
+
+- Apply advertised `NETWORK` to notify matching, and `MAXTARGETS` / `MONITOR` / `SILENCE` to send/subscribe caps
+- Apply numeric `043` SAVENICK to the live nick so a forced rename does not desync session identity
+- Show leftover live numerics 015-017, 043, 270, 281, 282, 301, 304, 316, 325, 328, 344, 360, 364, 365, 373, 382, 717, 718, 824, 825
+- Show leftover send failures 402, 407, 411, 416, 440, 456-458, 480, 489, 492, 494, 716, 821-823
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules

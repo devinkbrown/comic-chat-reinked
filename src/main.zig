@@ -3926,7 +3926,7 @@ fn processWorkspaceMessages(
             }
         }
         if (std.mem.eql(u8, msg.command, "352")) {
-            try collectNotificationWho(workspace.gpa, state, preferences, &msg, client.host);
+            try collectNotificationWho(workspace.gpa, state, preferences, &msg, client.host, advertisedNetworkName(client));
             continue;
         }
         if (std.mem.eql(u8, msg.command, "315")) {
@@ -3939,6 +3939,12 @@ fn processWorkspaceMessages(
         }
         if (std.mem.eql(u8, msg.command, "271") or std.ascii.eqlIgnoreCase(msg.command, "SILENCE")) {
             observeSilenceState(workspace.gpa, state, &msg);
+        }
+        if (std.mem.eql(u8, msg.command, "043")) {
+            if (msg.param(1)) |assigned| {
+                try workspace.setSelfNick(assigned);
+                try network.adoptNick(assigned);
+            }
         }
         if (std.mem.eql(u8, msg.command, "005")) {
             applyClientIsupport(workspace, client);
@@ -4108,11 +4114,11 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch
         return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE");
     return switch (code) {
-        2, 3, 4, 10, 20, 42, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 271, 272, 276 => true,
-        302, 303, 307, 308, 310, 311, 312, 313, 314, 317, 318, 319, 320, 321, 330, 335, 338, 351, 369, 371, 374, 378, 379, 391 => true,
-        322, 323, 329, 341, 346, 347, 348, 349, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
-        710, 711, 712, 713, 714, 715, 732, 733, 734 => true,
-        801...819, 900...908, 913...925 => true,
+        2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
+        301, 302, 303, 304, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
+        322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
+        710, 711, 712, 713, 714, 715, 717, 718, 732, 733, 734 => true,
+        801...819, 824, 825, 900...908, 913...925 => true,
         else => false,
     };
 }
@@ -4336,7 +4342,23 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "485") or
         std.mem.eql(u8, command, "406") or
         std.mem.eql(u8, command, "468") or
-        std.mem.eql(u8, command, "524");
+        std.mem.eql(u8, command, "524") or
+        std.mem.eql(u8, command, "402") or
+        std.mem.eql(u8, command, "407") or
+        std.mem.eql(u8, command, "411") or
+        std.mem.eql(u8, command, "416") or
+        std.mem.eql(u8, command, "440") or
+        std.mem.eql(u8, command, "456") or
+        std.mem.eql(u8, command, "457") or
+        std.mem.eql(u8, command, "458") or
+        std.mem.eql(u8, command, "480") or
+        std.mem.eql(u8, command, "489") or
+        std.mem.eql(u8, command, "492") or
+        std.mem.eql(u8, command, "494") or
+        std.mem.eql(u8, command, "716") or
+        std.mem.eql(u8, command, "821") or
+        std.mem.eql(u8, command, "822") or
+        std.mem.eql(u8, command, "823");
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
@@ -4656,6 +4678,11 @@ fn applySilenceOperation(
     switch (action) {
         .list => try client.silence(.list, null),
         .add => {
+            if (client.featureState()) |features| {
+                const cap = features.session_limits.silence;
+                if (cap != 0 and state.silence_masks.items.len >= cap)
+                    return error.InvalidIrcParameter;
+            }
             try client.silence(.add, mask);
             _ = try rememberNotificationNick(gpa, &state.silence_masks, mask);
         },
@@ -4804,14 +4831,22 @@ fn monitorNickFromTarget(target: []const u8) []const u8 {
 }
 
 fn subscribeMonitorTargets(client: *cc.net.client.Client, preferences: *const cc.client.preferences.Store) !void {
+    const limits = if (client.featureState()) |features| features.session_limits else cc.net.irc_map.SessionLimits{};
+    const max_batch = if (limits.maxtargets == 0) std.math.maxInt(usize) else limits.maxtargets;
+    const max_total = if (limits.monitor == 0) std.math.maxInt(usize) else limits.monitor;
     var list: [400]u8 = undefined;
     var used: usize = 0;
+    var batch_count: usize = 0;
+    var total: usize = 0;
     for (preferences.notifications.items) |notification| {
         if (!notificationUsesMonitor(&notification)) continue;
+        if (total >= max_total) break;
         const nick = notification.nickname;
-        if (used != 0 and used + 1 + nick.len > list.len) {
+        const next_len = used + @intFromBool(used != 0) + nick.len;
+        if (used != 0 and (batch_count >= max_batch or next_len > list.len)) {
             try client.monitor(.add, list[0..used]);
             used = 0;
+            batch_count = 0;
         }
         if (used != 0) {
             list[used] = ',';
@@ -4819,6 +4854,8 @@ fn subscribeMonitorTargets(client: *cc.net.client.Client, preferences: *const cc
         }
         @memcpy(list[used..][0..nick.len], nick);
         used += nick.len;
+        batch_count += 1;
+        total += 1;
     }
     if (used != 0) try client.monitor(.add, list[0..used]);
 }
@@ -4915,12 +4952,23 @@ fn applyMonitorNumeric(
     return changed;
 }
 
+fn advertisedNetworkName(client: *const cc.net.client.Client) []const u8 {
+    return if (client.featureState()) |features| features.networkName() else "";
+}
+
+fn notificationNetworkMatches(stored: []const u8, host: []const u8, advertised: []const u8) bool {
+    if (stored.len == 0) return true;
+    if (std.ascii.eqlIgnoreCase(stored, host)) return true;
+    return advertised.len != 0 and std.ascii.eqlIgnoreCase(stored, advertised);
+}
+
 fn collectNotificationWho(
     gpa: std.mem.Allocator,
     state: *ChatState,
     preferences: *const cc.client.preferences.Store,
     msg: *const cc.net.message.Message,
-    network_name: []const u8,
+    host_name: []const u8,
+    advertised_network: []const u8,
 ) !void {
     if (msg.param_count < 6) return;
     const user = msg.params[2];
@@ -4928,7 +4976,7 @@ fn collectNotificationWho(
     const nickname = msg.params[5];
     for (preferences.notifications.items) |notification| {
         if (!notification.enabled) continue;
-        if (notification.network.len != 0 and !std.ascii.eqlIgnoreCase(notification.network, network_name)) continue;
+        if (!notificationNetworkMatches(notification.network, host_name, advertised_network)) continue;
         var pattern: [512]u8 = undefined;
         const mask = std.fmt.bufPrint(&pattern, "{s}!{s}@{s}", .{ notification.nickname, notification.user_mask, notification.host_mask }) catch continue;
         var identity: [512]u8 = undefined;
@@ -5842,6 +5890,26 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("369"));
     try std.testing.expect(isVisibleServerWorkflowReply("371"));
     try std.testing.expect(isVisibleServerWorkflowReply("374"));
+    try std.testing.expect(isVisibleServerWorkflowReply("043"));
+    try std.testing.expect(isVisibleServerWorkflowReply("015"));
+    try std.testing.expect(isVisibleServerWorkflowReply("301"));
+    try std.testing.expect(isVisibleServerWorkflowReply("281"));
+    try std.testing.expect(isVisibleServerWorkflowReply("304"));
+    try std.testing.expect(isVisibleServerWorkflowReply("325"));
+    try std.testing.expect(isVisibleServerWorkflowReply("364"));
+    try std.testing.expect(isVisibleServerWorkflowReply("717"));
+    try std.testing.expect(isVisibleServerWorkflowReply("824"));
+    try std.testing.expect(isCommandFailureNumeric("402"));
+    try std.testing.expect(isCommandFailureNumeric("407"));
+    try std.testing.expect(isCommandFailureNumeric("411"));
+    try std.testing.expect(isCommandFailureNumeric("416"));
+    try std.testing.expect(isCommandFailureNumeric("440"));
+    try std.testing.expect(isCommandFailureNumeric("456"));
+    try std.testing.expect(isCommandFailureNumeric("480"));
+    try std.testing.expect(isCommandFailureNumeric("489"));
+    try std.testing.expect(isCommandFailureNumeric("492"));
+    try std.testing.expect(isCommandFailureNumeric("716"));
+    try std.testing.expect(isCommandFailureNumeric("821"));
     try std.testing.expect(isCommandFailureNumeric("406"));
     try std.testing.expect(isCommandFailureNumeric("468"));
     try std.testing.expect(isCommandFailureNumeric("524"));
@@ -6063,8 +6131,10 @@ test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
         .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
         .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
         .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+        .features = try cc.net.features.State.init(gpa, "me", .{}),
     };
     defer {
+        if (client.features) |*owned_features| owned_features.deinit();
         if (client.restoration) |*restoration| restoration.deinit();
         client.aggregator.deinit();
         client.tx.deinit();
@@ -6072,10 +6142,23 @@ test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
         client.out.deinit(gpa);
         gpa.free(owned_host);
     }
+    if (client.features) |*owned_features|
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me NETWORK=Onyx MAXTARGETS=1 MONITOR=128 SILENCE=1 :are supported"));
+    try std.testing.expect(notificationNetworkMatches("Onyx", "irc.example", advertisedNetworkName(&client)));
+    try std.testing.expect(notificationNetworkMatches("irc.example", "irc.example", advertisedNetworkName(&client)));
+    try std.testing.expect(!notificationNetworkMatches("Efnet", "irc.example", advertisedNetworkName(&client)));
     try subscribeMonitorTargets(&client, &preferences);
     try client.monitor(.status, null);
-    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MONITOR + alice,bob\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MONITOR S\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MONITOR + alice\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MONITOR + bob\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "MONITOR S\r\n") != null);
+    try std.testing.expectError(error.InvalidIrcParameter, client.whisper("#root", "anna,bob", "secret"));
+    try std.testing.expectError(error.InvalidIrcParameter, client.monitor(.add, "eve,frank"));
+    try applySilenceOperation(&client, &state, gpa, .add, "one!*@*");
+    try std.testing.expectError(error.InvalidIrcParameter, applySilenceOperation(&client, &state, gpa, .add, "two!*@*"));
+    const saved = cc.net.message.parse(":server 043 me savednick :Nick saved");
+    if (saved.param(1)) |assigned| try workspace.setSelfNick(assigned);
+    try std.testing.expectEqualStrings("savednick", workspace.self_nick);
     try client.join("#root");
     try std.testing.expect(client.restoresChannel("#root"));
     try std.testing.expect(!client.restoresChannel("#late"));
