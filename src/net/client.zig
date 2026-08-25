@@ -548,6 +548,16 @@ pub const Client = struct {
         try self.queueOut(.interactive, true, false);
     }
 
+    pub fn clearBan(self: *Client, channel: []const u8, mask: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "-b", mask });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    pub fn listBans(self: *Client, channel: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "+b" });
+        try self.queueOut(.interactive, true, false);
+    }
+
     pub fn setTopic(self: *Client, channel: []const u8, topic: []const u8) !void {
         try self.appendCommandTrailing("TOPIC", &.{ channel, topic });
         try self.queueOut(.interactive, true, false);

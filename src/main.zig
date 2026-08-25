@@ -1282,6 +1282,10 @@ const ChatState = struct {
     last_transfer_bytes: u64 = 0,
     flood_entries: std.ArrayList(FloodEntry) = .empty,
     desktop_notification: ?[]u8 = null,
+    motd: std.ArrayList(u8) = .empty,
+    last_invite_channel: ?[]u8 = null,
+    last_invite_from: ?[]u8 = null,
+    last_key_channel: ?[]u8 = null,
 
     fn deinit(self: *ChatState, gpa: std.mem.Allocator) void {
         for (self.pending_udi.items) |*entry| entry.deinit(gpa);
@@ -1295,7 +1299,18 @@ const ChatState = struct {
         for (self.flood_entries.items) |entry| gpa.free(entry.nick);
         self.flood_entries.deinit(gpa);
         if (self.desktop_notification) |message| gpa.free(message);
+        self.motd.deinit(gpa);
+        if (self.last_invite_channel) |value| gpa.free(value);
+        if (self.last_invite_from) |value| gpa.free(value);
+        if (self.last_key_channel) |value| gpa.free(value);
         self.* = undefined;
+    }
+
+    fn replaceOwned(self: *ChatState, gpa: std.mem.Allocator, slot: *?[]u8, value: []const u8) !void {
+        _ = self;
+        const owned = try gpa.dupe(u8, value);
+        if (slot.*) |old| gpa.free(old);
+        slot.* = owned;
     }
 
     fn rememberUdi(self: *ChatState, gpa: std.mem.Allocator, target: []const u8, nick: []const u8, wire: []const u8) !void {
@@ -1648,6 +1663,19 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
     if (state.pending_dcc) |*offer| {
         offer.deinit(gpa);
         state.pending_dcc = null;
+    }
+    state.motd.clearRetainingCapacity();
+    if (state.last_invite_channel) |value| {
+        gpa.free(value);
+        state.last_invite_channel = null;
+    }
+    if (state.last_invite_from) |value| {
+        gpa.free(value);
+        state.last_invite_from = null;
+    }
+    if (state.last_key_channel) |value| {
+        gpa.free(value);
+        state.last_key_channel = null;
     }
     if (workspace) |rooms| rooms.markDisconnected();
 }
@@ -2211,7 +2239,7 @@ fn prefillOpenedDialog(
     composer_text: []const u8,
     preferences: *const cc.client.preferences.Store,
     state: *const ChatState,
-    client: ?*const cc.net.client.Client,
+    client: ?*cc.net.client.Client,
 ) !void {
     const id = view.active_dialog orelse return;
     switch (id) {
@@ -2289,6 +2317,14 @@ fn prefillOpenedDialog(
         .print_preview => {
             try view.setDialogValueAt(0, "comicchat-print.pdf");
             try view.setDialogValueAt(1, "Save PDF");
+        },
+        .motd => {
+            try view.setDialogValueAt(0, if (state.motd.items.len == 0) "Requesting the server message of the day." else state.motd.items);
+            if (client) |connected| connected.motd(null) catch {};
+        },
+        .invitation => {
+            if (state.last_invite_channel) |channel| try view.setDialogValueAt(0, channel);
+            if (state.last_invite_from) |who| try view.setDialogValueAt(1, who);
         },
         .connection_features => {
             try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Disconnected");
@@ -3044,7 +3080,44 @@ fn applyDialogAction(
             if (ban_mask.len != 0) try client.setBan(room.name, ban_mask);
             try client.kick(room.name, value, view.dialogValueAt(1));
         },
-        .ban => if (maybe_client) |client| try client.setBan(room.name, value),
+        .ban => if (maybe_client) |client| switch (classifyBanMask(value)) {
+            .list => try client.listBans(room.name),
+            .delete => {
+                const mask = banMaskArgument(value);
+                if (mask.len == 0) {
+                    view.setDialogNotice("Enter the mask to unban, for example -nick!*@*.");
+                    return;
+                }
+                try client.clearBan(room.name, mask);
+            },
+            .add => try client.setBan(room.name, value),
+        },
+        .channel_password => {
+            const client = maybe_client orelse {
+                view.setDialogNotice("Connect before joining a password-protected room.");
+                return;
+            };
+            const target = state.last_key_channel orelse room.name;
+            const index = workspace.ensure(target) catch {
+                view.setDialogNotice("Enter a valid room beginning with # or &.");
+                return;
+            };
+            _ = workspace.activate(index);
+            try client.joinWithKey(target, value);
+            try workspace.rooms.items[index].setJoinKey(gpa, value);
+        },
+        .invitation => {
+            const target = if (value.len != 0) value else state.last_invite_channel orelse {
+                view.setDialogNotice("No pending room invitation.");
+                return;
+            };
+            const index = workspace.ensure(target) catch {
+                view.setDialogNotice("Enter a valid room beginning with # or &.");
+                return;
+            };
+            _ = workspace.activate(index);
+            if (maybe_client) |client| try client.join(target);
+        },
         .invite => if (maybe_client) |client| try client.invite(value, room.name),
         .user_list, .whisper => {
             const selected = selectRosterMember(&room.transcript, value) orelse {
@@ -3603,8 +3676,11 @@ fn processWorkspaceMessages(
             const room_name = msg.param(1) orelse "";
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
             if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, &active_room.transcript, preferences, "Invitation", who, room_name, "");
-            if (std.ascii.eqlIgnoreCase(invited, workspace.self_nick))
+            if (std.ascii.eqlIgnoreCase(invited, workspace.self_nick)) {
+                try state.replaceOwned(workspace.gpa, &state.last_invite_channel, room_name);
+                try state.replaceOwned(workspace.gpa, &state.last_invite_from, who);
                 redraw = (try appendInviteLine(workspace, who, room_name)) or redraw;
+            }
         } else if (std.ascii.eqlIgnoreCase(msg.command, "KILL")) {
             const victim = msg.param(0) orelse "";
             if (std.ascii.eqlIgnoreCase(victim, workspace.self_nick)) {
@@ -3629,6 +3705,11 @@ fn processWorkspaceMessages(
                 state.status = "disconnected";
                 return error.IrcServerError;
             }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "KNOCK")) {
+            redraw = (try appendKnockLine(workspace, state, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "EVENT")) {
+            if (workspaceTranscriptRoom(workspace, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
+            redraw = true;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "ACCOUNT") or
             std.ascii.eqlIgnoreCase(msg.command, "CHGHOST") or
             std.ascii.eqlIgnoreCase(msg.command, "SETNAME"))
@@ -3682,6 +3763,7 @@ fn processWorkspaceMessages(
         }
         if (isVisibleServerWorkflowReply(msg.command)) {
             if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
+            try rememberMotd(state, workspace.gpa, &msg);
             if (workspaceTranscriptRoom(workspace, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
             redraw = true;
             continue;
@@ -3835,7 +3917,8 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
     return switch (code) {
         221, 251, 252, 253, 254, 255, 263 => true,
         311, 312, 313, 314, 317, 318, 319 => true,
-        322, 323, 341, 372, 375, 376, 381, 396, 671 => true,
+        322, 323, 341, 367, 368, 372, 375, 376, 381, 396, 671 => true,
+        710, 711, 712, 713, 714, 715 => true,
         801...819, 900...908, 913...925 => true,
         else => false,
     };
@@ -4159,6 +4242,8 @@ fn applyJoinDenied(
     } else if (workspace.activeRoom()) |active| {
         try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
     }
+    if (std.mem.eql(u8, msg.command, "475") and channel.len != 0)
+        try state.replaceOwned(workspace.gpa, &state.last_key_channel, channel);
     refreshJoinedState(workspace, state, "join denied");
     return true;
 }
@@ -4173,6 +4258,61 @@ fn appendInviteLine(workspace: *cc.client.workspace.Workspace, who: []const u8, 
     const index = room_index orelse return false;
     try workspace.rooms.items[index].transcript.addWithOptions("Invite", line, .{ .modes = cc.proto.udi.bm_action });
     return true;
+}
+
+fn appendKnockLine(
+    workspace: *cc.client.workspace.Workspace,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const room_name = msg.param(0) orelse "";
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+    const reason = msg.param(1) orelse "";
+    if (room_name.len != 0) try state.replaceOwned(workspace.gpa, &state.last_invite_channel, room_name);
+    if (who.len != 0) try state.replaceOwned(workspace.gpa, &state.last_invite_from, who);
+    var buf: [280]u8 = undefined;
+    const line = if (reason.len == 0)
+        std.fmt.bufPrint(&buf, "{s} knocked on {s}", .{
+            if (who.len == 0) "Someone" else who,
+            if (room_name.len == 0) "a room" else room_name,
+        }) catch "A member knocked."
+    else
+        std.fmt.bufPrint(&buf, "{s} knocked on {s} ({s})", .{
+            if (who.len == 0) "Someone" else who,
+            if (room_name.len == 0) "a room" else room_name,
+            reason,
+        }) catch "A member knocked.";
+    const room_index = workspace.find(room_name) orelse workspace.active;
+    const index = room_index orelse return false;
+    try workspace.rooms.items[index].transcript.addWithOptions("Knock", line, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+const BanAction = enum { add, delete, list };
+
+fn classifyBanMask(mask: []const u8) BanAction {
+    const trimmed = std.mem.trim(u8, mask, " \t");
+    if (trimmed.len == 0) return .list;
+    if (trimmed[0] == '-') return .delete;
+    return .add;
+}
+
+fn banMaskArgument(mask: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, mask, " \t");
+    if (trimmed.len > 0 and trimmed[0] == '-') return std.mem.trim(u8, trimmed[1..], " \t");
+    return trimmed;
+}
+
+fn rememberMotd(state: *ChatState, gpa: std.mem.Allocator, msg: *const cc.net.message.Message) !void {
+    if (!std.mem.eql(u8, msg.command, "372") and
+        !std.mem.eql(u8, msg.command, "375") and
+        !std.mem.eql(u8, msg.command, "376")) return;
+    if (std.mem.eql(u8, msg.command, "375")) state.motd.clearRetainingCapacity();
+    const raw = msg.param(1) orelse return;
+    const text = if (std.mem.startsWith(u8, raw, "- ")) raw[2..] else raw;
+    if (state.motd.items.len != 0) try state.motd.append(gpa, '\n');
+    try state.motd.appendSlice(gpa, text);
+    if (state.motd.items.len > 4096) state.motd.shrinkRetainingCapacity(4096);
 }
 
 fn appendNickNumericLine(
@@ -5137,6 +5277,61 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(empty.activeRoom() == null);
     try std.testing.expect(workspaceTranscriptRoom(&empty, "#root") != null);
     try std.testing.expectEqualStrings("#root", empty.rooms.items[0].name);
+}
+
+test "MOTD, invite, knock, key, and ban helpers stay live" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+
+    try rememberMotd(&state, gpa, &cc.net.message.parse(":server 375 me :- eshmaki MOTD"));
+    try rememberMotd(&state, gpa, &cc.net.message.parse(":server 372 me :- Welcome to #root"));
+    try rememberMotd(&state, gpa, &cc.net.message.parse(":server 376 me :- End of MOTD"));
+    try std.testing.expect(std.mem.indexOf(u8, state.motd.items, "Welcome to #root") != null);
+    try std.testing.expect(isVisibleServerWorkflowReply("367"));
+    try std.testing.expect(isVisibleServerWorkflowReply("368"));
+    try std.testing.expect(isVisibleServerWorkflowReply("710"));
+
+    try std.testing.expect(try appendKnockLine(&workspace, &state, &cc.net.message.parse(":alice!u@h KNOCK #locked :please")));
+    try std.testing.expectEqualStrings("#locked", state.last_invite_channel.?);
+    try std.testing.expectEqualStrings("alice", state.last_invite_from.?);
+    try std.testing.expectEqualStrings("alice knocked on #locked (please)", workspace.rooms.items[0].transcript.lines.items[0].text);
+
+    const denied = cc.net.message.parse(":server 475 me #vault :Cannot join channel (+k)");
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &denied));
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+    try std.testing.expectEqual(BanAction.list, classifyBanMask(""));
+    try std.testing.expectEqual(BanAction.delete, classifyBanMask("-alice!*@*"));
+    try std.testing.expectEqual(BanAction.add, classifyBanMask("alice!*@*"));
+    try std.testing.expectEqualStrings("alice!*@*", banMaskArgument("-alice!*@*"));
+
+    try client.listBans("#root");
+    try client.clearBan("#root", "alice!*@*");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MODE #root +b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MODE #root -b alice!*@*") != null);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {
