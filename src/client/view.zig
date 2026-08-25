@@ -3678,7 +3678,6 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .text_font, .set_text_font => "Type on the Sunday page",
         .about => "Portable Ink Sunday client",
         .motd => "From the wire",
-        else => "",
     };
 }
 
