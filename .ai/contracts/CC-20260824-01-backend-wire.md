@@ -63,6 +63,14 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Rejoin workspace rooms that restoration does not already cover
 - Show remaining live numerics 329 and send failure 486
 
+## Wave 10 leftovers in scope
+
+- SILENCE on the existing Ban and User List dialogs (`s`/`silence`/`ignore`, `s:mask`, `-s:mask`; User List filter `silence`/`ignore`)
+- Remember silence masks and away text across reconnect; resend after 001
+- Consume TAGMSG/EDIT/REDACT as action lines without a message editor
+- Show leftover live numerics 042, 271, 272, 335, 379 and send failures 439, 511
+- Skip SASL EXTERNAL, NetMeeting, onyx/e2ee, remote art, and PR #11 UI
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules

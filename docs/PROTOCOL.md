@@ -276,8 +276,8 @@ disconnect the existing client.
 The pinned client-tag specifications are covered as well. Typed send methods
 produce `+draft/reply`, `+draft/react`, `+draft/unreact`, and rate-limited `+typing`
 messages when either generic `message-tags` or their corresponding narrow Onyx
-draft capability is enabled; incoming `TAGMSG` is not inserted into comic
-history by default.
+draft capability is enabled; incoming `TAGMSG`, `EDIT`, and `REDACT` appear as
+action lines in the live transcript and do not rewrite comic history.
 Onyx named conversations use the narrow `onyx/topics` capability and emit
 escaped `+onyx/topic=<label>` tags on `PRIVMSG` or `NOTICE`, without requiring
 generic tags. Contextual direct messages use

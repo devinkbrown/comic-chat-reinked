@@ -1347,6 +1347,8 @@ const ChatState = struct {
     notification_poll_pending: usize = 0,
     notification_current: std.ArrayList([]u8) = .empty,
     notification_previous: std.ArrayList([]u8) = .empty,
+    silence_masks: std.ArrayList([]u8) = .empty,
+    away_message: ?[]u8 = null,
     monitor_subscribed: bool = false,
     last_transfer_bytes: u64 = 0,
     flood_entries: std.ArrayList(FloodEntry) = .empty,
@@ -1365,6 +1367,8 @@ const ChatState = struct {
         if (self.transfer) |*transfer| transfer.deinit();
         freeStringList(gpa, &self.notification_current);
         freeStringList(gpa, &self.notification_previous);
+        freeStringList(gpa, &self.silence_masks);
+        if (self.away_message) |value| gpa.free(value);
         for (self.flood_entries.items) |entry| gpa.free(entry.nick);
         self.flood_entries.deinit(gpa);
         if (self.desktop_notification) |message| gpa.free(message);
@@ -1748,6 +1752,8 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
         state.last_key_channel = null;
     }
     if (workspace) |rooms| rooms.markDisconnected();
+    // Silence masks and away text survive reconnect so they can be resent
+    // after 001 without a dedicated dialog or disk file.
 }
 
 fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
@@ -2657,8 +2663,12 @@ fn applyDialogAction(
         return;
     }
     if (cc.client.dialogs.requiresInput(id) and value.len == 0) {
-        view.setDialogNotice("Complete the first field before continuing.");
-        return;
+        const allow_empty = id == .ban or
+            (id == .user_list and silenceFilterToken(std.mem.trim(u8, view.dialogValueAt(1), " \t")));
+        if (!allow_empty) {
+            view.setDialogNotice("Complete the first field before continuing.");
+            return;
+        }
     }
     const maybe_client = network.clientPtr();
     const room = workspace.activeRoom() orelse return;
@@ -3165,6 +3175,12 @@ fn applyDialogAction(
         .nickname => if (maybe_client) |client| try client.changeNick(value),
         .away => if (maybe_client) |client| {
             try client.setAway(value);
+            if (value.len == 0) {
+                if (state.away_message) |old| {
+                    gpa.free(old);
+                    state.away_message = null;
+                }
+            } else try state.replaceOwned(gpa, &state.away_message, value);
             for (workspace.rooms.items) |*joined_room| {
                 if (joined_room.joined) try client.sendAwayControl(joined_room.name, value);
             }
@@ -3177,11 +3193,26 @@ fn applyDialogAction(
         .ban => if (maybe_client) |client| {
             const list = classifyChannelListMask(value);
             const mask = channelListMaskArgument(value, list.kind);
+            if (list.kind == .silence) {
+                if (list.action != .list and mask.len == 0) {
+                    view.setDialogNotice("Enter the mask to silence or unsilence, for example s:nick!*@* or -s:nick!*@*.");
+                    return;
+                }
+                applySilenceOperation(client, state, gpa, list.action, mask) catch |err| switch (err) {
+                    error.InvalidIrcParameter => {
+                        view.setDialogNotice("Enter a valid silence mask without spaces.");
+                        return;
+                    },
+                    else => return err,
+                };
+                return;
+            }
             switch (list.action) {
                 .list => switch (list.kind) {
                     .ban => try client.listBans(room.name),
                     .except => try client.listExceptions(room.name),
                     .invite => try client.listInviteMasks(room.name),
+                    .silence => unreachable,
                 },
                 .delete => {
                     if (mask.len == 0) {
@@ -3192,12 +3223,14 @@ fn applyDialogAction(
                         .ban => try client.clearBan(room.name, mask),
                         .except => try client.clearException(room.name, mask),
                         .invite => try client.clearInviteMask(room.name, mask),
+                        .silence => unreachable,
                     }
                 },
                 .add => switch (list.kind) {
                     .ban => try client.setBan(room.name, value),
                     .except => try client.setException(room.name, mask),
                     .invite => try client.setInviteMask(room.name, mask),
+                    .silence => unreachable,
                 },
             }
         },
@@ -3229,6 +3262,25 @@ fn applyDialogAction(
         },
         .invite => if (maybe_client) |client| try client.invite(value, room.name),
         .user_list, .whisper => {
+            if (id == .user_list and silenceFilterToken(std.mem.trim(u8, view.dialogValueAt(1), " \t"))) {
+                const client = maybe_client orelse {
+                    view.setDialogNotice("Connect before changing silence.");
+                    return;
+                };
+                const silence = classifyUserListSilence(value);
+                if (silence.action != .list and silence.mask.len == 0) {
+                    view.setDialogNotice("Enter the nickname or mask to silence or unsilence.");
+                    return;
+                }
+                applySilenceOperation(client, state, gpa, silence.action, silence.mask) catch |err| switch (err) {
+                    error.InvalidIrcParameter => {
+                        view.setDialogNotice("Enter a valid silence mask without spaces.");
+                        return;
+                    },
+                    else => return err,
+                };
+                return;
+            }
             const selected = selectRosterMember(&room.transcript, value) orelse {
                 view.setDialogNotice("That member is not in the current room.");
                 return;
@@ -3824,6 +3876,11 @@ fn processWorkspaceMessages(
             std.ascii.eqlIgnoreCase(msg.command, "SETNAME"))
         {
             redraw = (try appendIdentityLine(workspace, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "TAGMSG") or
+            std.ascii.eqlIgnoreCase(msg.command, "EDIT") or
+            std.ascii.eqlIgnoreCase(msg.command, "REDACT"))
+        {
+            redraw = (try appendModernEventLine(workspace, &msg)) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "RENAME")) {
             const old_name = msg.param(0) orelse "";
             const new_name = msg.param(1) orelse "";
@@ -3874,6 +3931,9 @@ fn processWorkspaceMessages(
             redraw = (try applyMonitorNumeric(workspace.gpa, state, workspace, preferences, &msg)) or redraw;
             continue;
         }
+        if (std.mem.eql(u8, msg.command, "271") or std.ascii.eqlIgnoreCase(msg.command, "SILENCE")) {
+            observeSilenceState(workspace.gpa, state, &msg);
+        }
         if (isVisibleServerWorkflowReply(msg.command)) {
             if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
             try rememberMotd(state, workspace.gpa, &msg);
@@ -3905,6 +3965,7 @@ fn processWorkspaceMessages(
             }
             state.join_requested = true;
             state.status = "joining";
+            resubscribeSessionControls(client, state);
             if (workspaceTranscriptRoom(workspace, channel)) |welcome_room|
                 try appendServerWorkflowReply(&welcome_room.transcript, &msg);
             redraw = true;
@@ -3928,6 +3989,7 @@ fn processWorkspaceMessages(
                     try room.setPendingTopic(workspace.gpa, "");
                 }
                 try announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data);
+                if (state.away_message) |message| client.sendAwayControl(room.name, message) catch {};
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
                 try sendAutomaticGreeting(client, preferences, joined_channel, who);
@@ -4032,10 +4094,11 @@ fn processWorkspaceMessages(
 }
 
 fn isVisibleServerWorkflowReply(command: []const u8) bool {
-    const code = std.fmt.parseInt(u16, command, 10) catch return std.ascii.eqlIgnoreCase(command, "PROP");
+    const code = std.fmt.parseInt(u16, command, 10) catch
+        return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE");
     return switch (code) {
-        2, 3, 4, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266 => true,
-        307, 311, 312, 313, 314, 317, 318, 319, 330, 338, 378 => true,
+        2, 3, 4, 42, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266, 271, 272 => true,
+        307, 311, 312, 313, 314, 317, 318, 319, 330, 335, 338, 378, 379 => true,
         322, 323, 329, 341, 346, 347, 348, 349, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
         710, 711, 712, 713, 714, 715, 732, 733, 734 => true,
         801...819, 900...908, 913...925 => true,
@@ -4207,6 +4270,7 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "417") or
         std.mem.eql(u8, command, "421") or
         std.mem.eql(u8, command, "486") or
+        std.mem.eql(u8, command, "439") or
         std.mem.eql(u8, command, "441") or
         std.mem.eql(u8, command, "442") or
         std.mem.eql(u8, command, "467") or
@@ -4215,7 +4279,8 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "481") or
         std.mem.eql(u8, command, "482") or
         std.mem.eql(u8, command, "501") or
-        std.mem.eql(u8, command, "502");
+        std.mem.eql(u8, command, "502") or
+        std.mem.eql(u8, command, "511");
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
@@ -4411,8 +4476,9 @@ fn appendKnockLine(
 }
 
 const BanAction = enum { add, delete, list };
-const ChannelListKind = enum { ban, except, invite };
+const ChannelListKind = enum { ban, except, invite, silence };
 const ChannelListAction = struct { action: BanAction, kind: ChannelListKind };
+const UserListSilence = struct { action: BanAction, mask: []const u8 };
 
 fn classifyBanMask(mask: []const u8) BanAction {
     return classifyChannelListMask(mask).action;
@@ -4432,6 +4498,12 @@ fn classifyChannelListMask(mask: []const u8) ChannelListAction {
         return .{ .action = if (rest.len == 0) .list else .add, .kind = .invite };
     if (channelListPrefixed(trimmed, "I:")) |rest|
         return .{ .action = if (rest.len == 0) .list else .add, .kind = .invite };
+    if (channelListToken(trimmed, &.{ "s", "silence", "ignore" })) return .{ .action = .list, .kind = .silence };
+    if (channelListPrefixed(trimmed, "-s")) |_| return .{ .action = .delete, .kind = .silence };
+    if (channelListPrefixed(trimmed, "+s")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .silence };
+    if (channelListPrefixed(trimmed, "s:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .silence };
     if (trimmed.len == 0) return .{ .action = .list, .kind = .ban };
     if (trimmed[0] == '-') return .{ .action = .delete, .kind = .ban };
     return .{ .action = .add, .kind = .ban };
@@ -4460,6 +4532,7 @@ fn channelListMaskArgument(mask: []const u8, kind: ChannelListKind) []const u8 {
     const prefixes: []const []const u8 = switch (kind) {
         .except => &.{ "-e", "+e", "e:" },
         .invite => &.{ "-I", "+I", "I:" },
+        .silence => &.{ "-s", "+s", "s:" },
         .ban => &.{},
     };
     for (prefixes) |prefix| {
@@ -4467,6 +4540,98 @@ fn channelListMaskArgument(mask: []const u8, kind: ChannelListKind) []const u8 {
     }
     if (trimmed.len > 0 and trimmed[0] == '-') return std.mem.trim(u8, trimmed[1..], " \t");
     return trimmed;
+}
+
+fn silenceFilterToken(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "silence") or std.ascii.eqlIgnoreCase(value, "ignore");
+}
+
+fn classifyUserListSilence(nick: []const u8) UserListSilence {
+    const trimmed = std.mem.trim(u8, nick, " \t");
+    if (trimmed.len == 0) return .{ .action = .list, .mask = "" };
+    if (trimmed[0] == '-') return .{ .action = .delete, .mask = std.mem.trim(u8, trimmed[1..], " \t") };
+    return .{ .action = .add, .mask = trimmed };
+}
+
+fn applySilenceOperation(
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    gpa: std.mem.Allocator,
+    action: BanAction,
+    mask: []const u8,
+) !void {
+    switch (action) {
+        .list => try client.silence(.list, null),
+        .add => {
+            try client.silence(.add, mask);
+            _ = try rememberNotificationNick(gpa, &state.silence_masks, mask);
+        },
+        .delete => {
+            try client.silence(.remove, mask);
+            _ = forgetNotificationNick(gpa, &state.silence_masks, mask);
+        },
+    }
+}
+
+fn observeSilenceState(gpa: std.mem.Allocator, state: *ChatState, msg: *const cc.net.message.Message) void {
+    if (std.mem.eql(u8, msg.command, "271")) {
+        if (msg.param(1)) |mask| _ = rememberNotificationNick(gpa, &state.silence_masks, mask) catch {};
+        return;
+    }
+    if (!std.ascii.eqlIgnoreCase(msg.command, "SILENCE")) return;
+    const token = msg.param(0) orelse return;
+    if (token.len < 2) return;
+    if (token[0] == '+') {
+        _ = rememberNotificationNick(gpa, &state.silence_masks, token[1..]) catch {};
+    } else if (token[0] == '-') {
+        _ = forgetNotificationNick(gpa, &state.silence_masks, token[1..]);
+    }
+}
+
+fn resubscribeSessionControls(client: *cc.net.client.Client, state: *const ChatState) void {
+    for (state.silence_masks.items) |mask| {
+        client.silence(.add, mask) catch {};
+    }
+    if (state.away_message) |message| client.setAway(message) catch {};
+}
+
+fn modernEventText(msg: *const cc.net.message.Message, who: []const u8, buf: *[280]u8) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(msg.command, "TAGMSG")) {
+        if (msg.tag("+typing") orelse msg.tag("typing")) |tag| {
+            const value = tag.raw_value orelse "active";
+            if (std.ascii.eqlIgnoreCase(value, "paused"))
+                return std.fmt.bufPrint(buf, "{s} paused typing", .{who}) catch "Typing paused.";
+            if (std.ascii.eqlIgnoreCase(value, "done") or std.ascii.eqlIgnoreCase(value, "clear"))
+                return std.fmt.bufPrint(buf, "{s} stopped typing", .{who}) catch "Typing stopped.";
+            return std.fmt.bufPrint(buf, "{s} is typing", .{who}) catch "Someone is typing.";
+        }
+        return std.fmt.bufPrint(buf, "{s} sent a tag-only message", .{who}) catch "Tag-only message.";
+    }
+    if (std.ascii.eqlIgnoreCase(msg.command, "EDIT")) {
+        const text = msg.param(2) orelse "";
+        return if (text.len != 0)
+            std.fmt.bufPrint(buf, "{s} edited a message: {s}", .{ who, text }) catch "Message edited."
+        else
+            std.fmt.bufPrint(buf, "{s} edited a message", .{who}) catch "Message edited.";
+    }
+    if (std.ascii.eqlIgnoreCase(msg.command, "REDACT")) {
+        const reason = msg.param(2) orelse "";
+        return if (reason.len != 0)
+            std.fmt.bufPrint(buf, "{s} redacted a message ({s})", .{ who, reason }) catch "Message redacted."
+        else
+            std.fmt.bufPrint(buf, "{s} redacted a message", .{who}) catch "Message redacted.";
+    }
+    return null;
+}
+
+fn appendModernEventLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const target = msg.param(0) orelse return false;
+    const room_index = workspaceRoomForIncoming(workspace, target, workspace.self_nick) orelse return false;
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "someone";
+    var buf: [280]u8 = undefined;
+    const text = modernEventText(msg, who, &buf) orelse return false;
+    try workspace.rooms.items[room_index].transcript.addWithOptions(who, text, .{ .modes = cc.proto.udi.bm_action });
+    return true;
 }
 
 fn rememberMotd(state: *ChatState, gpa: std.mem.Allocator, msg: *const cc.net.message.Message) !void {
@@ -4821,7 +4986,10 @@ fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
         std.ascii.eqlIgnoreCase(msg.command, "DATA") or
         std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
         std.ascii.eqlIgnoreCase(msg.command, "NOTICE") or
-        std.ascii.eqlIgnoreCase(msg.command, "WHISPER")) return if (msg.param(0)) |target| stripStatusmsgTarget(target) else null;
+        std.ascii.eqlIgnoreCase(msg.command, "WHISPER") or
+        std.ascii.eqlIgnoreCase(msg.command, "TAGMSG") or
+        std.ascii.eqlIgnoreCase(msg.command, "EDIT") or
+        std.ascii.eqlIgnoreCase(msg.command, "REDACT")) return if (msg.param(0)) |target| stripStatusmsgTarget(target) else null;
     if (std.mem.eql(u8, msg.command, "331") or
         std.mem.eql(u8, msg.command, "332") or
         std.mem.eql(u8, msg.command, "333") or
@@ -5554,12 +5722,20 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("378"));
     try std.testing.expect(isVisibleServerWorkflowReply("422"));
     try std.testing.expect(isVisibleServerWorkflowReply("329"));
+    try std.testing.expect(isVisibleServerWorkflowReply("042"));
+    try std.testing.expect(isVisibleServerWorkflowReply("271"));
+    try std.testing.expect(isVisibleServerWorkflowReply("272"));
+    try std.testing.expect(isVisibleServerWorkflowReply("335"));
+    try std.testing.expect(isVisibleServerWorkflowReply("379"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SILENCE"));
     try std.testing.expect(isVisibleServerWorkflowReply("346"));
     try std.testing.expect(isVisibleServerWorkflowReply("348"));
     try std.testing.expect(isVisibleServerWorkflowReply("349"));
     try std.testing.expect(isCommandFailureNumeric("412"));
     try std.testing.expect(isCommandFailureNumeric("417"));
     try std.testing.expect(isCommandFailureNumeric("486"));
+    try std.testing.expect(isCommandFailureNumeric("439"));
+    try std.testing.expect(isCommandFailureNumeric("511"));
     try std.testing.expect(isVisibleServerWorkflowReply("732"));
     try std.testing.expect(isVisibleServerWorkflowReply("734"));
     try std.testing.expect(isVisibleServerWorkflowReply("904"));
@@ -5668,6 +5844,19 @@ test "MOTD, invite, knock, key, and ban helpers stay live" {
     try std.testing.expectEqual(ChannelListKind.invite, classifyChannelListMask("invex").kind);
     try std.testing.expectEqual(BanAction.delete, classifyChannelListMask("-I:alice!*@*").action);
     try std.testing.expectEqual(ChannelListKind.ban, classifyChannelListMask("-evil!*@*").kind);
+    try std.testing.expectEqual(ChannelListKind.silence, classifyChannelListMask("silence").kind);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("ignore").action);
+    try std.testing.expectEqual(ChannelListKind.silence, classifyChannelListMask("+s:nick!*@*").kind);
+    try std.testing.expectEqual(BanAction.add, classifyChannelListMask("s:nick!*@*").action);
+    try std.testing.expectEqualStrings("nick!*@*", channelListMaskArgument("-s:nick!*@*", .silence));
+    try std.testing.expectEqual(ChannelListKind.ban, classifyChannelListMask("-someone").kind);
+    try std.testing.expect(silenceFilterToken("SILENCE"));
+    try std.testing.expect(silenceFilterToken("ignore"));
+    try std.testing.expect(!silenceFilterToken("alice"));
+    try std.testing.expectEqual(BanAction.list, classifyUserListSilence("").action);
+    try std.testing.expectEqual(BanAction.add, classifyUserListSilence("alice").action);
+    try std.testing.expectEqualStrings("alice", classifyUserListSilence("-alice").mask);
+    try std.testing.expectEqual(BanAction.delete, classifyUserListSilence("-alice").action);
 
     try client.listBans("#root");
     try client.clearBan("#root", "alice!*@*");
@@ -5766,6 +5955,75 @@ test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
     try client.join("#root");
     try std.testing.expect(client.restoresChannel("#root"));
     try std.testing.expect(!client.restoresChannel("#late"));
+}
+
+test "silence, modern events, and leftover session numerics stay live" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+typing=active :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice is typing", workspace.rooms.items[root].transcript.lines.items[0].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+typing=paused :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice paused typing", workspace.rooms.items[root].transcript.lines.items[1].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+typing=done :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice stopped typing", workspace.rooms.items[root].transcript.lines.items[2].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+draft/react=smile :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice sent a tag-only message", workspace.rooms.items[root].transcript.lines.items[3].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse(":alice!u@h EDIT #root msgid-1 :corrected text")));
+    try std.testing.expectEqualStrings("alice edited a message: corrected text", workspace.rooms.items[root].transcript.lines.items[4].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse(":alice!u@h REDACT #root msgid-1 :off-topic")));
+    try std.testing.expectEqualStrings("alice redacted a message (off-topic)", workspace.rooms.items[root].transcript.lines.items[5].text);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h TAGMSG #root")).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h EDIT #root msgid-1 :text")).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h REDACT #root msgid-1")).?);
+
+    observeSilenceState(gpa, &state, &cc.net.message.parse(":server 271 me *!*@bad.example"));
+    observeSilenceState(gpa, &state, &cc.net.message.parse(":me!u@h SILENCE +nick!*@*"));
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "nick!*@*"));
+    observeSilenceState(gpa, &state, &cc.net.message.parse(":me!u@h SILENCE -nick!*@*"));
+    try std.testing.expect(!containsIgnoreCase(state.silence_masks.items, "nick!*@*"));
+    try state.replaceOwned(gpa, &state.away_message, "back later");
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
+    try std.testing.expectEqualStrings("back later", state.away_message.?);
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try applySilenceOperation(&client, &state, gpa, .list, "");
+    try applySilenceOperation(&client, &state, gpa, .add, "quiet!*@*");
+    try applySilenceOperation(&client, &state, gpa, .delete, "*!*@bad.example");
+    resubscribeSessionControls(&client, &state);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "SILENCE\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "SILENCE +quiet!*@*\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "SILENCE -*!*@bad.example\r\n") != null);
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "quiet!*@*"));
+    try std.testing.expect(!containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[3].bytes, "SILENCE +quiet!*@*\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[4].bytes, "AWAY :back later") != null);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {
