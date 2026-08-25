@@ -172,7 +172,7 @@ pub fn prompt(id: Id) ?[]const u8 {
 
 pub fn fields(id: Id) []const Field {
     return switch (id) {
-        .setup, .servers => &.{ .{ .label = "Server", .hint = "Secure IRC endpoint" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "Security", .hint = "Verified TLS", .kind = .choice } },
+        .setup, .servers => &.{ .{ .label = "Server", .hint = "Host name or address" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "Security", .hint = "Verified TLS", .kind = .choice } },
         .settings => &.{
             .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
             .{ .label = "Accent color", .hint = "Vermillion, violet, or forest", .kind = .choice },
@@ -230,13 +230,13 @@ pub fn fields(id: Id) []const Field {
         .recent_files => &.{ .{ .label = "Recent conversation", .hint = "Most recent path; edit to choose another" }, .{ .label = "Action", .kind = .choice } },
         .favorite_rooms => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Action", .kind = .choice } },
         .print_preview => &.{ .{ .label = "PDF file", .hint = "Save printable preview as .pdf" }, .{ .label = "Action", .kind = .choice } },
-        .connection_features => &.{ .{ .label = "Transport", .kind = .readonly }, .{ .label = "Authentication", .kind = .readonly }, .{ .label = "IRCX", .kind = .readonly }, .{ .label = "Enabled IRCv3 capabilities", .kind = .readonly } },
+        .connection_features => &.{ .{ .label = "Transport", .kind = .readonly }, .{ .label = "Authentication", .kind = .readonly }, .{ .label = "Extended rooms", .kind = .readonly }, .{ .label = "Enabled capabilities", .kind = .readonly } },
         .motd => &.{.{ .label = "Message of the day", .hint = "Server supplied", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Invitation note", .hint = "Optional" } },
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
-        .ircx_properties => &.{ .{ .label = "Channel", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "For example TOPIC,ONJOIN" }, .{ .label = "Value", .hint = "Empty deletes when setting" }, .{ .label = "Action", .kind = .choice } },
+        .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, on-join, or other room properties" }, .{ .label = "Value", .hint = "Empty deletes when setting" }, .{ .label = "Action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Nickname mask", .hint = "*!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
-        .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "CHANNEL, MEMBER, SERVER, CONNECTION, SOCKET or USER" }, .{ .label = "Mask", .hint = "Optional" } },
+        .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, member, server, or connection" }, .{ .label = "Mask", .hint = "Optional" } },
         .call_link => &.{ .{ .label = "Member" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Compatibility", .hint = "Portable secure-link invitation", .kind = .readonly } },
         .member_profile => &.{ .{ .label = "Member" }, .{ .label = "Result", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
@@ -422,6 +422,8 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Operator events", get(.ircx_events).title);
     try std.testing.expectEqualStrings("Room search", fields(.room_list)[0].label);
     try std.testing.expectEqualStrings("Apply properties", primaryLabel(.ircx_properties));
+    try std.testing.expectEqualStrings("Extended rooms", fields(.connection_features)[2].label);
+    try std.testing.expectEqualStrings("Room", fields(.ircx_properties)[0].label);
 }
 
 test "settings accent chrome maps vermillion and leftover cobalt to index 0" {

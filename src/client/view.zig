@@ -239,6 +239,7 @@ pub const View = struct {
                 .home => self.focused_toolbar = 0,
                 .end => self.focused_toolbar = @intCast(ui.ToolbarLayout.button_count - 1),
                 .enter => return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]),
+                .char => |code| if (code == ' ') return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]) else return null,
                 else => return null,
             },
             .say_actions => switch (key) {
@@ -247,10 +248,12 @@ pub const View = struct {
                 .home => self.focused_say_action = firstEnabledSayAction(self.wire_live),
                 .end => self.focused_say_action = lastEnabledSayAction(self.wire_live),
                 .enter => return self.activateSayAction(self.focused_say_action),
+                .char => |code| if (code == ' ') return self.activateSayAction(self.focused_say_action) else return null,
                 else => return null,
             },
             .status => switch (key) {
                 .enter => return self.activateFocusedStatus(),
+                .char => |code| if (code == ' ') return self.activateFocusedStatus() else return null,
                 .left, .up => {
                     if (self.status_panel_open) self.focused_status_action = .connection;
                 },
@@ -282,14 +285,8 @@ pub const View = struct {
             .down => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate, self.wire_live),
             .home => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live),
             .end => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate, self.wire_live),
-            .enter => {
-                const item = self.focused_context_item orelse firstEnabledContextItem(kind, self.can_moderate, self.wire_live);
-                self.context_menu = null;
-                self.hovered_context_item = null;
-                self.focused_context_item = null;
-                if (kind == .body_camera and item == 3) return .send_expression;
-                self.invokeContextItem(kind, item);
-            },
+            .enter => return self.activateFocusedContextItem(),
+            .char => |code| if (code == ' ') return self.activateFocusedContextItem() else return null,
             else => return null,
         }
         return .none;
@@ -302,6 +299,8 @@ pub const View = struct {
             .down => self.shell.moveTranscriptSelection(total_lines, 1, extend),
             .home => self.shell.selectTranscriptLine(total_lines, 0, extend),
             .end => if (total_lines > 0) self.shell.selectTranscriptLine(total_lines, total_lines - 1, extend),
+            .page_up => self.pageEarlier(total_lines),
+            .page_down => self.pageLater(),
             else => return false,
         }
         return true;
@@ -347,6 +346,11 @@ pub const View = struct {
                     self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
                     return .none;
                 },
+                .char => |code| if (code == ' ') {
+                    self.active_menu = self.hovered_menu orelse 0;
+                    self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
+                    return .none;
+                } else return null,
                 .left, .right => {
                     const comic_mode = self.shell.content_mode == .comic;
                     const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
@@ -377,6 +381,7 @@ pub const View = struct {
             .home => self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate, self.wire_live),
             .end => self.hovered_menu_item = lastEnabledMenuItem(menu, self.can_moderate, self.wire_live),
             .enter => return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate, self.wire_live)),
+            .char => |code| if (code == ' ') return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate, self.wire_live)) else return .none,
             else => return .none,
         }
         return .none;
@@ -859,6 +864,16 @@ pub const View = struct {
                 }
             },
             .char => |ch| {
+                if (self.dialog_action_focus) |button| {
+                    if (ch == ' ') {
+                        if (button == .cancel) {
+                            _ = self.closeDialog();
+                            return .{ .dialog_cancel = id };
+                        }
+                        return .{ .dialog_accept = id };
+                    }
+                    return .none;
+                }
                 if (self.dialog_browse_focus) return .none;
                 if (modifiers.control) {
                     const shortcut = if (ch <= 0x7f) std.ascii.toLower(@intCast(ch)) else 0;
@@ -1109,6 +1124,9 @@ pub const View = struct {
             },
             .composer => focus: {
                 self.shell.focus = .composer;
+                if (composerSendRect(layout.say_editor)) |send| {
+                    if (ui.contains(send, pointer.x, pointer.y)) break :focus .send;
+                }
                 break :focus .{ .composer_cursor = .{ .x = pointer.x, .y = pointer.y } };
             },
             .say_action => |index| say: {
@@ -1253,6 +1271,17 @@ pub const View = struct {
         self.status_panel_open = false;
         self.hovered_status_action = null;
         self.focused_status_action = null;
+    }
+
+    fn activateFocusedContextItem(self: *View) Action {
+        const kind = self.context_menu orelse return .none;
+        const item = self.focused_context_item orelse firstEnabledContextItem(kind, self.can_moderate, self.wire_live);
+        self.context_menu = null;
+        self.hovered_context_item = null;
+        self.focused_context_item = null;
+        if (kind == .body_camera and item == 3) return .send_expression;
+        self.invokeContextItem(kind, item);
+        return .none;
     }
 
     fn invokeContextItem(self: *View, kind: ContextKind, item: u8) void {
@@ -1966,14 +1995,14 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             3 => "Room properties",
             4 => "Set away message",
             5 => "Message of the day",
-            6 => "IRCX properties",
+            6 => "Channel properties",
             7 => "Room access",
-            8 => "IRCX operator events",
+            8 => "Operator events",
             9 => "Favorite rooms",
             else => "Open room in new window",
         },
         5 => switch (item) {
-            0 => "User list",
+            0 => "CAST list",
             1 => "Member profile",
             2 => "Whisper",
             3 => "Invite member",
@@ -2020,10 +2049,10 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             0 => "List",
             1 => "Join",
             2 => "New",
-            3 => "Props",
+            3 => "Room",
             4 => "Away",
-            5 => "MOTD",
-            6, 7, 8 => "IRCX",
+            5 => "Bulletin",
+            6, 7, 8 => "Room",
             9 => "Favorite",
             else => "Window",
         },
@@ -2686,11 +2715,13 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     const content_rect = editor_layout.content;
     const mode = sayActionLabel(@intFromEnum(say_mode));
     const mode_w: i32 = if (edit.w >= 220 and input.len == 0) Canvas.uiTextWidth(mode) + 18 else 0;
-    const send_w: i32 = if (edit.w >= 220) Canvas.uiTextWidth("Send") + 20 else 0;
+    const send = composerSendRect(edit);
+    const send_w: i32 = if (send) |rect| rect.w else 0;
     if (mode_w > 0) ui.drawComposerModeChip(c, .{ .x = edit.x + 14, .y = edit.y + 13, .w = mode_w, .h = 18 }, mode, focused);
-    if (send_w > 0) {
-        ui.drawInkPlate(c, edit.right() - send_w - 10, edit.y + 13, send_w, 18, 2, if (focused) ui.current.accent else ui.current.layer);
-        drawTextEllipsized(c, "Send", edit.right() - send_w - 2, edit.y + 14, send_w - 16, if (focused) ui.current.layer else ui.current.ink);
+    if (send) |rect| {
+        const hot = focused or hovered;
+        ui.drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 2, if (hot) ui.current.accent else ui.current.layer);
+        drawTextEllipsized(c, "Send", rect.x + 8, rect.y + 1, rect.w - 16, if (hot) ui.current.layer else ui.current.ink);
     }
     if (input.len == 0) {
         const placeholder_x = edit.x + 18 + placeholderGap(focused) + if (mode_w > 0) mode_w + 6 else 0;
@@ -2732,6 +2763,12 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
         if (focused_action == @as(u8, @intCast(index))) ui.drawFocusRing(c, .{ .x = x, .y = layout.say_actions.y, .w = layout.say_action_size, .h = layout.say_actions.h });
         x += layout.say_action_size;
     }
+}
+
+fn composerSendRect(edit: Rect) ?Rect {
+    if (edit.w < 220) return null;
+    const send_w = Canvas.uiTextWidth("Send") + 20;
+    return .{ .x = edit.right() - send_w - 10, .y = edit.y + 13, .w = send_w, .h = 18 };
 }
 
 fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8, connected: bool) void {
@@ -2861,7 +2898,7 @@ const EmptyPageCopy = struct { title: []const u8, detail: []const u8, waiting: b
 
 fn emptyPageCopy(status: []const u8) EmptyPageCopy {
     const tone = ui.statusTone(status);
-    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Connection failed - click Connect", .waiting = true };
+    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - click Connect", .waiting = true };
     if (std.mem.indexOf(u8, status, "offline") != null) return .{ .title = "Sunday page is offline", .detail = "Connect to ink the first balloon", .waiting = true };
     if (tone != .success) return .{ .title = "Sunday page is waiting", .detail = "Waiting for the wire", .waiting = true };
     return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
@@ -2876,7 +2913,7 @@ fn emptyCastCopy(status: []const u8) []const u8 {
 
 fn composerPlaceholder(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
-    if (tone == .failure) return "Connection failed - Connect, then ink...";
+    if (tone == .failure) return "Wire failed - Connect, then ink...";
     if (std.mem.indexOf(u8, status, "offline") != null) return "Connect, then ink the next balloon...";
     if (tone != .success) return "Waiting on the wire...";
     return "Ink the next balloon...";
@@ -3140,11 +3177,11 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .connection_features => switch (index) {
             0 => "WIRE",
             1 => "AUTH",
-            2 => "IRCX",
+            2 => "ROOM",
             else => "",
         },
         .password => switch (index) {
-            0 => "ACCT",
+            0 => "SIGN",
             1 => "AUTH",
             else => "",
         },
@@ -3157,7 +3194,7 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .channel, .channel_create => if (index == 0) "JOIN" else "",
         .whisper, .invite => if (index == 0) "SAY" else "",
         .away => if (index == 0) "AWAY" else "",
-        .nickname => if (index == 0) "NICK" else "",
+        .nickname => if (index == 0) "NAME" else "",
         .personal => if (index == 0) "CARD" else "",
         else => "",
     };
@@ -3169,7 +3206,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
             .recent_files => "No recent conversations yet",
             .favorite_rooms => "No favorite rooms yet",
             .connection_features => "Features appear after the wire is live",
-            .motd => "MOTD arrives after the wire is live",
+            .motd => "The bulletin arrives after the wire is live",
             else => "",
         };
         if (empty.len != 0) return empty;
@@ -4213,10 +4250,10 @@ test "view menu layout commands ask the host to persist settings" {
 test "empty page, CAST, composer, and status copy follow the wire" {
     const failed = emptyPageCopy("Connection failed - click for settings");
     try std.testing.expectEqualStrings("Sunday page could not connect", failed.title);
-    try std.testing.expectEqualStrings("Connection failed - click Connect", failed.detail);
+    try std.testing.expectEqualStrings("Wire failed - click Connect", failed.detail);
     try std.testing.expect(failed.waiting);
     try std.testing.expectEqualStrings("Wire failed", emptyCastCopy("Connection failed - click for settings"));
-    try std.testing.expectEqualStrings("Connection failed - Connect, then ink...", composerPlaceholder("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed - Connect, then ink...", composerPlaceholder("Connection failed - click for settings"));
     try std.testing.expectEqualStrings("Wire failed", statusPanelHeading("Connection failed - click for settings"));
 
     const offline = emptyPageCopy("offline");
@@ -4244,6 +4281,12 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Wire failed (refused) - click Connect", statusPanelDetail("Connection failed (refused) - click for settings"));
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
     try std.testing.expectEqualStrings("Search rooms after the wire is live", dialogHelper(.room_list, ""));
+    try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
+    try std.testing.expectEqualStrings("Channel properties", menuItemLabel(4, 6));
+    try std.testing.expectEqualStrings("Operator events", menuItemLabel(4, 8));
+    try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
+    try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
+    try std.testing.expectEqualStrings("Room", menuItemHint(4, 6, true));
     try std.testing.expectEqualStrings("Wire", toolbarHint(0));
     try std.testing.expectEqualStrings("Join", toolbarHint(2));
     try std.testing.expectEqualStrings("CAST", toolbarHint(8));
@@ -4366,6 +4409,29 @@ test "status keyboard opens the panel and activates its actions" {
     view.active_dialog = null;
     view.shell.focus = .status;
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
-    try std.testing.expectEqual(Action.connection, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(Action.connection, view.handleFocusedActionKey(.{ .char = ' ' }).?);
     try std.testing.expect(!view.status_panel_open);
+}
+
+test "composer send chip sends and space activates focused chrome" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const send = composerSendRect(layout.say_editor).?;
+    try std.testing.expectEqual(Action.send, view.handlePointer(.{
+        .kind = .down,
+        .x = send.x + 4,
+        .y = send.y + 4,
+        .button = .primary,
+    }, 0, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+
+    view.shell.focus = .say_actions;
+    view.focused_say_action = 1;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(shell_mod.SayMode.think, view.shell.say_mode);
+
+    view.openDialog(.about);
+    view.dialog_action_focus = .primary;
+    try std.testing.expectEqual(Action{ .dialog_accept = .about }, (try view.handleDialogKey(.{ .char = ' ' }, .{})).?);
 }
