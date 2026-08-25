@@ -3498,7 +3498,6 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .rename_loaded_set, .rename_set, .create_set => if (index == 0) "NAME" else "",
         .advanced_event_params, .advanced_rule_settings => if (index == 0) "RULE" else "",
         .about => if (index == 0) "INK" else "",
-        else => "",
     };
 }
 
@@ -5110,6 +5109,7 @@ test "dialog Home and End jump first field and last button from leftover chrome"
     _ = try view.handleDialogKey(.home, .{});
     try std.testing.expect(view.dialog_action_focus == null);
     try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    view.dialog_action_focus = .primary;
     _ = try view.handleDialogKey(.end, .{});
     try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
 
@@ -5120,6 +5120,7 @@ test "dialog Home and End jump first field and last button from leftover chrome"
     try std.testing.expect(!view.dialog_browse_focus);
     try std.testing.expect(view.dialog_action_focus == null);
     try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    view.dialog_browse_focus = true;
     _ = try view.handleDialogKey(.end, .{});
     try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
 
