@@ -1324,6 +1324,60 @@ test "leftover dest gesture-wheel point and shrug bodycam stay standing with loc
     }
 }
 
+test "leftover dest walk gestures stay standing or authored walk with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+    };
+    const moods = [_]emotion_mod.Emotion{ .walk_three_quarter_rear, .walk_side, .walk_three_quarter_front };
+    for (blobs) |avb_data| {
+        for (moods) |mood| {
+            const pose = try poseStateForEmotion(gpa, avb_data, mood, 255);
+            var body = try chromeBodyForSourcePose(gpa, avb_data, pose);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 80);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
+    }
+}
+
 fn countOpaque(image: Image) usize {
     var count: usize = 0;
     for (image.pixels) |pixel| {
@@ -1850,6 +1904,38 @@ test "leftover dest gesture pose cards keep authored pad" {
             try std.testing.expect(ink.x >= 2);
             try std.testing.expect(ink.x + ink.w + 2 <= card.width);
             try std.testing.expect(ink.w < 200);
+        }
+    }
+}
+
+test "leftover dest walk pose cards keep authored pad" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+    };
+    const emotions = [_]u16{ 15, 16, 17 };
+    for (blobs) |avb_data| {
+        for (emotions) |emotion| {
+            var card = bgb.decodePoseForEmotion(gpa, avb_data, .body, emotion, 0) catch |err| switch (err) {
+                error.PoseNotFound => continue,
+                else => return err,
+            };
+            defer card.deinit(gpa);
+            try std.testing.expect(card.width >= 200);
+            try std.testing.expect(card.height >= 240);
+            try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(card));
+            const ink = paperInkBounds(card) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(ink.x >= 2);
+            try std.testing.expect(ink.x + ink.w + 2 <= card.width);
         }
     }
 }
