@@ -53,7 +53,9 @@
 //!     implicit-grab motion after leave is dropped;
 //!     grab/ungrab and pointer-focus details ignored), wheel releases ignored,
 //!     XSETTINGS owner re-watch after DestroyNotify (that owner does not close
-//!     the chat),
+//!     the chat; only DestroyNotify of the toplevel closes, and a destroyed
+//!     `_NET_WM_USER_TIME_WINDOW` child is recreated), `_NET_WM_STATE` / `WM_STATE`
+//!     read after MapWindow,
 //!     allowed actions,
 //!     WM_TAKE_FOCUS, WM_LOCALE_NAME, physical WM size hints, and
 //!     resize/close events, suitable for a poll(2)-driven client event loop.
@@ -671,6 +673,8 @@ pub const Window = struct {
         errdefer self.keymap.deinit(gpa);
         self.refreshModifierMap();
         try mapWindow(&self.conn, self.window);
+        self.readNetWmState();
+        self.readWmState();
         sendStartupRemove(&self.conn, self.window, env) catch {};
         self.refreshRandrCrtcs();
         if (self.refreshOutputScale()) |_| {}
@@ -948,7 +952,12 @@ pub const Window = struct {
             17 => { // DestroyNotify
                 const event_win = get32(event[4..8]);
                 const destroyed = get32(event[8..12]);
-                if (destroyed == self.window or event_win == self.window) return .close;
+                if (destroyNotifyCloses(destroyed, self.window)) return .close;
+                if (self.user_time_window != 0 and destroyed == self.user_time_window) {
+                    self.user_time_window = 0;
+                    self.installUserTimeWindow();
+                    return .other;
+                }
                 if (self.conn.xsettings_window != 0 and
                     (destroyed == self.conn.xsettings_window or event_win == self.conn.xsettings_window))
                 {
@@ -1554,6 +1563,7 @@ pub const Window = struct {
         if (self.conn.net_wm_user_time_window == 0) return;
         const id = self.conn.allocId() catch return;
         createUserTimeWindow(&self.conn, self.window, id) catch return;
+        selectWindowEvents(&self.conn, id, event_structure) catch {};
         changeProperty32(&self.conn, self.window, self.conn.net_wm_user_time_window, atom_window, &.{id}) catch {
             destroyWindow(&self.conn, id) catch {};
             return;
@@ -3800,6 +3810,10 @@ fn combinedWmHidden(net_hidden: bool, icccm_hidden: bool, unmapped: bool, shaded
     return net_hidden or icccm_hidden or unmapped or shaded;
 }
 
+fn destroyNotifyCloses(destroyed: u32, toplevel: u32) bool {
+    return destroyed != 0 and destroyed == toplevel;
+}
+
 fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == 0) return 0;
     if (atom == conn.utf8_string) return 7;
@@ -4423,6 +4437,10 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));
     try std.testing.expect(!x11NotifyModeIsGrab(0));
+    try std.testing.expect(destroyNotifyCloses(40, 40));
+    try std.testing.expect(!destroyNotifyCloses(41, 40));
+    try std.testing.expect(!destroyNotifyCloses(40, 0));
+    try std.testing.expect(!destroyNotifyCloses(0, 40));
     try std.testing.expect(x11FocusDetailIsPointer(notify_detail_pointer));
     try std.testing.expect(!x11FocusDetailIsPointer(0));
     try std.testing.expectEqual(@as(u32, 1 << 5), event_leave_window);

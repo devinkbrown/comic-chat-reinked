@@ -96,7 +96,8 @@ hash.
   speak XIM.   X11 maps XI2 touch contacts to the shared pointer contract when the
   device is not pointer-emulating. Text and `file:` drops use XDND / `wl_data_device` and are
   injected as existing key events (no new Event variant); Wayland sends
-  `data_offer.set_actions` copy when accepting a drop. Clipboard MIME
+  `data_offer.set_actions` copy when accepting a drop and
+  `data_offer.finish` after every drop (including failed or empty offers). Clipboard MIME
   includes `text/plain;charset=utf8`, `text/uri-list`, receive-only
   desktop file-list MIME (`x-special/gnome-copied-files`,
   `x-special/nautilus-clipboard`, `text/x-moz-url`, `application/x-moz-file`,
@@ -143,19 +144,23 @@ hash.
   requests.   X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
   property changes, reads XSETTINGS `Gdk/WindowScalingFactor` / `Xft/DPI`
   and re-watches the XSETTINGS owner after DestroyNotify or a scale refresh
-  (that owner's DestroyNotify does not close the chat),
+  (that owner's DestroyNotify does not close the chat; only the toplevel
+  DestroyNotify closes, and a destroyed `_NET_WM_USER_TIME_WINDOW` is recreated),
   maps XI2 touch to pointer events when the device is not pointer-emulating,
   listens for RANDR `ScreenChangeNotify`, caches
   per-output millimeters so a window move can refresh integer scale,
   skips Expose while `VisibilityFullyObscured`, falls back to
   screen millimeter size, and reinstalls the scaled cursor plus physical
   WM size hints. Wayland binds `wl_compositor` at v6 when advertised,
-  honors `preferred_buffer_scale`, and can derive integer scale from
-  output geometry millimeters when no scale event arrives. Keyboard enter
+  honors `preferred_buffer_scale`, refreshes the fallback shm cursor and
+  toplevel icon when `wp_fractional_scale_v1` preferred scale changes, and can derive integer scale from
+  output geometry millimeters when no scale event arrives. `axis_stop` clears
+  the discrete wheel latch. Keyboard enter
   arms client-side repeat for a held non-modifier key.   Both backends track maximized/fullscreen
   window state; X11 also tracks `_NET_WM_STATE_HIDDEN` / `_NET_WM_STATE_SHADED` and ICCCM
   `WM_STATE` / `WM_CHANGE_STATE` and skips `present()` while NET hidden, ICCCM
-  iconic, unmapped, shaded, or fully obscured (MapNotify exposes; a `_NET_WM_STATE`
+  iconic, unmapped, shaded, or fully obscured (MapWindow reads the initial
+  `_NET_WM_STATE` / `WM_STATE`; MapNotify exposes; a `_NET_WM_STATE`
   without HIDDEN cannot clear ICCCM Iconic), and Wayland records tiled/suspended xdg
   states plus `wm_capabilities` / `configure_bounds` when xdg-shell is v5+
   and skips `present()` while suspended (leaving suspended or gaining

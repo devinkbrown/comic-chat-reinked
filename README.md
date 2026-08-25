@@ -292,9 +292,9 @@ normalized to LF; invalid UTF-8 bytes decode as Latin-1), skips `present()` whil
 that state or gaining activated, disables text-input when not activated, pastes PRIMARY on
 middle-click as typed keys (`wl-paste --primary` fallback), pastes CLIPBOARD on
 Shift+Insert / XF86Paste as typed keys (CLIPBOARD does not read PRIMARY, and local text is used only while this client owns the clipboard source), injects
-text/`file:` drops as typed keys with `data_offer.set_actions(copy)` (DnD motion updates hover; leave emits `.up` for a held button then clears it), shows
-a `wp_cursor_shape_v1` or scaled shm pointer, and sets
-`xdg_toplevel_icon_v1` (32@1 plus 64@2, refreshed on integer scale change) when advertised. NumLock XOR Shift selects keypad digits.
+text/`file:` drops as typed keys with `data_offer.set_actions(copy)` and `data_offer.finish` on every drop (DnD motion updates hover; leave emits `.up` for a held button then clears it), shows
+a `wp_cursor_shape_v1` or scaled shm pointer (refreshed on integer and fractional scale changes), and sets
+`xdg_toplevel_icon_v1` (32@1 plus 64@2, refreshed on integer and fractional scale change) when advertised. NumLock XOR Shift selects keypad digits.
 Armenian, Georgian, Thai, extra
 Cyrillic (Ukrainian/Belarusian/Serbian/Macedonian), Latin-3, and
 Latin-4 keysyms type
@@ -303,7 +303,7 @@ X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
 `RESOURCE_MANAGER` property changes, XSETTINGS `Gdk/WindowScalingFactor`
-(re-watching the owner after DestroyNotify or a scale refresh),
+(re-watching the owner after DestroyNotify or a scale refresh; only the toplevel DestroyNotify closes, and a destroyed `_NET_WM_USER_TIME_WINDOW` is recreated),
 XI2 touch→pointer, RANDR `ScreenChangeNotify`, cached
 per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
@@ -314,7 +314,7 @@ TARGETS list and sending a user ConvertSelection timestamp; invalid UTF-8 paste 
 drops as typed keys (TARGETS-first, drop timestamp, Position hover via TranslateCoordinates, Leave emits `.up` for a held button then clears hover; EnterNotify with Button1/Button3 already down emits `.down` then queues the hover; implicit-grab motion after leave does not restore hover and a later ButtonRelease is not a second `.up`; Latin-1 drop bytes decode to UTF-8), ignores extra mouse buttons 6–9 and wheel releases, ignores grab/ungrab Enter/Leave and pointer-only FocusIn/Out, pastes PRIMARY on
 middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste does not read PRIMARY and uses local text only while we own CLIPBOARD), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden/shaded and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE` (skipping `present()` while NET hidden, ICCCM iconic, unmapped, shaded, or
-fully obscured; MapNotify, FocusIn, leaving hidden, and gaining `_NET_WM_STATE_FOCUSED` expose), publishes `_NET_WM_USER_TIME` on a dedicated `_NET_WM_USER_TIME_WINDOW`, honors keyboard group bits, Mod3 Mode_switch, GetModifierMapping Caps/NumLock/AltGr/Super bits, and
+fully obscured; MapWindow reads the initial `_NET_WM_STATE` / `WM_STATE`; MapNotify, FocusIn, leaving hidden, and gaining `_NET_WM_STATE_FOCUSED` expose), publishes `_NET_WM_USER_TIME` on a dedicated `_NET_WM_USER_TIME_WINDOW`, honors keyboard group bits, Mod3 Mode_switch, GetModifierMapping Caps/NumLock/AltGr/Super bits, and
 MappingNotify (keyboard and modifier) without dropping queued events, resets compose on FocusOut,
 installs a scaled core pointer, `_NET_WM_ICON` at 16/32/64/128, and an ICCCM `WM_HINTS` icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), raises urgency on
 `notify` until FocusIn or `_NET_WM_STATE_FOCUSED` (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when

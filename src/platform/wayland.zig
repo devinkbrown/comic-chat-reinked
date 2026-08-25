@@ -49,8 +49,10 @@
 //! xdg activated exposes, and text-input disables when not activated.
 //! Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
-//! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
-//! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` ships
+//! accepting a drop; `data_offer.finish` is sent for every drop, including
+//! failed or empty offers. A `wp_cursor_shape_v1` default pointer is used when
+//! advertised, otherwise a scaled shm arrow (refreshed on integer and
+//! fractional scale changes). `xdg_toplevel_icon_v1` ships
 //! 32@1 and 64@2 buffers when advertised. A supplied `XDG_ACTIVATION_TOKEN` is consumed through
 //! `xdg_activation_v1` so a launcher-started window can take focus (not
 //! used for notify/urgency). `openPath` requests a fresh
@@ -63,7 +65,8 @@
 //! the same min/max size as the X11 WM hints. `present()` attaches a
 //! `wl_surface.frame` callback and coalesces later commits until it fires.
 //! High-resolution
-//! `axis_value120` wheels snap to the same logical ticks as discrete axes.
+//! `axis_value120` wheels snap to the same logical ticks as discrete axes;
+//! `axis_stop` clears the discrete latch so later continuous axis events work.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -1168,7 +1171,11 @@ pub const Window = struct {
                 if (msg.body.len != 4) return error.InvalidWaylandMessage;
                 const previous = self.fractional_scale_120;
                 self.fractional_scale_120 = get32(msg.body);
-                if (self.configured and previous != self.fractional_scale_120) return Event.expose;
+                if (self.configured and previous != self.fractional_scale_120) {
+                    self.refreshFallbackCursor();
+                    self.installToplevelIcon() catch {};
+                    return Event.expose;
+                }
             }
             return null;
         }
@@ -1332,6 +1339,7 @@ pub const Window = struct {
         } else if (self.keyboard_id != 0) {
             if (self.seat_version >= 3) try sendEmpty(&self.conn, self.keyboard_id, keyboard_release);
             self.keyboard_id = 0;
+            self.compose.reset();
             self.shift_left = false;
             self.shift_right = false;
             self.control_left = false;
@@ -1395,7 +1403,7 @@ pub const Window = struct {
         switch (opcode) {
             0 => { // enter(surface)
                 if (body.len != 4 or get32(body) != self.surface_id) return error.InvalidWaylandMessage;
-                try self.enableTextInput();
+                if (self.toplevel_activated) try self.enableTextInput();
             },
             1 => { // leave(surface)
                 if (body.len != 4) return error.InvalidWaylandMessage;
@@ -1572,6 +1580,10 @@ pub const Window = struct {
                 } };
             },
             5 => { // frame
+                self.axis_have_discrete = false;
+                return null;
+            },
+            7 => { // axis_stop(time, axis)
                 self.axis_have_discrete = false;
                 return null;
             },
@@ -2245,18 +2257,20 @@ pub const Window = struct {
 
     fn takeDrop(self: *Window) ?Event {
         const offer_id = self.dnd_offer_id;
-        if (offer_id == 0 or !self.dnd_has_text) {
+        if (!shouldFinishDataOffer(offer_id)) {
             self.clearDndOffer();
             return null;
         }
-        const bytes = self.receiveOffer(self.gpa, offer_id, data_offer_receive) catch {
-            self.clearDndOffer();
-            return null;
-        };
+        defer self.finishDndOffer(offer_id);
+        if (!self.dnd_has_text) return null;
+        const bytes = self.receiveOffer(self.gpa, offer_id, data_offer_receive) catch return null;
         defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn finishDndOffer(self: *Window, offer_id: u32) void {
         sendEmpty(&self.conn, offer_id, data_offer_finish) catch {};
         self.clearDndOffer();
-        return self.enqueueDropText(bytes) catch null;
     }
 
     fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
@@ -2391,6 +2405,13 @@ pub const Window = struct {
         self.applyPointerCursor();
     }
 
+    fn fallbackCursorPixelSize(self: *const Window) u32 {
+        if (self.viewport_id != 0 and self.fractional_scale_120 != 0) {
+            return @min(64, @max(16, scale120(16, self.fractional_scale_120)));
+        }
+        return services.cursorPixelSize(self.output_scale, "", "");
+    }
+
     fn applyPointerCursor(self: *Window) void {
         if (self.pointer_id == 0 or self.last_serial == 0) return;
         if (self.cursor_shape_device_id != 0) {
@@ -2403,7 +2424,7 @@ pub const Window = struct {
 
     fn ensureFallbackCursor(self: *Window) !void {
         if (self.cursor_surface_id != 0 and self.cursor_buffer != null) return;
-        const size: u32 = services.cursorPixelSize(self.output_scale, "", "");
+        const size: u32 = self.fallbackCursorPixelSize();
         const count = try std.math.mul(usize, @as(usize, size), @as(usize, size));
         const pixels = try self.gpa.alloc(u32, count);
         defer self.gpa.free(pixels);
@@ -2898,6 +2919,10 @@ fn configureContainsState(bytes: []const u8, state: u32) bool {
         if (get32(bytes[off..][0..4]) == state) return true;
     }
     return false;
+}
+
+fn shouldFinishDataOffer(offer_id: u32) bool {
+    return offer_id != 0;
 }
 
 fn isPlainTextMime(mime: []const u8) bool {
@@ -3695,6 +3720,25 @@ test "Wayland bufferDimensions prefers fractional viewport over integer output s
     const fallback = window.bufferDimensions(320, 240);
     try std.testing.expect(!fallback.use_viewport);
     try std.testing.expectEqual(@as(u32, 640), fallback.w);
+
+    window.fractional_scale_120 = 180;
+    try std.testing.expectEqual(@as(u32, 24), window.fallbackCursorPixelSize());
+    window.fractional_scale_120 = 0;
+    try std.testing.expectEqual(@as(u32, 32), window.fallbackCursorPixelSize());
+}
+
+test "Wayland drop finishes any nonzero offer and axis_stop clears the discrete latch" {
+    try std.testing.expect(shouldFinishDataOffer(7));
+    try std.testing.expect(!shouldFinishDataOffer(0));
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = undefined,
+        .axis_have_discrete = true,
+    };
+    const stopped = try window.pointerEvent(7, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(?Event, null), stopped);
+    try std.testing.expect(!window.axis_have_discrete);
 }
 
 test "nearest-neighbor scale fills an arbitrary destination size" {
