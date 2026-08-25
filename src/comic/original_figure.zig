@@ -116,16 +116,16 @@ pub fn stretchRop(canvas: *Canvas, source: Image, destination: Rect, flipped: bo
         while (x < destination.w) : (x += 1) {
             const out_x = destination.x + x;
             if (out_x < 0 or out_x >= @as(i32, @intCast(canvas.width))) continue;
-            const sampled = areaSample(source, x, y, destination.w, destination.h, flipped);
             const index = @as(usize, @intCast(out_y)) * canvas.width + @as(usize, @intCast(out_x));
             const old = canvas.px[index];
             // Windows GDI's bitmap ROPs do not have an alpha channel.  Retain
             // the Canvas destination alpha and apply the exact RGB truth table.
             canvas.px[index] = (old & 0xff000000) | switch (op) {
-                .src_and => (old & sampled) & 0x00ffffff,
-                .src_copy_keyed => if (stickerInk(sampled)) sampled & 0x00ffffff else old & 0x00ffffff,
-                .merge_paint => (old | ~sampled) & 0x00ffffff,
+                .src_and => (old & areaSample(source, x, y, destination.w, destination.h, flipped)) & 0x00ffffff,
+                .src_copy_keyed => keyedCopy(old, areaSampleKeyed(source, x, y, destination.w, destination.h, flipped)),
+                .merge_paint => (old | ~areaSample(source, x, y, destination.w, destination.h, flipped)) & 0x00ffffff,
                 .merge_paint_sticker => blk: {
+                    const sampled = areaSample(source, x, y, destination.w, destination.h, flipped);
                     const sticker: u32 = if (stickerInk(sampled)) 0x00000000 else 0x00ffffff;
                     break :blk (old | ~sticker) & 0x00ffffff;
                 },
@@ -723,6 +723,90 @@ fn areaSample(source: Image, dx: i32, dy: i32, dw: i32, dh: i32, flipped: bool) 
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
+const KeyedSample = struct {
+    color: u32,
+    coverage: f64,
+};
+
+/// Area-sample Color/HD cards without mixing paper into the ink. White-backed
+/// AA would otherwise average to a gray sticker ring on colored rooms.
+fn areaSampleKeyed(source: Image, dx: i32, dy: i32, dw: i32, dh: i32, flipped: bool) KeyedSample {
+    const sw = @as(f64, @floatFromInt(source.width));
+    const sh = @as(f64, @floatFromInt(source.height));
+    var sx0 = @as(f64, @floatFromInt(dx)) * sw / @as(f64, @floatFromInt(dw));
+    var sx1 = @as(f64, @floatFromInt(dx + 1)) * sw / @as(f64, @floatFromInt(dw));
+    if (flipped) {
+        const old0 = sx0;
+        sx0 = sw - sx1;
+        sx1 = sw - old0;
+    }
+    const sy0 = @as(f64, @floatFromInt(dy)) * sh / @as(f64, @floatFromInt(dh));
+    const sy1 = @as(f64, @floatFromInt(dy + 1)) * sh / @as(f64, @floatFromInt(dh));
+    const first_x: i32 = @intFromFloat(@floor(sx0));
+    const last_x: i32 = @intFromFloat(@ceil(sx1));
+    const first_y: i32 = @intFromFloat(@floor(sy0));
+    const last_y: i32 = @intFromFloat(@ceil(sy1));
+
+    var accum_a: f64 = 0;
+    var accum_r: f64 = 0;
+    var accum_g: f64 = 0;
+    var accum_b: f64 = 0;
+    var ink_weight: f64 = 0;
+    var paper_weight: f64 = 0;
+    var sy = first_y;
+    while (sy < last_y) : (sy += 1) {
+        if (sy < 0 or sy >= @as(i32, @intCast(source.height))) continue;
+        const wy = @min(sy1, @as(f64, @floatFromInt(sy + 1))) - @max(sy0, @as(f64, @floatFromInt(sy)));
+        if (wy <= 0) continue;
+        var sx = first_x;
+        while (sx < last_x) : (sx += 1) {
+            if (sx < 0 or sx >= @as(i32, @intCast(source.width))) continue;
+            const wx = @min(sx1, @as(f64, @floatFromInt(sx + 1))) - @max(sx0, @as(f64, @floatFromInt(sx)));
+            if (wx <= 0) continue;
+            const weight = wx * wy;
+            const pixel = source.pixels[@as(usize, @intCast(sy)) * source.width + @as(usize, @intCast(sx))];
+            if (!stickerInk(pixel)) {
+                paper_weight += weight;
+                continue;
+            }
+            accum_a += @as(f64, @floatFromInt((pixel >> 24) & 0xff)) * weight;
+            accum_r += @as(f64, @floatFromInt((pixel >> 16) & 0xff)) * weight;
+            accum_g += @as(f64, @floatFromInt((pixel >> 8) & 0xff)) * weight;
+            accum_b += @as(f64, @floatFromInt(pixel & 0xff)) * weight;
+            ink_weight += weight;
+        }
+    }
+    if (ink_weight == 0) return .{ .color = 0xffffffff, .coverage = 0 };
+    const a: u32 = @intFromFloat(@floor(accum_a / ink_weight + 0.5));
+    const r: u32 = @intFromFloat(@floor(accum_r / ink_weight + 0.5));
+    const g: u32 = @intFromFloat(@floor(accum_g / ink_weight + 0.5));
+    const b: u32 = @intFromFloat(@floor(accum_b / ink_weight + 0.5));
+    return .{
+        .color = (a << 24) | (r << 16) | (g << 8) | b,
+        .coverage = ink_weight / (ink_weight + paper_weight),
+    };
+}
+
+fn mixChannel(old: u8, ink: u8, coverage: f64) u8 {
+    const value = @as(f64, @floatFromInt(old)) * (1.0 - coverage) + @as(f64, @floatFromInt(ink)) * coverage;
+    return @intFromFloat(@min(255.0, @floor(value + 0.5)));
+}
+
+fn keyedCopy(old: u32, sample: KeyedSample) u32 {
+    if (sample.coverage <= 0) return old & 0x00ffffff;
+    if (sample.coverage >= 0.999) return sample.color & 0x00ffffff;
+    const old_r: u8 = @truncate(old >> 16);
+    const old_g: u8 = @truncate(old >> 8);
+    const old_b: u8 = @truncate(old);
+    const ink_r: u8 = @truncate(sample.color >> 16);
+    const ink_g: u8 = @truncate(sample.color >> 8);
+    const ink_b: u8 = @truncate(sample.color);
+    const r: u32 = mixChannel(old_r, ink_r, sample.coverage);
+    const g: u32 = mixChannel(old_g, ink_g, sample.coverage);
+    const b: u32 = mixChannel(old_b, ink_b, sample.coverage);
+    return (r << 16) | (g << 8) | b;
+}
+
 const LoadedPose = struct {
     drawing: Image,
     mask: ?Image = null,
@@ -1013,6 +1097,29 @@ test "Color sticker ignores near-white AA so dest is not bleached" {
     try std.testing.expect(rgb != 0x00ffffff);
     const green: u8 = @truncate(rgb >> 8);
     try std.testing.expect(green > 80);
+}
+
+test "Color keyed copy blends ink over dest instead of a gray sticker" {
+    var pixels = [_]u32{ 0xff000000, 0xffffffff };
+    var canvas = try Canvas.init(std.testing.allocator, 1, 1);
+    defer canvas.deinit(std.testing.allocator);
+    canvas.clear(0xff00aa33);
+    try stretchRop(&canvas, .{ .width = 2, .height = 1, .pixels = &pixels }, .{
+        .x = 0,
+        .y = 0,
+        .w = 1,
+        .h = 1,
+    }, false, .src_copy_keyed);
+    const rgb = canvas.px[0] & 0x00ffffff;
+    const red: u8 = @truncate(rgb >> 16);
+    const green: u8 = @truncate(rgb >> 8);
+    const blue: u8 = @truncate(rgb);
+    try std.testing.expect(rgb != 0x00ffffff);
+    try std.testing.expect(rgb != 0x00808080);
+    try std.testing.expect(green > 40);
+    try std.testing.expect(green < 0xaa);
+    try std.testing.expect(red < 40);
+    try std.testing.expect(blue < 40);
 }
 
 test "negative StretchDIBits width is reproduced by horizontal flip" {

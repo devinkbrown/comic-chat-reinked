@@ -1743,34 +1743,52 @@ test "Anna Color continuation keeps her head in the panel" {
     try std.testing.expect(checked >= 2);
 
     var sticker_edge: usize = 0;
-    var y: u32 = 1;
-    while (y + 1 < image.height) : (y += 1) {
-        var x: u32 = 1;
-        while (x + 1 < image.width) : (x += 1) {
-            const pixel = image.pixels[y * image.width + x];
-            const red: i32 = @as(u8, @truncate(pixel >> 16));
-            const green: i32 = @as(u8, @truncate(pixel >> 8));
-            const blue: i32 = @as(u8, @truncate(pixel));
-            if (red < 245 or green < 245 or blue < 245) continue;
-            var ink = false;
-            var room = false;
-            var dy: i32 = -1;
-            while (dy <= 1) : (dy += 1) {
-                var dx: i32 = -1;
-                while (dx <= 1) : (dx += 1) {
-                    if (dx == 0 and dy == 0) continue;
-                    const nx: u32 = @intCast(@as(i32, @intCast(x)) + dx);
-                    const ny: u32 = @intCast(@as(i32, @intCast(y)) + dy);
-                    const n = image.pixels[ny * image.width + nx];
-                    const nr: i32 = @as(u8, @truncate(n >> 16));
-                    const ng: i32 = @as(u8, @truncate(n >> 8));
-                    const nb: i32 = @as(u8, @truncate(n));
-                    const chroma = @max(@max(nr, ng), nb) - @min(@min(nr, ng), nb);
-                    if (chroma > 25 and (nr < 240 or ng < 240 or nb < 240)) ink = true;
-                    if (chroma >= 12 and (nr > 30 or ng > 30 or nb > 30)) room = true;
+    row = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var y: u32 = 4;
+            while (y + 4 < panel_height) : (y += 1) {
+                var x: u32 = 4;
+                while (x + 4 < panel_width) : (x += 1) {
+                    const pixel = image.pixels[(y0 + y) * image.width + x0 + x];
+                    const red: i32 = @as(u8, @truncate(pixel >> 16));
+                    const green: i32 = @as(u8, @truncate(pixel >> 8));
+                    const blue: i32 = @as(u8, @truncate(pixel));
+                    if (red < 245 or green < 245 or blue < 245) continue;
+                    var body_ink = false;
+                    var room = false;
+                    var dy: i32 = -1;
+                    while (dy <= 1) : (dy += 1) {
+                        var dx: i32 = -1;
+                        while (dx <= 1) : (dx += 1) {
+                            if (dx == 0 and dy == 0) continue;
+                            const ny: u32 = @intCast(@as(i64, y0) + @as(i64, y) + dy);
+                            const nx: u32 = @intCast(@as(i64, x0) + @as(i64, x) + dx);
+                            const n = image.pixels[ny * image.width + nx];
+                            const nr: i32 = @as(u8, @truncate(n >> 16));
+                            const ng: i32 = @as(u8, @truncate(n >> 8));
+                            const nb: i32 = @as(u8, @truncate(n));
+                            const peach = nr > ng + 15 and nr > nb + 15 and ng + 25 > nb and
+                                nr > 90 and nr < 230 and ng > 60 and nb > 40;
+                            const tube = nr > 120 and nr > ng + 40 and nr > nb + 40 and ng < 90;
+                            const hair = nr > 40 and nr > ng + 20 and nr > nb + 20 and ng < 80 and nb < 50;
+                            const outline = @max(@max(nr, ng), nb) < 45;
+                            if (peach or tube or hair or outline) body_ink = true;
+                            const sky = nb > nr + 15 and nb > ng + 5 and nb > 80;
+                            const plant = ng > nr + 12 and ng > nb + 8 and ng > 70;
+                            const wood = nr > 70 and nr >= ng and ng + 10 >= nb and nr - nb > 20 and
+                                nr < 210 and ng < 160 and !peach and !tube;
+                            if (sky or plant or wood) room = true;
+                        }
+                    }
+                    if (body_ink and room) sticker_edge += 1;
                 }
             }
-            if (ink and room) sticker_edge += 1;
         }
     }
     try std.testing.expect(sticker_edge < 20);
