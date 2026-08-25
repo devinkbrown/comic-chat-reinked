@@ -292,7 +292,7 @@ normalized to LF; invalid UTF-8 bytes decode as Latin-1), skips `present()` whil
 that state or gaining activated, disables text-input when not activated, pastes PRIMARY on
 middle-click as typed keys (`wl-paste --primary` fallback), pastes CLIPBOARD on
 Shift+Insert / XF86Paste as typed keys (CLIPBOARD does not read PRIMARY, and local text is used only while this client owns the clipboard source), injects
-text/`file:` drops as typed keys with `data_offer.set_actions(copy)` and `data_offer.finish` on every drop (DnD motion updates hover; leave emits `.up` for a held button then clears it), shows
+text/`file:` drops as typed keys with `data_offer.set_actions(copy)` and `data_offer.finish` on v3+ data devices (DnD motion updates hover; leave emits `.up` for a held button then clears it; `file://` localhost / `127.0.0.1` / `[::1]` / local nodename are local paths), shows
 a `wp_cursor_shape_v1` or scaled shm pointer (refreshed on integer and fractional scale changes), and sets
 `xdg_toplevel_icon_v1` (32@1 plus 64@2, refreshed on integer and fractional scale change) when advertised. NumLock XOR Shift selects keypad digits.
 Armenian, Georgian, Thai, extra
@@ -309,7 +309,7 @@ per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT` / ISO-8859-1/2/3/4/5/6/7/8/9/13/15 / Windows-1250/1251/1252/1253/1254/1255/1256/1257 / KOI8-R / Markdown, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla/KDE suggested-filename), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
+`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT` / ISO-8859-1/2/3/4/5/6/7/8/9/13/15 / Windows-1250/1251/1252/1253/1254/1255/1256/1257 / KOI8-R / Markdown, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla/KDE suggested-filename), `UTF16_STRING` / receive-only `text/plain;charset=utf-16` / `utf16`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
 TARGETS list and sending a user ConvertSelection timestamp; invalid UTF-8 paste decodes as Latin-1), accepts XDND text/`file:`
 drops as typed keys (TARGETS-first, drop timestamp, Position hover via TranslateCoordinates, Leave emits `.up` for a held button then clears hover; EnterNotify with Button1/Button3 already down emits `.down` then queues the hover; implicit-grab motion after leave does not restore hover and a later ButtonRelease is not a second `.up`; Latin-1 drop bytes decode to UTF-8), ignores extra mouse buttons 6–9 and wheel releases, ignores grab/ungrab Enter/Leave and pointer-only FocusIn/Out, pastes PRIMARY on
 middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste does not read PRIMARY and uses local text only while we own CLIPBOARD; PRIMARY paste uses local text only while we own PRIMARY), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden/shaded and

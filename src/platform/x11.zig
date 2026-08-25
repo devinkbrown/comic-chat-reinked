@@ -27,7 +27,7 @@
 //!     including `text/plain;charset=utf8`, `text/uri-list`,
 //!     receive-only `text/x-uri-list`, receive-only `text/rtf`,
 //!     receive-only `COMPOUND_TEXT`, receive-only desktop file-list MIME, and
-//!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, Armenian/Georgian
+//!     `UTF16_STRING` / receive-only `text/plain;charset=utf-16` / `utf16`, TIMESTAMP, MULTIPLE atom-pair requests, Armenian/Georgian
 //!     keysyms, extra Ukrainian/Belarusian/Serbian/Macedonian Cyrillic,
 //!     Shift+Insert / XF86Paste CLIPBOARD paste as typed keys, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
@@ -40,7 +40,8 @@
 //!     and a later ButtonRelease do not restore hover or emit a second `.up`),
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
-//!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
+//!     keys (`file://` localhost / `127.0.0.1` / `[::1]` / local nodename
+//!     are local paths), `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
 //!     FocusIn/leaving-hidden/gaining `_NET_WM_STATE_FOCUSED` expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
 //!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes), a scaled
 //!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 plus ICCCM `WM_HINTS`
@@ -195,6 +196,8 @@ const XConn = struct {
     net_wm_state_shaded: u32 = 0,
     net_wm_state_focused: u32 = 0,
     utf16_string: u32 = 0,
+    mime_text_utf16: u32 = 0,
+    mime_text_utf16_alt: u32 = 0,
     mime_text_html: u32 = 0,
     mime_text_html_utf8: u32 = 0,
     mime_text_html_utf8_alt: u32 = 0,
@@ -1149,6 +1152,8 @@ pub const Window = struct {
                 }
             } else |_| {}
         }
+        if (self.readUtf16Target(gpa, selection, self.conn.mime_text_utf16)) |text| return text;
+        if (self.readUtf16Target(gpa, selection, self.conn.mime_text_utf16_alt)) |text| return text;
         if (self.conn.mime_uri_list != 0) {
             if (self.convertTarget(gpa, selection, self.conn.mime_uri_list, self.conn.mime_uri_list)) |text| {
                 if (text) |bytes| {
@@ -1284,7 +1289,7 @@ pub const Window = struct {
         if (isUriListAtom(&self.conn, target) or isDesktopFileAtom(&self.conn, target)) {
             if (self.takeUriListPath(gpa, bytes)) |path| return path;
         }
-        if (target == self.conn.utf16_string) {
+        if (isUtf16Atom(&self.conn, target)) {
             const decoded = services.clipboardUtf16BytesToUtf8(gpa, bytes) catch {
                 return try self.decodeClipboardBytes(gpa, bytes);
             };
@@ -1401,6 +1406,20 @@ pub const Window = struct {
             return decoded;
         }
         return try self.decodeClipboardBytes(gpa, bytes);
+    }
+
+    fn readUtf16Target(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
+        if (target == 0) return null;
+        const text = (self.convertTarget(gpa, selection, target, target) catch return null) orelse return null;
+        if (text.len == 0) {
+            gpa.free(text);
+            return null;
+        }
+        const decoded = services.clipboardUtf16BytesToUtf8(gpa, text) catch {
+            return self.decodeClipboardBytes(gpa, text) catch null;
+        };
+        gpa.free(text);
+        return decoded;
     }
 
     fn readCharsetTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32, charset: []const u8) ?[]u8 {
@@ -3032,6 +3051,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_state_shaded = try internAtom(conn, "_NET_WM_STATE_SHADED");
     conn.net_wm_state_focused = try internAtom(conn, "_NET_WM_STATE_FOCUSED");
     conn.utf16_string = try internAtom(conn, "UTF16_STRING");
+    conn.mime_text_utf16 = try internAtom(conn, "text/plain;charset=utf-16");
+    conn.mime_text_utf16_alt = try internAtom(conn, "text/plain;charset=utf16");
     conn.mime_text_html = try internAtom(conn, "text/html");
     conn.mime_text_html_utf8 = try internAtom(conn, "text/html;charset=utf-8");
     conn.mime_text_html_utf8_alt = try internAtom(conn, "text/html;charset=utf8");
@@ -3825,7 +3846,7 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8) return 6;
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
-    if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
+    if (isUtf16Atom(conn, atom) or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
     if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom) or isLatin5Atom(conn, atom) or
         isCyrillicAtom(conn, atom) or isGreekAtom(conn, atom) or isLatin3Atom(conn, atom) or isLatin4Atom(conn, atom) or
         isArabicAtom(conn, atom) or isHebrewAtom(conn, atom) or isCp1252Atom(conn, atom) or isCp1251Atom(conn, atom) or
@@ -3836,6 +3857,10 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
     return 0;
+}
+
+fn isUtf16Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.utf16_string or atom == conn.mime_text_utf16 or atom == conn.mime_text_utf16_alt);
 }
 
 fn isHtmlAtom(conn: *const XConn, atom: u32) bool {
@@ -3968,7 +3993,7 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
     return target == conn.utf8_string or target == atom_string or target == conn.text or
         target == conn.mime_text_plain or target == conn.mime_text_utf8 or
         target == conn.mime_text_utf8_alt or isUriListAtom(conn, target) or
-        target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
+        isUtf16Atom(conn, target) or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
         isDesktopFileAtom(conn, target) or target == conn.compound_text or
         isLatin1Atom(conn, target) or isLatin9Atom(conn, target) or
         isLatin2Atom(conn, target) or isLatin5Atom(conn, target) or
@@ -4328,6 +4353,8 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_koi8r = 163,
         .mime_text_koi8r_alt = 164,
         .koi8r = 165,
+        .mime_text_utf16 = 166,
+        .mime_text_utf16_alt = 167,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -4438,6 +4465,13 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 165));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 163));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 165));
+    try std.testing.expect(isUtf16Atom(&conn, 107));
+    try std.testing.expect(isUtf16Atom(&conn, 166));
+    try std.testing.expect(isUtf16Atom(&conn, 167));
+    try std.testing.expect(isClipboardTextTarget(&conn, 166));
+    try std.testing.expect(isClipboardTextTarget(&conn, 167));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 166));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 167));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));

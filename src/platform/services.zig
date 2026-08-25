@@ -6,7 +6,8 @@
 //! / `xclip -selection primary` when PRIMARY is missing), plus notifications
 //! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
 //! printing. `xdg-open` can carry an outgoing activation / startup token.
-//! Incoming desktop file-list MIME, receive-only RTF, receive-only
+//! Incoming `file:` URIs treat localhost, `127.0.0.1`, `[::1]`, and the
+//! local `uname` nodename as this machine. Incoming desktop file-list MIME, receive-only RTF, receive-only
 //! COMPOUND_TEXT (including ISO-8859-2/3/4/5/6/7/8/9/15), ISO-8859 charset MIME
 //! (including ISO-8859-13), Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, Markdown,
 //! and invalid-UTF-8 Latin-1 fallback are parsed here. Every call is
@@ -268,13 +269,33 @@ fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
         if (std.mem.startsWith(u8, rest, "localhost")) {
             rest = rest["localhost".len..];
         } else if (rest.len != 0 and rest[0] != '/') {
-            return null;
+            const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+            if (!fileUrlHostIsLocal(rest[0..slash])) return null;
+            rest = rest[slash..];
         }
     }
     if (std.mem.indexOfScalar(u8, rest, '?')) |q| rest = rest[0..q];
     if (std.mem.indexOfScalar(u8, rest, '#')) |h| rest = rest[0..h];
     if (rest.len == 0) return null;
     return percentDecode(rest, buf);
+}
+
+fn fileUrlHostIsLocal(host: []const u8) bool {
+    if (host.len == 0) return true;
+    const bare = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
+    if (std.ascii.eqlIgnoreCase(bare, "localhost") or std.mem.eql(u8, bare, "127.0.0.1") or std.mem.eql(u8, bare, "::1")) return true;
+    var name_buf: [64]u8 = undefined;
+    const name = localNodename(&name_buf);
+    return name.len != 0 and std.ascii.eqlIgnoreCase(bare, name);
+}
+
+fn localNodename(buf: []u8) []const u8 {
+    var uts: linux.utsname = undefined;
+    if (linux.errno(linux.uname(&uts)) != .SUCCESS) return "";
+    const name = std.mem.sliceTo(&uts.nodename, 0);
+    const n = @min(buf.len, name.len);
+    @memcpy(buf[0..n], name[0..n]);
+    return buf[0..n];
 }
 
 /// True for `text/html` and `text/html;charset=...` (receive-only MIME).
@@ -2162,9 +2183,20 @@ test "uri-list drop prefers a local file path and skips comments" {
     const path = firstPathFromUriList("# comment\r\nhttps://example.test/a\r\nfile:///tmp/chat%20room.ccc\r\n", &buf).?;
     try std.testing.expectEqualStrings("/tmp/chat room.ccc", path);
     try std.testing.expectEqualStrings("/tmp/a.ccc", firstPathFromUriList("file://localhost/tmp/a.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/loop.ccc", firstPathFromUriList("file://127.0.0.1/tmp/loop.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/loop6.ccc", firstPathFromUriList("file://[::1]/tmp/loop6.ccc\n", &buf).?);
     try std.testing.expectEqualStrings("/tmp/b.ccc", firstPathFromUriList("file:/tmp/b.ccc\n", &buf).?);
     try std.testing.expectEqualStrings("/tmp/c.ccc", firstPathFromUriList("file:///tmp/c.ccc?download=1#top\n", &buf).?);
     try std.testing.expect(firstPathFromUriList("file://remote.example/tmp/a.ccc\n", &buf) == null);
+    var host_buf: [64]u8 = undefined;
+    const host = localNodename(&host_buf);
+    if (host.len != 0) {
+        var url_buf: [160]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "file://{s}/tmp/host.ccc\n", .{host}) catch "";
+        if (url.len != 0) {
+            try std.testing.expectEqualStrings("/tmp/host.ccc", firstPathFromUriList(url, &buf).?);
+        }
+    }
     try std.testing.expect(firstPathFromUriList("https://example.test/a\n", &buf) == null);
     try std.testing.expectEqualStrings("hello", firstDropText("hello\n", &buf).?);
     const latin = try firstDropTextUtf8(std.testing.allocator, "caf\xe9\n");

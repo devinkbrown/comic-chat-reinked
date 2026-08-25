@@ -28,7 +28,7 @@
 //! conventional Lock modifier bit when the compositor reports it. Clipboard uses
 //! `wl_data_device` and `zwp_primary_selection_v1` when present, including
 //! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
-//! UTF-16 decode (including `text/plain;charset=utf-16` / `UTF16_STRING`
+//! UTF-16 decode (including `text/plain;charset=utf-16` / `utf16` / `UTF16_STRING`
 //! on receive only), receive-only `text/html`, receive-only `text/rtf` /
 //! `application/rtf`, receive-only `text/x-uri-list`, and receive-only desktop
 //! file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
@@ -49,8 +49,9 @@
 //! xdg activated exposes, and text-input disables when not activated.
 //! Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
-//! accepting a drop; `data_offer.finish` is sent for every drop, including
-//! failed or empty offers. A `wp_cursor_shape_v1` default pointer is used when
+//! accepting a drop; `data_offer.finish` and `set_actions` are sent only when
+//! `wl_data_device_manager` is bound at v3+, including failed or empty offers.
+//! A `wp_cursor_shape_v1` default pointer is used when
 //! advertised, otherwise a scaled shm arrow (refreshed on integer and
 //! fractional scale changes). `xdg_toplevel_icon_v1` ships
 //! 32@1 and 64@2 buffers when advertised. A supplied `XDG_ACTIVATION_TOKEN` is consumed through
@@ -202,6 +203,7 @@ const text_mime_types = [_][]const u8{
 /// the source payload is UTF-8.
 const utf16_mime_types = [_][]const u8{
     "text/plain;charset=utf-16",
+    "text/plain;charset=utf16",
     "UTF16_STRING",
 };
 
@@ -613,6 +615,7 @@ pub const Window = struct {
     text_input_manager_id: u32 = 0,
     text_input_id: u32 = 0,
     data_device_manager_id: u32 = 0,
+    data_device_version: u32 = 0,
     data_device_id: u32 = 0,
     data_source_id: u32 = 0,
     data_offer_id: u32 = 0,
@@ -766,7 +769,8 @@ pub const Window = struct {
         }
         if (globals.data_device_manager.name != 0) {
             self.data_device_manager_id = try self.conn.allocId();
-            try sendBind(&self.conn, self.gpa, self.registry_id, globals.data_device_manager, "wl_data_device_manager", @min(globals.data_device_manager.version, 3), self.data_device_manager_id);
+            self.data_device_version = @min(globals.data_device_manager.version, 3);
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.data_device_manager, "wl_data_device_manager", self.data_device_version, self.data_device_manager_id);
             self.data_device_id = try self.conn.allocId();
             try sendTwoU32(&self.conn, self.data_device_manager_id, data_device_manager_get_data_device, self.data_device_id, self.seat_id);
         }
@@ -2252,16 +2256,21 @@ pub const Window = struct {
     fn acceptDrop(self: *Window, offer_id: u32, serial: u32) !void {
         const mime = if (self.dnd_mime.len != 0) self.dnd_mime else "text/plain;charset=utf-8";
         try sendAccept(&self.conn, self.gpa, offer_id, data_offer_accept, serial, mime);
-        sendTwoU32(&self.conn, offer_id, data_offer_set_actions, dnd_action_copy, dnd_action_copy) catch {};
+        if (dataOfferHasV3(self.data_device_version)) {
+            sendTwoU32(&self.conn, offer_id, data_offer_set_actions, dnd_action_copy, dnd_action_copy) catch {};
+        }
     }
 
     fn takeDrop(self: *Window) ?Event {
         const offer_id = self.dnd_offer_id;
-        if (!shouldFinishDataOffer(offer_id)) {
-            self.clearDndOffer();
-            return null;
+        if (offer_id == 0) return null;
+        defer {
+            if (shouldFinishDataOffer(offer_id, self.data_device_version)) {
+                self.finishDndOffer(offer_id);
+            } else {
+                self.clearDndOffer();
+            }
         }
-        defer self.finishDndOffer(offer_id);
         if (!self.dnd_has_text) return null;
         const bytes = self.receiveOffer(self.gpa, offer_id, data_offer_receive) catch return null;
         defer self.gpa.free(bytes);
@@ -2921,8 +2930,12 @@ fn configureContainsState(bytes: []const u8, state: u32) bool {
     return false;
 }
 
-fn shouldFinishDataOffer(offer_id: u32) bool {
-    return offer_id != 0;
+fn dataOfferHasV3(version: u32) bool {
+    return version >= 3;
+}
+
+fn shouldFinishDataOffer(offer_id: u32, version: u32) bool {
+    return offer_id != 0 and dataOfferHasV3(version);
 }
 
 fn isPlainTextMime(mime: []const u8) bool {
@@ -2972,7 +2985,7 @@ fn textMimeRank(mime: []const u8) u8 {
     if (std.mem.eql(u8, mime, "text/plain;charset=utf8")) return 5;
     if (std.mem.eql(u8, mime, "text/plain")) return 4;
     if (std.mem.eql(u8, mime, "UTF8_STRING")) return 3;
-    if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "text/plain;charset=utf16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
     if (services.isLatinPlainMime(mime)) return 3;
     if (services.isUriListMime(mime) or services.isDesktopFileMime(mime) or services.isMarkdownMime(mime)) return 2;
     if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
@@ -3728,8 +3741,12 @@ test "Wayland bufferDimensions prefers fractional viewport over integer output s
 }
 
 test "Wayland drop finishes any nonzero offer and axis_stop clears the discrete latch" {
-    try std.testing.expect(shouldFinishDataOffer(7));
-    try std.testing.expect(!shouldFinishDataOffer(0));
+    try std.testing.expect(shouldFinishDataOffer(7, 3));
+    try std.testing.expect(!shouldFinishDataOffer(7, 2));
+    try std.testing.expect(!shouldFinishDataOffer(7, 1));
+    try std.testing.expect(!shouldFinishDataOffer(0, 3));
+    try std.testing.expect(dataOfferHasV3(3));
+    try std.testing.expect(!dataOfferHasV3(2));
     var window = Window{
         .gpa = std.testing.allocator,
         .threaded = undefined,
@@ -3780,6 +3797,7 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("TEXT"));
     try std.testing.expect(isPlainTextMime("UTF8_STRING"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=utf-16"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf16"));
     try std.testing.expect(isPlainTextMime("UTF16_STRING"));
     try std.testing.expect(isPlainTextMime("text/html"));
     try std.testing.expect(isPlainTextMime("text/html;charset=utf-8"));

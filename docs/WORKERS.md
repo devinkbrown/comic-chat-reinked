@@ -97,13 +97,15 @@ hash.
   device is not pointer-emulating. Text and `file:` drops use XDND / `wl_data_device` and are
   injected as existing key events (no new Event variant); Wayland sends
   `data_offer.set_actions` copy when accepting a drop and
-  `data_offer.finish` after every drop (including failed or empty offers). Clipboard MIME
+  `data_offer.finish` after every drop when `wl_data_device_manager` is
+  bound at v3+ (including failed or empty offers). Clipboard MIME
   includes `text/plain;charset=utf8`, `text/uri-list`, receive-only
   desktop file-list MIME (`x-special/gnome-copied-files`,
   `x-special/nautilus-clipboard`, `text/x-moz-url`, `application/x-moz-file`,
   `application/x-kde4-urilist`), and
-  `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
-  strip and UTF-16 decode. Receive-only `text/x-uri-list` is treated like
+  `UTF16_STRING` / `text/plain;charset=utf-16` / `utf16` on receive, with UTF-8 BOM
+  strip and UTF-16 decode. `file:` URIs whose host is localhost, `127.0.0.1`,
+  `[::1]`, or this machine's `uname` nodename decode to a local path. Receive-only `text/x-uri-list` is treated like
   `text/uri-list`. Receive-only `text/rtf` / `application/rtf` strip to
   plain text. X11 paste prefers the owner's TARGETS list and
   stashes events that arrive during GetProperty (up to 256 during ConvertSelection / INCR). ConvertSelection uses a
