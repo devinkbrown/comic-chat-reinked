@@ -14,6 +14,7 @@
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
 //! group-2 character of a non-US or dual-layout keymap actually correct.
 //! Named Central European letters, X11 Latin-2 keysyms (`0x01a0`–`0x01ff`),
+//! Latin-3 (`0x02a1`–`0x02fe`), Latin-4 (`0x03a2`–`0x03fe`),
 //! Latin-9 OE/Ydiaeresis, Greek, Hebrew, Arabic, Armenian, Georgian, and Thai
 //! letters resolve to
 //! characters without an IME. A
@@ -652,6 +653,61 @@ const named_latin_ext_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Abreve", 0x0102 },
     .{ "gbreve", 0x011f },
     .{ "Gbreve", 0x011e },
+    .{ "hstroke", 0x0127 },
+    .{ "Hstroke", 0x0126 },
+    .{ "hcircumflex", 0x0125 },
+    .{ "Hcircumflex", 0x0124 },
+    .{ "idotless", 0x0131 },
+    .{ "Iabovedot", 0x0130 },
+    .{ "jcircumflex", 0x0135 },
+    .{ "Jcircumflex", 0x0134 },
+    .{ "cabovedot", 0x010b },
+    .{ "Cabovedot", 0x010a },
+    .{ "ccircumflex", 0x0109 },
+    .{ "Ccircumflex", 0x0108 },
+    .{ "gabovedot", 0x0121 },
+    .{ "Gabovedot", 0x0120 },
+    .{ "gcircumflex", 0x011d },
+    .{ "Gcircumflex", 0x011c },
+    .{ "ubreve", 0x016d },
+    .{ "Ubreve", 0x016c },
+    .{ "scircumflex", 0x015d },
+    .{ "Scircumflex", 0x015c },
+    .{ "kra", 0x0138 },
+    .{ "rcedilla", 0x0157 },
+    .{ "Rcedilla", 0x0156 },
+    .{ "itilde", 0x0129 },
+    .{ "Itilde", 0x0128 },
+    .{ "lcedilla", 0x013c },
+    .{ "Lcedilla", 0x013b },
+    .{ "emacron", 0x0113 },
+    .{ "Emacron", 0x0112 },
+    .{ "gcedilla", 0x0123 },
+    .{ "Gcedilla", 0x0122 },
+    .{ "tslash", 0x0167 },
+    .{ "Tslash", 0x0166 },
+    .{ "ENG", 0x014a },
+    .{ "eng", 0x014b },
+    .{ "amacron", 0x0101 },
+    .{ "Amacron", 0x0100 },
+    .{ "iogonek", 0x012f },
+    .{ "Iogonek", 0x012e },
+    .{ "eabovedot", 0x0117 },
+    .{ "Eabovedot", 0x0116 },
+    .{ "imacron", 0x012b },
+    .{ "Imacron", 0x012a },
+    .{ "ncedilla", 0x0146 },
+    .{ "Ncedilla", 0x0145 },
+    .{ "omacron", 0x014d },
+    .{ "Omacron", 0x014c },
+    .{ "kcedilla", 0x0137 },
+    .{ "Kcedilla", 0x0136 },
+    .{ "uogonek", 0x0173 },
+    .{ "Uogonek", 0x0172 },
+    .{ "utilde", 0x0169 },
+    .{ "Utilde", 0x0168 },
+    .{ "umacron", 0x016b },
+    .{ "Umacron", 0x016a },
     .{ "scommaaccent", 0x0219 },
     .{ "Scommaaccent", 0x0218 },
     .{ "tcommaaccent", 0x021b },
@@ -1181,6 +1237,77 @@ pub fn charForX11Latin9(sym: u32) ?u21 {
         0x13bc => 0x0152,
         0x13bd => 0x0153,
         0x13be => 0x0178,
+        else => null,
+    };
+}
+
+/// Legacy X11 Latin-3 keysyms used by Maltese, Esperanto, and Turkish remnants.
+pub fn charForX11Latin3(sym: u32) ?u21 {
+    return switch (sym) {
+        0x02a1 => 0x0126,
+        0x02a6 => 0x0124,
+        0x02a9 => 0x0130,
+        0x02ab => 0x011e,
+        0x02ac => 0x0134,
+        0x02b1 => 0x0127,
+        0x02b6 => 0x0125,
+        0x02b9 => 0x0131,
+        0x02bb => 0x011f,
+        0x02bc => 0x0135,
+        0x02c5 => 0x010a,
+        0x02c6 => 0x0108,
+        0x02d5 => 0x0120,
+        0x02d8 => 0x011c,
+        0x02dd => 0x016c,
+        0x02de => 0x015c,
+        0x02e5 => 0x010b,
+        0x02e6 => 0x0109,
+        0x02f5 => 0x0121,
+        0x02f8 => 0x011d,
+        0x02fd => 0x016d,
+        0x02fe => 0x015d,
+        else => null,
+    };
+}
+
+/// Legacy X11 Latin-4 keysyms used by Baltic layouts.
+pub fn charForX11Latin4(sym: u32) ?u21 {
+    return switch (sym) {
+        0x03a2 => 0x0138,
+        0x03a3 => 0x0156,
+        0x03a5 => 0x0128,
+        0x03a6 => 0x013b,
+        0x03aa => 0x0112,
+        0x03ab => 0x0122,
+        0x03ac => 0x0166,
+        0x03b3 => 0x0157,
+        0x03b5 => 0x0129,
+        0x03b6 => 0x013c,
+        0x03ba => 0x0113,
+        0x03bb => 0x0123,
+        0x03bc => 0x0167,
+        0x03bd => 0x014a,
+        0x03bf => 0x014b,
+        0x03c0 => 0x0100,
+        0x03c7 => 0x012e,
+        0x03cc => 0x0116,
+        0x03cf => 0x012a,
+        0x03d1 => 0x0145,
+        0x03d2 => 0x014c,
+        0x03d3 => 0x0136,
+        0x03d9 => 0x0172,
+        0x03dd => 0x0168,
+        0x03de => 0x016a,
+        0x03e0 => 0x0101,
+        0x03e7 => 0x012f,
+        0x03ec => 0x0117,
+        0x03ef => 0x012b,
+        0x03f1 => 0x0146,
+        0x03f2 => 0x014d,
+        0x03f3 => 0x0137,
+        0x03f9 => 0x0173,
+        0x03fd => 0x0169,
+        0x03fe => 0x016b,
         else => null,
     };
 }
@@ -1782,6 +1909,19 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(@as(u21, 0x0152), charForKeysym("OE").?);
     try std.testing.expectEqual(@as(u21, 0x0153), charForX11Latin9(0x13bd).?);
     try std.testing.expectEqual(@as(u21, 0x0178), charForX11Latin9(0x13be).?);
+    try std.testing.expectEqual(@as(u21, 0x0127), charForKeysym("hstroke").?);
+    try std.testing.expectEqual(@as(u21, 0x0130), charForKeysym("Iabovedot").?);
+    try std.testing.expectEqual(@as(u21, 0x0126), charForX11Latin3(0x02a1).?);
+    try std.testing.expectEqual(@as(u21, 0x0127), charForX11Latin3(0x02b1).?);
+    try std.testing.expectEqual(@as(u21, 0x0131), charForX11Latin3(0x02b9).?);
+    try std.testing.expectEqual(@as(u21, 0x015d), charForX11Latin3(0x02fe).?);
+    try std.testing.expect(charForX11Latin3(0x02a0) == null);
+    try std.testing.expectEqual(@as(u21, 0x0138), charForKeysym("kra").?);
+    try std.testing.expectEqual(@as(u21, 0x0101), charForKeysym("amacron").?);
+    try std.testing.expectEqual(@as(u21, 0x014a), charForX11Latin4(0x03bd).?);
+    try std.testing.expectEqual(@as(u21, 0x0101), charForX11Latin4(0x03e0).?);
+    try std.testing.expectEqual(@as(u21, 0x016b), charForX11Latin4(0x03fe).?);
+    try std.testing.expect(charForX11Latin4(0x03a1) == null);
     try std.testing.expectEqual(@as(u21, 0x0561), charForKeysym("Armenian_ayb").?);
     try std.testing.expectEqual(@as(u21, 0x0531), charForKeysym("Armenian_AYB").?);
     try std.testing.expectEqual(@as(u21, 0x0589), charForKeysym("Armenian_verjaket").?);

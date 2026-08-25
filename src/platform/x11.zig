@@ -306,6 +306,8 @@ pub fn keysymToKey(sym: u32) Key {
     if (xkb.charForX11Hebrew(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Arabic(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Latin9(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Latin3(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Latin4(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Armenian(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Georgian(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Thai(sym)) |ch| return .{ .char = ch };
@@ -3386,6 +3388,10 @@ test "Keymap.translate uses group bits 13-14 without reading the next key" {
     try std.testing.expectEqual(Key{ .char = 0x064a }, keysymToKey(0x05ea));
     try std.testing.expectEqual(Key{ .char = 0x0153 }, keysymToKey(0x13bd));
     try std.testing.expectEqual(Key{ .char = 0x0178 }, keysymToKey(0x13be));
+    try std.testing.expectEqual(Key{ .char = 0x0127 }, keysymToKey(0x02b1));
+    try std.testing.expectEqual(Key{ .char = 0x0130 }, keysymToKey(0x02a9));
+    try std.testing.expectEqual(Key{ .char = 0x0138 }, keysymToKey(0x03a2));
+    try std.testing.expectEqual(Key{ .char = 0x0101 }, keysymToKey(0x03e0));
     try std.testing.expectEqual(Key{ .char = 0x0561 }, keysymToKey(0x14b3));
     try std.testing.expectEqual(Key{ .char = 0x10d0 }, keysymToKey(0x15d0));
     try std.testing.expectEqual(Key{ .char = 0x0e01 }, keysymToKey(0x0da1));

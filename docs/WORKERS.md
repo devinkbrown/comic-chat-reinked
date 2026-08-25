@@ -106,7 +106,7 @@ hash.
   `wl-paste --primary` / `xclip`/`xsel` PRIMARY fallback when the native
   protocol is missing. Receive-only `text/html` strips tags to plain text.
   Clipboard text normalizes
-  CR/LF to LF. `notify-send` uses `--urgency=normal`. Central European Latin-2, Latin-9, Greek, Hebrew, Arabic,
+  CR/LF to LF. `notify-send` uses `--urgency=normal`.   Central European Latin-2, Latin-3, Latin-4, Latin-9, Greek, Hebrew, Arabic,
   Armenian, Georgian, Thai,
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
