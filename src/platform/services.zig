@@ -181,6 +181,13 @@ pub fn firstDropText(text: []const u8, buf: []u8) ?[]const u8 {
     return null;
 }
 
+/// First drop line or URI path, decoded like clipboard bytes (Latin-1 fallback).
+pub fn firstDropTextUtf8(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var scratch: [1024]u8 = undefined;
+    const payload = firstDropText(text, &scratch) orelse text;
+    return clipboardBytesToUtf8(gpa, payload);
+}
+
 /// Receive-only desktop file-list MIME (Nautilus, Firefox). Not offered on copy.
 pub fn isDesktopFileMime(mime: []const u8) bool {
     return std.ascii.eqlIgnoreCase(mime, "x-special/gnome-copied-files") or
@@ -1461,6 +1468,9 @@ test "uri-list drop prefers a local file path and skips comments" {
     try std.testing.expect(firstPathFromUriList("file://remote.example/tmp/a.ccc\n", &buf) == null);
     try std.testing.expect(firstPathFromUriList("https://example.test/a\n", &buf) == null);
     try std.testing.expectEqualStrings("hello", firstDropText("hello\n", &buf).?);
+    const latin = try firstDropTextUtf8(std.testing.allocator, "caf\xe9\n");
+    defer std.testing.allocator.free(latin);
+    try std.testing.expectEqualStrings("café", latin);
 }
 
 test "desktop file-list MIME yields a local path and skips copy/cut headers" {

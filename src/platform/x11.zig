@@ -191,7 +191,9 @@ const XConn = struct {
     mime_text_latin1: u32 = 0,
     mime_text_latin1_alt: u32 = 0,
     mime_text_latin9: u32 = 0,
+    mime_text_latin9_alt: u32 = 0,
     mime_text_latin2: u32 = 0,
+    mime_text_latin2_alt: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -693,6 +695,7 @@ pub const Window = struct {
                     .y = y,
                     .wheel_y = if (detail == 4) 1 else -1,
                 } };
+                if (detail >= 6) return .other;
                 const button: shared_event.PointerButton = switch (detail) {
                     1 => .primary,
                     2 => .middle,
@@ -1005,7 +1008,9 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1, "ISO-8859-1")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1_alt, "ISO-8859-1")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9, "ISO-8859-15")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9_alt, "ISO-8859-15")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2, "ISO-8859-2")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2_alt, "ISO-8859-2")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1085,12 +1090,12 @@ pub const Window = struct {
             gpa.free(bytes);
             return decoded;
         }
-        if (target == self.conn.mime_text_latin9) {
+        if (isLatin9Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-15") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
-        if (target == self.conn.mime_text_latin2) {
+        if (isLatin2Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-2") catch return bytes;
             gpa.free(bytes);
             return decoded;
@@ -1550,9 +1555,8 @@ pub const Window = struct {
     }
 
     fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
-        var scratch: [1024]u8 = undefined;
-        const payload = services.firstDropText(bytes, &scratch) orelse bytes;
-        if (!std.unicode.utf8ValidateSlice(payload)) return null;
+        const payload = try services.firstDropTextUtf8(self.gpa, bytes);
+        defer self.gpa.free(payload);
         var view = try std.unicode.Utf8View.init(payload);
         var iterator = view.iterator();
         while (iterator.nextCodepoint()) |codepoint| {
@@ -2541,7 +2545,9 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_latin1 = try internAtom(conn, "text/plain;charset=ISO-8859-1");
     conn.mime_text_latin1_alt = try internAtom(conn, "text/plain;charset=iso-8859-1");
     conn.mime_text_latin9 = try internAtom(conn, "text/plain;charset=ISO-8859-15");
+    conn.mime_text_latin9_alt = try internAtom(conn, "text/plain;charset=iso-8859-15");
     conn.mime_text_latin2 = try internAtom(conn, "text/plain;charset=ISO-8859-2");
+    conn.mime_text_latin2_alt = try internAtom(conn, "text/plain;charset=iso-8859-2");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3239,7 +3245,7 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
-    if (isLatin1Atom(conn, atom) or atom == conn.mime_text_latin9 or atom == conn.mime_text_latin2) return 3;
+    if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom)) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3260,6 +3266,14 @@ fn isRtfAtom(conn: *const XConn, atom: u32) bool {
 
 fn isLatin1Atom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_latin1 or atom == conn.mime_text_latin1_alt);
+}
+
+fn isLatin9Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_latin9 or atom == conn.mime_text_latin9_alt);
+}
+
+fn isLatin2Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_latin2 or atom == conn.mime_text_latin2_alt);
 }
 
 fn isMarkdownAtom(conn: *const XConn, atom: u32) bool {
@@ -3294,8 +3308,8 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         target == conn.mime_text_utf8_alt or isUriListAtom(conn, target) or
         target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
         isDesktopFileAtom(conn, target) or target == conn.compound_text or
-        isLatin1Atom(conn, target) or target == conn.mime_text_latin9 or
-        target == conn.mime_text_latin2 or isMarkdownAtom(conn, target);
+        isLatin1Atom(conn, target) or isLatin9Atom(conn, target) or
+        isLatin2Atom(conn, target) or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3587,7 +3601,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_latin1 = 122,
         .mime_text_latin1_alt = 123,
         .mime_text_latin9 = 124,
+        .mime_text_latin9_alt = 128,
         .mime_text_latin2 = 127,
+        .mime_text_latin2_alt = 129,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -3616,9 +3632,12 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 125));
     try std.testing.expect(isClipboardTextTarget(&conn, 126));
     try std.testing.expect(isClipboardTextTarget(&conn, 127));
+    try std.testing.expect(isClipboardTextTarget(&conn, 128));
+    try std.testing.expect(isClipboardTextTarget(&conn, 129));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 122));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 124));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 127));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 128));
     try std.testing.expectEqual(@as(u8, 1), textAtomRank(&conn, 125));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 

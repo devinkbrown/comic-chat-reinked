@@ -2179,9 +2179,8 @@ pub const Window = struct {
     }
 
     fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
-        var scratch: [1024]u8 = undefined;
-        const payload = services.firstDropText(bytes, &scratch) orelse bytes;
-        if (!std.unicode.utf8ValidateSlice(payload)) return null;
+        const payload = try services.firstDropTextUtf8(self.gpa, bytes);
+        defer self.gpa.free(payload);
         var view = try std.unicode.Utf8View.init(payload);
         var iterator = view.iterator();
         while (iterator.nextCodepoint()) |codepoint| {
