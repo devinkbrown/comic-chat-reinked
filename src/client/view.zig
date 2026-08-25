@@ -1109,11 +1109,19 @@ pub const View = struct {
                     self.dialog_gallery_focus = .family;
                     return .none;
                 }
+                if (self.dialog_action_focus != null or self.dialog_browse_focus) {
+                    self.focusDialogExtreme(id, false);
+                    return .none;
+                }
                 if (self.dialog_first_field > 0) self.dialog_first_field -= 1;
             },
             .page_down => {
                 if (self.dialog_gallery_focus != null) {
                     self.dialog_gallery_focus = .next;
+                    return .none;
+                }
+                if (self.dialog_action_focus != null or self.dialog_browse_focus) {
+                    self.focusDialogExtreme(id, true);
                     return .none;
                 }
                 const layout = dialogLayout(self.canvas.width, self.canvas.height, dialogs.get(id));
@@ -3683,7 +3691,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .rename_loaded_set, .rename_set => "Rename the open rule set",
         .create_set => "Name a new rule set",
         .advanced_event_params => "How often this rule may fire",
-        .advanced_rule_settings => "Enable matching and case",
+        .advanced_rule_settings => "Turn the rule on and keep case",
         .recent_files => "Open a recent conversation",
         .favorite_rooms => "Join or save a favorite room",
         .open_conversation => "Open a saved conversation",
@@ -3753,7 +3761,7 @@ fn dialogGroupText(id: dialogs.Id) []const u8 {
         .rename_loaded_set, .rename_set => "Rename the open rule set",
         .create_set => "Name a new rule set",
         .advanced_event_params => "How often this rule may fire",
-        .advanced_rule_settings => "Enable matching and case",
+        .advanced_rule_settings => "Turn the rule on and keep case",
         .automation => "Greeting and repeat cap",
         .room_access => "Grant, deny, or show room access",
         .ircx_properties => "Read or write named room properties",
@@ -4992,6 +5000,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("OWN", memberRoleChip(.owner));
     try std.testing.expectEqualStrings("Wire account and password for this wire", dialogHelper(.password, ""));
     try std.testing.expectEqualStrings("How often this rule may fire", dialogHelper(.advanced_event_params, ""));
+    try std.testing.expectEqualStrings("Turn the rule on and keep case", dialogHelper(.advanced_rule_settings, ""));
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 12, true));
     try std.testing.expectEqualStrings("Moderate", contextItemHint(.member, 3, true));
     try std.testing.expectEqualStrings("KEY", settingsKicker(.channel_password, 0));
@@ -5354,6 +5363,27 @@ test "dialog Home and End jump first field and last button from leftover chrome"
     try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
     _ = try view.handleDialogKey(.home, .{});
     try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "dialog leftover Page Up and Page Down jump first field and last button" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.page_up, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.page_down, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+
+    view.openDialog(.file_transfer);
+    view.dialog_field = 2;
+    view.dialog_browse_focus = true;
+    _ = try view.handleDialogKey(.page_up, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
 }
 
 test "dialog leftover buttons move with Left and Right" {

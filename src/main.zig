@@ -2213,7 +2213,13 @@ fn prefillOpenedDialog(
         .notifications => {
             try view.setDialogValueAt(1, "*");
             try view.setDialogValueAt(2, "*");
-            try view.setDialogValueAt(4, if (cc.client.dialogs.matchesAny(preferences.notificationDelivery(), &.{ "Off", "Disabled" })) "Off" else preferences.notificationDelivery());
+            const delivery = preferences.notificationDelivery();
+            try view.setDialogValueAt(4, if (cc.client.dialogs.matchesAny(delivery, &.{ "Off", "Disabled" }))
+                "Off"
+            else if (cc.client.dialogs.matchesAny(delivery, &.{ "Sound and page", "Sound and banner" }))
+                "Sound and page"
+            else
+                "Page banner");
         },
         .notification_users => {
             var online: std.ArrayList(u8) = .empty;
@@ -2292,8 +2298,8 @@ fn prefillOpenedDialog(
         .advanced_rule_settings => if (preferences.rules.items.len != 0) {
             const rule = preferences.rules.items[0];
             try view.setDialogValueAt(0, rule.name);
-            try view.setDialogValueAt(1, if (rule.enabled) "Yes" else "No");
-            try view.setDialogValueAt(2, if (rule.case_sensitive) "Yes" else "No");
+            try view.setDialogValueAt(1, if (rule.enabled) "On" else "Off");
+            try view.setDialogValueAt(2, if (rule.case_sensitive) "On" else "Off");
         },
         else => {},
     }
@@ -2677,7 +2683,7 @@ fn applyDialogAction(
                 view.setDialogNotice("Room and property names cannot contain spaces; values must stay on one line.");
                 return;
             }
-            if (cc.client.dialogs.matchesAny(operation, &.{ "Get common", "Get common properties", "Read common properties" })) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Get common", "Get common properties", "Read common", "Read common properties" })) {
                 try client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG");
             } else if (cc.client.dialogs.matchesAny(operation, &.{ "Get", "Read" })) {
                 if (property.len == 0) {
@@ -2879,8 +2885,8 @@ fn applyDialogAction(
                 view.setDialogNotice("Choose an existing rule.");
                 return;
             };
-            rule.enabled = std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Yes");
-            try preferences.configureRule(value, std.ascii.eqlIgnoreCase(view.dialogValueAt(2), "Yes"), rule.maximum_occurrences, rule.interval_s);
+            rule.enabled = cc.client.dialogs.matchesAny(view.dialogValueAt(1), &.{ "On", "Yes" });
+            try preferences.configureRule(value, cc.client.dialogs.matchesAny(view.dialogValueAt(2), &.{ "On", "Yes" }), rule.maximum_occurrences, rule.interval_s);
             try preferences.saveFile(io, network.runtime.preferences_path);
         },
         .notifications => {
@@ -4437,7 +4443,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
                 try view.setDialogValueAt(1, "*");
                 try view.setDialogValueAt(2, "*");
                 try view.setDialogValueAt(3, "eshmaki.me");
-                try view.setDialogValueAt(4, "In-app banner");
+                try view.setDialogValueAt(4, "Page banner");
             },
             .call_link => {
                 try view.setDialogValueAt(0, "alex");

@@ -181,7 +181,7 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Contrast", .hint = "Ink weight on chrome", .kind = .choice },
             .{ .label = "Page view", .hint = "Sunday page or conversation", .kind = .choice },
             .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
-            .{ .label = "CAST pane", .hint = "CAST rail visibility", .kind = .choice },
+            .{ .label = "CAST rail", .hint = "CAST rail visibility", .kind = .choice },
             .{ .label = "CAST layout", .hint = "Portraits or compact list", .kind = .choice },
             .{ .label = "Status details", .hint = "Activity panel density", .kind = .choice },
         },
@@ -222,7 +222,7 @@ pub fn fields(id: Id) []const Field {
         .rename_loaded_set, .rename_set => &.{ .{ .label = "Open set" }, .{ .label = "New set name" } },
         .create_set => &.{.{ .label = "Rule set name" }},
         .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat cap", .hint = "0 means unlimited" }, .{ .label = "Repeat window", .hint = "Seconds; 0 means any interval" } },
-        .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Rule on", .kind = .choice }, .{ .label = "Match case", .kind = .choice } },
+        .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Rule on", .kind = .choice }, .{ .label = "Case", .kind = .choice } },
         .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Wire", .hint = "Optional wire" }, .{ .label = "Watch how", .kind = .choice } },
         .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
@@ -302,10 +302,10 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             &.{ "Notify", "Reply", "Action", "Sound", "Join room", "Ignore" }
         else
             &.{},
-        .notifications => if (index == 4) &.{ "In-app banner", "Sound and banner", "Off" } else &.{},
+        .notifications => if (index == 4) &.{ "Page banner", "Sound and page", "Off" } else &.{},
         .file_transfer => if (index == 0) &.{ "Send file", "Receive offer" } else &.{},
         .notification_users => if (index == 2) &.{ "Refresh", "Whisper", "Invite CAST", "Join room", "Clear list" } else &.{},
-        .ircx_properties => if (index == 3) &.{ "Read", "Read common properties", "Write", "Remove" } else &.{},
+        .ircx_properties => if (index == 3) &.{ "Read", "Read common", "Write", "Remove" } else &.{},
         .room_access => if (index == 0)
             &.{ "Show", "Add", "Remove", "Clear all" }
         else if (index == 1)
@@ -319,7 +319,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         else
             &.{},
         .rule_sets => if (index == 0) &.{ "Create", "Rename", "Assign rule", "Rule caps", "Rule matching", "Import", "Export" } else &.{},
-        .advanced_rule_settings => if (index == 1 or index == 2) &.{ "Yes", "No" } else &.{},
+        .advanced_rule_settings => if (index == 1 or index == 2) &.{ "On", "Off" } else &.{},
         .recent_files => if (index == 1) &.{ "Open", "Remove" } else &.{},
         .favorite_rooms => if (index == 1) &.{ "Join", "Add this room", "Remove" } else &.{},
         .print_preview => if (index == 1) &.{ "Save PDF", "Save PDF and open", "Save PDF and print" } else &.{},
@@ -363,12 +363,12 @@ pub fn primaryLabel(id: Id) []const u8 {
         .print_preview => "Save PDF",
         .away => "Save away",
         .automation, .rules, .edit_rule, .advanced_event_params, .advanced_rule_settings => "Save rule",
-        .rule_sets => "Apply set",
+        .rule_sets => "Save set",
         .add_to_sets => "Add rule",
         .rename_loaded_set, .rename_set => "Rename set",
         .create_set => "Create set",
         .notifications => "Save watch",
-        .notification_users => "Apply CAST",
+        .notification_users => "Use CAST",
         .ircx_properties => "Save properties",
         .room_access => "Save access",
         .ircx_events => "Save events",
@@ -525,7 +525,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Room", fields(.ircx_properties)[0].label);
     try std.testing.expectEqualStrings("Room options", fields(.channel_create)[2].label);
     try std.testing.expectEqualStrings("Room options", fields(.channel_properties)[1].label);
-    try std.testing.expectEqualStrings("CAST pane", fields(.settings)[5].label);
+    try std.testing.expectEqualStrings("CAST rail", fields(.settings)[5].label);
     try std.testing.expectEqualStrings("CAST layout", fields(.settings)[6].label);
     try std.testing.expectEqualStrings("Wire list", get(.servers).title);
     try std.testing.expectEqualStrings("CAST profile", get(.member_profile).title);
@@ -545,7 +545,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Ban or free", get(.ban).title);
     try std.testing.expectEqualStrings("Send call link", get(.call_link).title);
     try std.testing.expectEqualStrings("Voice", choiceOptions(.room_access, 1)[0]);
-    try std.testing.expectEqualStrings("Read common properties", choiceOptions(.ircx_properties, 3)[1]);
+    try std.testing.expectEqualStrings("Read common", choiceOptions(.ircx_properties, 3)[1]);
     try std.testing.expectEqualStrings("Show", choiceOptions(.room_access, 0)[0]);
     try std.testing.expectEqualStrings("Show", choiceOptions(.ircx_events, 0)[0]);
     try std.testing.expectEqualStrings("Ban pattern", fields(.ban)[0].label);
@@ -566,7 +566,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Rule caps", choiceOptions(.rule_sets, 0)[3]);
     try std.testing.expectEqualStrings("Rule matching", choiceOptions(.rule_sets, 0)[4]);
     try std.testing.expectEqualStrings("Add this room", choiceOptions(.favorite_rooms, 1)[1]);
-    try std.testing.expectEqualStrings("In-app banner", choiceOptions(.notifications, 4)[0]);
+    try std.testing.expectEqualStrings("Page banner", choiceOptions(.notifications, 4)[0]);
     try std.testing.expectEqualStrings("Away message", get(.away).title);
     try std.testing.expectEqualStrings("Live CAST", get(.notification_users).title);
     try std.testing.expectEqualStrings("Choose a live CAST member", fields(.notification_users)[1].hint);
@@ -597,15 +597,15 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Name filter", fields(.user_list)[1].label);
     try std.testing.expectEqualStrings("Note", fields(.invitation)[1].label);
     try std.testing.expectEqualStrings("Rule on", fields(.advanced_rule_settings)[1].label);
-    try std.testing.expectEqualStrings("Match case", fields(.advanced_rule_settings)[2].label);
+    try std.testing.expectEqualStrings("Case", fields(.advanced_rule_settings)[2].label);
     try std.testing.expectEqualStrings("Studio", get(.settings).title);
     try std.testing.expectEqualStrings("Greeting", get(.automation).title);
     try std.testing.expectEqualStrings("Rule matching", get(.advanced_rule_settings).title);
     try std.testing.expectEqualStrings("Ink", prompt(.choose_color).?);
     try std.testing.expectEqualStrings("Timeout", fields(.room_access)[3].label);
     try std.testing.expectEqualStrings("With ink", fields(.sound)[1].label);
-    try std.testing.expectEqualStrings("Apply set", primaryLabel(.rule_sets));
-    try std.testing.expectEqualStrings("Apply CAST", primaryLabel(.notification_users));
+    try std.testing.expectEqualStrings("Save set", primaryLabel(.rule_sets));
+    try std.testing.expectEqualStrings("Use CAST", primaryLabel(.notification_users));
     try std.testing.expectEqualStrings("Add rule", primaryLabel(.add_to_sets));
     try std.testing.expectEqualStrings("Rename set", primaryLabel(.rename_set));
     try std.testing.expectEqualStrings("Create set", primaryLabel(.create_set));
@@ -662,8 +662,8 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Clear all", &.{ "Clear", "Clear all" }));
     try std.testing.expect(matchesAny("Also ban pattern", &.{ "Also ban", "Also ban pattern" }));
     try std.testing.expect(matchesAny("Repeat window seconds", &.{ "Repeat window", "Repeat window seconds" }));
-    try std.testing.expect(matchesAny("Save rule", &.{ "Apply set", "Add rule", "Save rule" }));
-    try std.testing.expect(matchesAny("Save notifications", &.{ "Save watch", "Apply CAST", "Save notifications" }));
+    try std.testing.expect(matchesAny("Save rule", &.{ "Save set", "Apply set", "Add rule", "Save rule" }));
+    try std.testing.expect(matchesAny("Save notifications", &.{ "Save watch", "Use CAST", "Apply CAST", "Save notifications" }));
     try std.testing.expect(matchesAny("Rules", &.{ "Rule book", "Rules" }));
     try std.testing.expect(matchesAny("Edit rule", &.{ "Change rule", "Edit rule" }));
     try std.testing.expect(matchesAny("Summary", &.{ "Room note", "Summary" }));
@@ -725,6 +725,15 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("None yet", &.{ "None on this wire yet", "None yet" }));
     try std.testing.expect(matchesAny("Icons", &.{ "Portraits", "Icons" }));
     try std.testing.expect(matchesAny("CAST icons", &.{ "CAST portraits", "CAST icons" }));
+    try std.testing.expect(matchesAny("CAST pane", &.{ "CAST rail", "CAST pane" }));
+    try std.testing.expect(matchesAny("Match case", &.{ "Case", "Match case" }));
+    try std.testing.expect(matchesAny("In-app banner", &.{ "Page banner", "In-app banner" }));
+    try std.testing.expect(matchesAny("Sound and banner", &.{ "Sound and page", "Sound and banner" }));
+    try std.testing.expect(matchesAny("Apply set", &.{ "Save set", "Apply set" }));
+    try std.testing.expect(matchesAny("Apply CAST", &.{ "Use CAST", "Apply CAST" }));
+    try std.testing.expect(matchesAny("Read common properties", &.{ "Read common", "Read common properties" }));
+    try std.testing.expect(matchesAny("Yes", &.{ "On", "Yes" }));
+    try std.testing.expect(matchesAny("No", &.{ "Off", "No" }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 
