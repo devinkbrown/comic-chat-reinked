@@ -5,7 +5,8 @@
 //! X server cannot complete the native transfer (including `wl-paste --primary`
 //! / `xclip -selection primary` when PRIMARY is missing), plus notifications
 //! (`notify-send --urgency=normal`), file selection, document opening, and
-//! printing. Incoming desktop file-list MIME is parsed here. Every call is
+//! printing. Incoming desktop file-list MIME and receive-only RTF are parsed
+//! here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
 //! internal application fallback.
 
@@ -187,6 +188,22 @@ pub fn isDesktopFileMime(mime: []const u8) bool {
         std.ascii.eqlIgnoreCase(mime, "application/x-kde4-urilist");
 }
 
+/// Receive-only URI list MIME, including the `text/x-uri-list` alias.
+pub fn isUriListMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "text/uri-list") or mimeTypeEquals(mime, "text/x-uri-list");
+}
+
+/// Receive-only RTF. Not advertised on copy.
+pub fn isRtfMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "text/rtf") or mimeTypeEquals(mime, "application/rtf");
+}
+
+fn mimeTypeEquals(mime: []const u8, prefix: []const u8) bool {
+    if (mime.len < prefix.len) return false;
+    if (!std.ascii.eqlIgnoreCase(mime[0..prefix.len], prefix)) return false;
+    return mime.len == prefix.len or mime[prefix.len] == ';';
+}
+
 /// First local path from `x-special/gnome-copied-files`, `text/x-moz-url`,
 /// a bare absolute path, or a `text/uri-list` body.
 pub fn firstPathFromDesktopFiles(text: []const u8, buf: []u8) ?[]const u8 {
@@ -244,10 +261,141 @@ fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
 
 /// True for `text/html` and `text/html;charset=...` (receive-only MIME).
 pub fn isHtmlMime(mime: []const u8) bool {
-    const prefix = "text/html";
-    if (mime.len < prefix.len) return false;
-    if (!std.ascii.eqlIgnoreCase(mime[0..prefix.len], prefix)) return false;
-    return mime.len == prefix.len or mime[prefix.len] == ';';
+    return mimeTypeEquals(mime, "text/html");
+}
+
+/// Last-resort clipboard/drop payload: strip a bounded RTF document to text.
+/// Groups such as font/color tables and pictures are skipped. `\uN` and `\'hh`
+/// become Unicode / Latin-1 characters.
+pub fn rtfToPlainText(gpa: std.mem.Allocator, rtf: []const u8) ![]u8 {
+    const start = std.mem.indexOf(u8, rtf, "{\\rtf") orelse {
+        return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, rtf));
+    };
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = start;
+    var skip_depth: u8 = 0;
+    var group_depth: u8 = 0;
+    while (i < rtf.len) {
+        const c = rtf[i];
+        if (c == '{') {
+            group_depth +|= 1;
+            i += 1;
+            if (skip_depth != 0) {
+                skip_depth +|= 1;
+                continue;
+            }
+            if (rtfDestinationIsSkip(rtf[i..])) {
+                skip_depth = 1;
+            }
+            continue;
+        }
+        if (c == '}') {
+            if (group_depth != 0) group_depth -= 1;
+            if (skip_depth != 0) skip_depth -= 1;
+            i += 1;
+            continue;
+        }
+        if (c == '\\') {
+            const parsed = parseRtfControl(rtf[i..]);
+            i += parsed.consumed;
+            if (skip_depth != 0) continue;
+            switch (parsed.kind) {
+                .literal => try out.append(gpa, parsed.literal),
+                .newline => {
+                    if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
+                },
+                .tab => try out.append(gpa, '\t'),
+                .hex => try out.append(gpa, parsed.literal),
+                .unicode => {
+                    var encoded: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(parsed.codepoint, &encoded) catch continue;
+                    try out.appendSlice(gpa, encoded[0..n]);
+                    if (i < rtf.len and rtf[i] != '\\' and rtf[i] != '{' and rtf[i] != '}') i += 1;
+                },
+                .skip => {},
+            }
+            continue;
+        }
+        if (c == '\r' or c == '\n') {
+            i += 1;
+            continue;
+        }
+        if (skip_depth == 0) try out.append(gpa, c);
+        i += 1;
+    }
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+const RtfControl = struct {
+    kind: enum { literal, newline, tab, hex, unicode, skip },
+    literal: u8 = 0,
+    codepoint: u21 = 0,
+    consumed: usize,
+};
+
+fn parseRtfControl(text: []const u8) RtfControl {
+    if (text.len < 2) return .{ .kind = .skip, .consumed = text.len };
+    const next = text[1];
+    if (next == '\\' or next == '{' or next == '}') return .{ .kind = .literal, .literal = next, .consumed = 2 };
+    if (next == '\'') {
+        if (text.len < 4) return .{ .kind = .skip, .consumed = text.len };
+        const hi = hexNibble(text[2]) orelse return .{ .kind = .skip, .consumed = 2 };
+        const lo = hexNibble(text[3]) orelse return .{ .kind = .skip, .consumed = 2 };
+        return .{ .kind = .hex, .literal = @intCast((hi << 4) | lo), .consumed = 4 };
+    }
+    if (next == '~') return .{ .kind = .literal, .literal = ' ', .consumed = 2 };
+    if (next == '-' or next == '_') return .{ .kind = .literal, .literal = '-', .consumed = 2 };
+    var i: usize = 1;
+    while (i < text.len and std.ascii.isAlphabetic(text[i])) : (i += 1) {}
+    const name = text[1..i];
+    var signed: i32 = 0;
+    var have_num = false;
+    if (i < text.len and (text[i] == '-' or std.ascii.isDigit(text[i]))) {
+        have_num = true;
+        var neg = false;
+        if (text[i] == '-') {
+            neg = true;
+            i += 1;
+        }
+        var value: i32 = 0;
+        while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+            value = value * 10 + @as(i32, text[i] - '0');
+        }
+        signed = if (neg) -value else value;
+    }
+    if (i < text.len and text[i] == ' ') i += 1;
+    if (std.ascii.eqlIgnoreCase(name, "par") or std.ascii.eqlIgnoreCase(name, "line") or
+        std.ascii.eqlIgnoreCase(name, "page"))
+    {
+        return .{ .kind = .newline, .consumed = i };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "tab")) return .{ .kind = .tab, .consumed = i };
+    if (std.ascii.eqlIgnoreCase(name, "u") and have_num) {
+        const raw: i32 = if (signed < 0) signed + 65536 else signed;
+        const code: u21 = if (raw >= 0 and raw <= 0x10ffff) @intCast(raw) else 0xfffd;
+        return .{ .kind = .unicode, .codepoint = code, .consumed = i };
+    }
+    return .{ .kind = .skip, .consumed = i };
+}
+
+fn rtfDestinationIsSkip(rest: []const u8) bool {
+    var i: usize = 0;
+    while (i < rest.len and (rest[i] == ' ' or rest[i] == '\r' or rest[i] == '\n')) : (i += 1) {}
+    if (i >= rest.len or rest[i] != '\\') return false;
+    if (i + 1 < rest.len and rest[i + 1] == '*') return true;
+    i += 1;
+    var end = i;
+    while (end < rest.len and std.ascii.isAlphabetic(rest[end])) : (end += 1) {}
+    const name = rest[i..end];
+    return std.ascii.eqlIgnoreCase(name, "fonttbl") or
+        std.ascii.eqlIgnoreCase(name, "colortbl") or
+        std.ascii.eqlIgnoreCase(name, "stylesheet") or
+        std.ascii.eqlIgnoreCase(name, "info") or
+        std.ascii.eqlIgnoreCase(name, "pict") or
+        std.ascii.eqlIgnoreCase(name, "header") or
+        std.ascii.eqlIgnoreCase(name, "footer") or
+        std.ascii.eqlIgnoreCase(name, "object");
 }
 
 /// Last-resort clipboard/drop payload: strip tags from `text/html`.
@@ -1043,6 +1191,14 @@ test "desktop file-list MIME yields a local path and skips copy/cut headers" {
     try std.testing.expect(isDesktopFileMime("application/x-moz-file"));
     try std.testing.expect(isDesktopFileMime("application/x-kde4-urilist"));
     try std.testing.expect(!isDesktopFileMime("text/uri-list"));
+    try std.testing.expect(isUriListMime("text/uri-list"));
+    try std.testing.expect(isUriListMime("text/x-uri-list"));
+    try std.testing.expect(isUriListMime("text/x-uri-list;charset=utf-8"));
+    try std.testing.expect(!isUriListMime("text/plain"));
+    try std.testing.expect(isRtfMime("text/rtf"));
+    try std.testing.expect(isRtfMime("application/rtf"));
+    try std.testing.expect(isRtfMime("text/rtf;charset=utf-8"));
+    try std.testing.expect(!isRtfMime("text/html"));
     try std.testing.expectEqualStrings(
         "/tmp/chat room.ccc",
         firstPathFromDesktopFiles("copy\nfile:///tmp/chat%20room.ccc\n", &buf).?,
@@ -1151,6 +1307,19 @@ test "isHtmlMime accepts charset parameters" {
     try std.testing.expect(isHtmlMime("TEXT/HTML;charset=UTF-8"));
     try std.testing.expect(!isHtmlMime("text/htmlx"));
     try std.testing.expect(!isHtmlMime("text/plain"));
+}
+
+test "rtfToPlainText extracts Unicode and skips destination groups" {
+    const gpa = std.testing.allocator;
+    const plain = try rtfToPlainText(gpa, "{\\rtf1\\ansi{\\fonttbl\\f0 Arial;}hello \\u8364? world\\par}");
+    defer gpa.free(plain);
+    try std.testing.expectEqualStrings("hello € world\n", plain);
+    const hex = try rtfToPlainText(gpa, "{\\rtf1\\'41\\'62}");
+    defer gpa.free(hex);
+    try std.testing.expectEqualStrings("Ab", hex);
+    const already = try rtfToPlainText(gpa, "already plain");
+    defer gpa.free(already);
+    try std.testing.expectEqualStrings("already plain", already);
 }
 
 test "htmlToPlainText strips tags and decodes common entities" {

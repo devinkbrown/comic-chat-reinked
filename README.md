@@ -283,7 +283,8 @@ the compositor configures client-side mode), coalesces `present()`
 commits behind `wl_surface.frame`, copies through
 `wl_data_device` and `zwp_primary_selection_v1` (including
 `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
-decode including receive-only `text/plain;charset=utf-16`, `text/html`, and
+decode including receive-only `text/plain;charset=utf-16`, `text/html`,
+`text/rtf`, `text/x-uri-list`, and
 desktop file-list MIME, and CR/LF
 normalized to LF), skips `present()` while suspended, pastes PRIMARY on
 middle-click as typed keys (`wl-paste --primary` fallback), injects
@@ -295,16 +296,17 @@ without an IME.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
-`RESOURCE_MANAGER` property changes, XSETTINGS `Gdk/WindowScalingFactor`,
+`RESOURCE_MANAGER` property changes, XSETTINGS `Gdk/WindowScalingFactor`
+(re-watching the owner after DestroyNotify or a scale refresh),
 XI2 touch→pointer, RANDR `ScreenChangeNotify`, cached
 per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
+`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf`, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
 TARGETS list and sending a user ConvertSelection timestamp), accepts XDND text/`file:`
 drops as typed keys (TARGETS-first, drop timestamp), pastes PRIMARY on
-middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback), accepts receive-only `text/html`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
+middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback), accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE` (skipping `present()` while hidden or
 fully obscured; MapNotify exposes), honors keyboard group bits and
 MappingNotify without dropping queued events, resets compose on FocusOut,

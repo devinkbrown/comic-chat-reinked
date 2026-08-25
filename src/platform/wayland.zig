@@ -29,7 +29,8 @@
 //! `wl_data_device` and `zwp_primary_selection_v1` when present, including
 //! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
 //! UTF-16 decode (including `text/plain;charset=utf-16` / `UTF16_STRING`
-//! on receive only), receive-only `text/html`, and receive-only desktop
+//! on receive only), receive-only `text/html`, receive-only `text/rtf` /
+//! `application/rtf`, receive-only `text/x-uri-list`, and receive-only desktop
 //! file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
 //! `application/x-moz-file`). Middle-click pastes PRIMARY as typed keys
 //! and falls back to `wl-paste --primary` when the native primary protocol
@@ -185,6 +186,17 @@ const html_mime_types = [_][]const u8{
     "text/html",
     "text/html;charset=utf-8",
     "text/html;charset=utf8",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const extra_uri_list_mime_types = [_][]const u8{
+    "text/x-uri-list",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const rtf_mime_types = [_][]const u8{
+    "text/rtf",
+    "application/rtf",
 };
 
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
@@ -1860,6 +1872,30 @@ pub const Window = struct {
                 last_empty = text;
             } else |_| {}
         }
+        for (extra_uri_list_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    if (self.takeDesktopFilePath(gpa, text)) |path| return path;
+                    return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (rtf_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = decodeClipboardBytes(gpa, text) catch return text;
+                    const plain = services.rtfToPlainText(gpa, decoded) catch return decoded;
+                    gpa.free(decoded);
+                    return plain;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
         if (last_empty) |text| return decodeClipboardBytes(gpa, text);
         return error.MissingDataOffer;
     }
@@ -2565,10 +2601,18 @@ fn knownTextMime(mime: []const u8) ?[]const u8 {
     for (html_mime_types) |known| {
         if (std.ascii.eqlIgnoreCase(mime, known)) return known;
     }
+    for (extra_uri_list_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (rtf_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
     for (desktop_file_mime_types) |known| {
         if (std.ascii.eqlIgnoreCase(mime, known)) return known;
     }
     if (services.isHtmlMime(mime)) return "text/html";
+    if (services.isUriListMime(mime)) return "text/uri-list";
+    if (services.isRtfMime(mime)) return "text/rtf";
     if (services.isDesktopFileMime(mime)) return "x-special/gnome-copied-files";
     return null;
 }
@@ -2579,9 +2623,9 @@ fn textMimeRank(mime: []const u8) u8 {
     if (std.mem.eql(u8, mime, "text/plain")) return 4;
     if (std.mem.eql(u8, mime, "UTF8_STRING")) return 3;
     if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
-    if (std.mem.eql(u8, mime, "text/uri-list") or services.isDesktopFileMime(mime)) return 2;
+    if (services.isUriListMime(mime) or services.isDesktopFileMime(mime)) return 2;
     if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
-    if (services.isHtmlMime(mime)) return 1;
+    if (services.isHtmlMime(mime) or services.isRtfMime(mime)) return 1;
     return 0;
 }
 
@@ -3331,10 +3375,15 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/x-moz-url"));
     try std.testing.expect(isPlainTextMime("application/x-moz-file"));
     try std.testing.expect(isPlainTextMime("application/x-kde4-urilist"));
+    try std.testing.expect(isPlainTextMime("text/x-uri-list"));
+    try std.testing.expect(isPlainTextMime("text/rtf"));
+    try std.testing.expect(isPlainTextMime("application/rtf"));
     try std.testing.expect(!isPlainTextMime("image/png"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));
+    try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("text/x-uri-list"));
     try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("x-special/gnome-copied-files"));
+    try std.testing.expectEqual(textMimeRank("text/html"), textMimeRank("text/rtf"));
 }
 
 test "keyboard-enter key array restores held modifiers" {

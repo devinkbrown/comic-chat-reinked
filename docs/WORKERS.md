@@ -99,7 +99,9 @@ hash.
   `x-special/nautilus-clipboard`, `text/x-moz-url`, `application/x-moz-file`,
   `application/x-kde4-urilist`), and
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
-  strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
+  strip and UTF-16 decode. Receive-only `text/x-uri-list` is treated like
+  `text/uri-list`. Receive-only `text/rtf` / `application/rtf` strip to
+  plain text. X11 paste prefers the owner's TARGETS list and
   stashes events that arrive during GetProperty. ConvertSelection uses a
   user timestamp rather than CurrentTime. XDND also prefers TARGETS and
   uses the drop timestamp. Middle-click pastes PRIMARY as typed keys, with
@@ -111,7 +113,9 @@ hash.
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
   requests.   X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
-  property changes, reads XSETTINGS `Gdk/WindowScalingFactor` / `Xft/DPI`,
+  property changes, reads XSETTINGS `Gdk/WindowScalingFactor` / `Xft/DPI`
+  and re-watches the XSETTINGS owner after DestroyNotify or a scale refresh
+  (that owner's DestroyNotify does not close the chat),
   maps XI2 touch to pointer events when the device is not pointer-emulating,
   listens for RANDR `ScreenChangeNotify`, caches
   per-output millimeters so a window move can refresh integer scale,

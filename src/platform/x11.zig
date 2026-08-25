@@ -22,8 +22,9 @@
 //!     with the
 //!     core cursor and physical WM size hints reinstalled), ICCCM
 //!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
-//!     including `text/plain;charset=utf8`, `text/uri-list`, receive-only
-//!     desktop file-list MIME, and
+//!     including `text/plain;charset=utf8`, `text/uri-list`,
+//!     receive-only `text/x-uri-list`, receive-only `text/rtf`,
+//!     receive-only desktop file-list MIME, and
 //!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, Armenian/Georgian
 //!     keysyms, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
@@ -36,6 +37,8 @@
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, EnterNotify cursor restore,
+//!     XSETTINGS owner re-watch after DestroyNotify (that owner does not close
+//!     the chat),
 //!     allowed actions,
 //!     WM_TAKE_FOCUS, WM_LOCALE_NAME, physical WM size hints, and
 //!     resize/close events, suitable for a poll(2)-driven client event loop.
@@ -170,6 +173,9 @@ const XConn = struct {
     mime_moz_file: u32 = 0,
     mime_kde_urilist: u32 = 0,
     mime_nautilus: u32 = 0,
+    mime_uri_list_alt: u32 = 0,
+    mime_rtf: u32 = 0,
+    mime_rtf_app: u32 = 0,
     xsettings_s0: u32 = 0,
     xsettings_settings: u32 = 0,
     xsettings_window: u32 = 0,
@@ -696,10 +702,12 @@ pub const Window = struct {
                 return .other;
             },
             18 => { // UnmapNotify
+                if (!self.structureEventIsOurs(event)) return .other;
                 self.wm_hidden = true;
                 return .other;
             },
             19 => { // MapNotify
+                if (!self.structureEventIsOurs(event)) return .other;
                 self.wm_hidden = false;
                 self.readWmState();
                 self.refreshRandrCrtcs();
@@ -720,8 +728,22 @@ pub const Window = struct {
                 if (self.fully_obscured) return .other;
                 return .expose;
             },
-            17 => return .close, // DestroyNotify
+            17 => { // DestroyNotify
+                const event_win = get32(event[4..8]);
+                const destroyed = get32(event[8..12]);
+                if (destroyed == self.window or event_win == self.window) return .close;
+                if (self.conn.xsettings_window != 0 and
+                    (destroyed == self.conn.xsettings_window or event_win == self.conn.xsettings_window))
+                {
+                    self.xsettings_window = 0;
+                    self.conn.xsettings_window = 0;
+                    self.watchXsettings();
+                    if (self.refreshScale()) |ev| return ev;
+                }
+                return .other;
+            },
             22 => { // ConfigureNotify
+                if (!self.structureEventIsOurs(event)) return .other;
                 const pixel_w: u32 = get16(event[20..22]);
                 const pixel_h: u32 = get16(event[22..24]);
                 if (pixel_w == 0 or pixel_h == 0) return .other;
@@ -896,6 +918,15 @@ pub const Window = struct {
                 }
             } else |_| {}
         }
+        if (self.conn.mime_uri_list_alt != 0) {
+            if (self.convertTarget(gpa, selection, self.conn.mime_uri_list_alt, self.conn.mime_uri_list_alt)) |text| {
+                if (text) |bytes| {
+                    if (self.takeUriListPath(gpa, bytes)) |path| return path;
+                    if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
+                    gpa.free(bytes);
+                }
+            } else |_| {}
+        }
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_gnome_copied)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_url)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_file)) |path| return path;
@@ -908,7 +939,20 @@ pub const Window = struct {
         if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html)) |text| return text;
         if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html_utf8)) |text| return text;
         if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html_utf8_alt)) |text| return text;
+        if (self.readRtfTarget(gpa, selection, self.conn.mime_rtf)) |text| return text;
+        if (self.readRtfTarget(gpa, selection, self.conn.mime_rtf_app)) |text| return text;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
         return null;
+    }
+
+    fn readRtfTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
+        if (target == 0) return null;
+        const text = (self.convertTarget(gpa, selection, target, target) catch return null) orelse return null;
+        if (text.len == 0) {
+            gpa.free(text);
+            return null;
+        }
+        return self.decodeRtfBytes(gpa, text) catch null;
     }
 
     fn readHtmlTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
@@ -928,6 +972,13 @@ pub const Window = struct {
         return plain;
     }
 
+    fn decodeRtfBytes(self: *Window, gpa: std.mem.Allocator, bytes: []u8) ![]u8 {
+        const decoded = try self.decodeClipboardBytes(gpa, bytes);
+        const plain = services.rtfToPlainText(gpa, decoded) catch return decoded;
+        gpa.free(decoded);
+        return plain;
+    }
+
     fn bestOfferedTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32) ?u32 {
         if (self.conn.targets == 0) return null;
         const bytes = (self.convertTarget(gpa, selection, self.conn.targets, self.conn.targets) catch return null) orelse return null;
@@ -943,7 +994,7 @@ pub const Window = struct {
             gpa.free(bytes);
             return null;
         }
-        if (target == self.conn.mime_uri_list or isDesktopFileAtom(&self.conn, target)) {
+        if (isUriListAtom(&self.conn, target) or isDesktopFileAtom(&self.conn, target)) {
             if (self.takeUriListPath(gpa, bytes)) |path| return path;
         }
         if (target == self.conn.utf16_string) {
@@ -955,6 +1006,9 @@ pub const Window = struct {
         }
         if (isHtmlAtom(&self.conn, target)) {
             return try self.decodeHtmlBytes(gpa, bytes);
+        }
+        if (isRtfAtom(&self.conn, target)) {
+            return try self.decodeRtfBytes(gpa, bytes);
         }
         return try self.decodeClipboardBytes(gpa, bytes);
     }
@@ -1133,13 +1187,24 @@ pub const Window = struct {
         return error.ClipboardTimeout;
     }
 
+    fn structureEventIsOurs(self: *const Window, event: [32]u8) bool {
+        const event_win = get32(event[4..8]);
+        const window = get32(event[8..12]);
+        return event_win == self.window or window == self.window;
+    }
+
     fn watchXsettings(self: *Window) void {
         if (self.conn.xsettings_s0 == 0) return;
-        const owner = getSelectionOwner(&self.conn, self.conn.xsettings_s0) catch return;
-        if (owner == 0) return;
+        const owner = getSelectionOwnerStashing(self.gpa, &self.conn, self.conn.xsettings_s0, &self.pending_events) catch return;
+        if (owner == 0) {
+            self.xsettings_window = 0;
+            self.conn.xsettings_window = 0;
+            return;
+        }
+        if (owner == self.conn.xsettings_window) return;
         self.xsettings_window = owner;
         self.conn.xsettings_window = owner;
-        selectPropertyNotify(&self.conn, owner) catch {};
+        selectXsettingsEvents(&self.conn, owner) catch {};
     }
 
     fn decodeXiTouch(self: *Window, event: [32]u8) Event {
@@ -1371,6 +1436,7 @@ pub const Window = struct {
     }
 
     fn refreshScale(self: *Window) ?Event {
+        self.watchXsettings();
         const env = services.readEnviron(self.gpa) catch return null;
         defer self.gpa.free(env);
         const detected = detectScale(self.gpa, &self.conn, env, &self.pending_events, self.window, self.pixel_width, self.pixel_height, self.randrCrtcs()) catch return null;
@@ -2181,12 +2247,20 @@ fn setSizeHints(conn: *XConn, window: u32, pixel_w: u32, pixel_h: u32, scale: u3
 }
 
 fn selectPropertyNotify(conn: *XConn, window: u32) !void {
+    try selectWindowEvents(conn, window, event_property_change);
+}
+
+fn selectXsettingsEvents(conn: *XConn, window: u32) !void {
+    try selectWindowEvents(conn, window, event_property_change | event_structure);
+}
+
+fn selectWindowEvents(conn: *XConn, window: u32, mask: u32) !void {
     var req: [16]u8 = @splat(0);
     req[0] = 2;
     put16(req[2..4], 4);
     put32(req[4..8], window);
     put32(req[8..12], cw_event_mask);
-    put32(req[12..16], event_property_change);
+    put32(req[12..16], mask);
     try writeAll(conn, &req);
 }
 
@@ -2302,6 +2376,9 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_moz_file = try internAtom(conn, "application/x-moz-file");
     conn.mime_kde_urilist = try internAtom(conn, "application/x-kde4-urilist");
     conn.mime_nautilus = try internAtom(conn, "x-special/nautilus-clipboard");
+    conn.mime_uri_list_alt = try internAtom(conn, "text/x-uri-list");
+    conn.mime_rtf = try internAtom(conn, "text/rtf");
+    conn.mime_rtf_app = try internAtom(conn, "application/rtf");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
     conn.xsettings_settings = try internAtom(conn, "_XSETTINGS_SETTINGS");
     conn.wm_state = try internAtom(conn, "WM_STATE");
@@ -2983,15 +3060,23 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8) return 6;
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
-    if (atom == conn.utf16_string or atom == conn.mime_uri_list or isDesktopFileAtom(conn, atom)) return 3;
+    if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
     if (atom == conn.text) return 2;
     if (atom == atom_string) return 1;
-    if (isHtmlAtom(conn, atom)) return 1;
+    if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom)) return 1;
     return 0;
 }
 
 fn isHtmlAtom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_html or atom == conn.mime_text_html_utf8 or atom == conn.mime_text_html_utf8_alt);
+}
+
+fn isUriListAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_uri_list or atom == conn.mime_uri_list_alt);
+}
+
+fn isRtfAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_rtf or atom == conn.mime_rtf_app);
 }
 
 fn isDesktopFileAtom(conn: *const XConn, atom: u32) bool {
@@ -3018,8 +3103,9 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
     if (target == 0) return false;
     return target == conn.utf8_string or target == atom_string or target == conn.text or
         target == conn.mime_text_plain or target == conn.mime_text_utf8 or
-        target == conn.mime_text_utf8_alt or target == conn.mime_uri_list or
-        target == conn.utf16_string or isHtmlAtom(conn, target) or isDesktopFileAtom(conn, target);
+        target == conn.mime_text_utf8_alt or isUriListAtom(conn, target) or
+        target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
+        isDesktopFileAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3033,12 +3119,20 @@ fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void
 }
 
 fn getSelectionOwner(conn: *XConn, selection: u32) !u32 {
+    return getSelectionOwnerMaybeStashing(undefined, conn, selection, null);
+}
+
+fn getSelectionOwnerStashing(gpa: std.mem.Allocator, conn: *XConn, selection: u32, stash: *std.ArrayList([32]u8)) !u32 {
+    return getSelectionOwnerMaybeStashing(gpa, conn, selection, stash);
+}
+
+fn getSelectionOwnerMaybeStashing(gpa: std.mem.Allocator, conn: *XConn, selection: u32, stash: ?*std.ArrayList([32]u8)) !u32 {
     var req: [8]u8 = @splat(0);
     req[0] = 23;
     put16(req[2..4], 2);
     put32(req[4..8], selection);
     try writeAll(conn, &req);
-    const reply = try readReply(conn);
+    const reply = try readReplyMaybeStashing(gpa, conn, stash);
     return get32(reply[8..12]);
 }
 
@@ -3294,6 +3388,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_moz_file = 113,
         .mime_kde_urilist = 114,
         .mime_nautilus = 115,
+        .mime_uri_list_alt = 116,
+        .mime_rtf = 117,
+        .mime_rtf_app = 118,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
@@ -3309,6 +3406,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 113));
     try std.testing.expect(isClipboardTextTarget(&conn, 114));
     try std.testing.expect(isClipboardTextTarget(&conn, 115));
+    try std.testing.expect(isClipboardTextTarget(&conn, 116));
+    try std.testing.expect(isClipboardTextTarget(&conn, 117));
+    try std.testing.expect(isClipboardTextTarget(&conn, 118));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 
     var atoms: [12]u8 = undefined;
@@ -3322,6 +3422,12 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     put32(desktop[4..8], 111);
     try std.testing.expectEqual(@as(u32, 111), preferredTextAtom(&conn, &desktop).?);
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 111));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 116));
+    try std.testing.expectEqual(@as(u8, 1), textAtomRank(&conn, 117));
+    try std.testing.expectEqual(@as(u8, 1), textAtomRank(&conn, 118));
+    try std.testing.expect(isUriListAtom(&conn, 106));
+    try std.testing.expect(isUriListAtom(&conn, 116));
+    try std.testing.expect(isRtfAtom(&conn, 117));
 }
 
 test "x11 dead keysyms stay non-character until the composer combines them" {
