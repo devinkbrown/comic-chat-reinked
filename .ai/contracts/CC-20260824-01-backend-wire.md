@@ -175,6 +175,18 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 49 leftovers in scope
+
+- Resume-token `onyx/session-sync` with an empty local restoration skips the
+  001 JOIN storm; first-visit rooms still JOIN when restoration exists
+- Post-001 service `464` (IDENTIFY/DROP/GHOST) stays English and connected
+- Reconnect JOIN `InvalidRestoreTarget` notices instead of tearing 001
+- `/resetpass` keeps leftover-of-line new password
+- Unknown `/avatar` / character-dialog names and whisper-with-no-member
+  stay English
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 48 leftovers in scope
 
 - Session-sync restored rooms stay sendable after 001 (no composer black

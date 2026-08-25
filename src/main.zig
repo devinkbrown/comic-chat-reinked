@@ -2854,7 +2854,10 @@ fn applyDialogAction(
             view.shell.setComicColumns(comicColumnsFromDialog(view.dialogValueAt(1)));
         },
         .character => {
-            const selected = cc.comic.session.bundledAvatarByName(value) orelse return;
+            const selected = cc.comic.session.bundledAvatarByName(value) orelse {
+                view.setDialogNotice("Choose one of the bundled Comic Chat characters.");
+                return;
+            };
             try room.transcript.setAvatar(nick, selected);
             if (maybe_client) |client| announceRoomAvatar(client, room.name, selected, state.ircx_data) catch |err| switch (err) {
                 error.UnknownAvatar => {},
@@ -4532,7 +4535,8 @@ fn processWorkspaceMessages(
             redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
         } else if (isAuthFailureNumeric(msg.command)) {
             redraw = (try applyAuthFailure(workspace, state, &msg, channel)) or redraw;
-            return error.IrcServerError;
+            if (sessionAuthFailureEndsConnection(state.join_requested)) return error.IrcServerError;
+            continue;
         } else if (std.mem.eql(u8, msg.command, "305") or std.mem.eql(u8, msg.command, "306")) {
             const away = std.mem.eql(u8, msg.command, "306");
             for (workspace.rooms.items) |*room| {
@@ -5210,7 +5214,27 @@ fn canLeaveActiveRoom(room_count: usize) bool {
 }
 
 fn roomNeedsReconnectJoin(room: *const cc.client.workspace.Room, client: *const cc.net.client.Client) bool {
-    return room.want_rejoin and !client.restoresChannel(room.name);
+    return roomNeedsReconnectJoinWith(
+        room.want_rejoin,
+        client.restoresChannel(room.name),
+        client.projectsSessionChannels(),
+        client.hasRestorationTargets(),
+    );
+}
+
+fn roomNeedsReconnectJoinWith(
+    want_rejoin: bool,
+    restores_channel: bool,
+    projects_session_channels: bool,
+    has_restoration_targets: bool,
+) bool {
+    if (!want_rejoin or restores_channel) return false;
+    if (projects_session_channels and !has_restoration_targets) return false;
+    return true;
+}
+
+fn sessionAuthFailureEndsConnection(join_requested: bool) bool {
+    return !join_requested;
 }
 
 fn ensureIncomingRoom(workspace: *cc.client.workspace.Workspace, room_name: []const u8) !?usize {
@@ -6106,6 +6130,17 @@ fn sendOnyxServiceSlash(
         };
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "resetpass")) {
+        if (count < 3) {
+            try appendSessionNotice(workspace, "Usage: /resetpass <account> <code> <new-password>");
+            return true;
+        }
+        client.sendService("RESETPASS", &.{ words[0], words[1], slashRestAfter(rest, 2) }) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
     if (overflow and isOnyxServiceSlash(verb)) {
         try appendSessionNotice(workspace, "That command has too many arguments.");
         return true;
@@ -6295,6 +6330,15 @@ fn requestReconnectJoin(
             try room.transcript.addWithOptions(
                 "Server",
                 sessionLimitFailureNotice(.join, workspace, room.name, room.join_key orelse ""),
+                .{ .modes = cc.proto.udi.bm_action },
+            );
+        },
+        error.InvalidRestoreTarget => {
+            try room.setJoinKey(workspace.gpa, "");
+            client.forgetRestoration(room.name);
+            try room.transcript.addWithOptions(
+                "Server",
+                "Enter the room password as one token.",
                 .{ .modes = cc.proto.udi.bm_action },
             );
         },
@@ -7481,7 +7525,10 @@ fn handleInputKey(
             const client = maybe_client orelse return true;
             if (composerSlashIs(line, "avatar")) {
                 const requested = composerSlashRest(line);
-                const selected = cc.comic.session.bundledAvatarByName(requested) orelse return true;
+                const selected = cc.comic.session.bundledAvatarByName(requested) orelse {
+                    try transcript.addWithOptions("Server", "That character is not available.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                };
                 try transcript.setAvatar(nick, selected);
                 announceRoomAvatar(client, channel, selected, ircx_data) catch |err| switch (err) {
                     error.UnknownAvatar => {},
@@ -7505,9 +7552,14 @@ fn handleInputKey(
             };
             const use_whisper_target = speech == null and selected_mode == .whisper;
             const target = if (use_whisper_target) whisper: {
-                const member_index = view.shell.selected_member orelse return true;
-                if (member_index >= transcript.roster.items.len) return true;
-                if (transcript.roster.items[member_index].departed) return true;
+                const member_index = view.shell.selected_member orelse {
+                    try transcript.addWithOptions("Server", "Select a member to whisper.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                };
+                if (member_index >= transcript.roster.items.len or transcript.roster.items[member_index].departed) {
+                    try transcript.addWithOptions("Server", "Select a member to whisper.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                }
                 break :whisper transcript.roster.items[member_index].nick;
             } else channel;
             const is_private = use_whisper_target;
@@ -8226,6 +8278,14 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expectEqualStrings("my horse", slashRestAfter("alice * my horse", 2));
     try std.testing.expectEqualStrings("my secret", slashRestAfter("alice my secret", 1));
     try std.testing.expectEqualStrings("new pass", slashRestAfter("old new pass", 1));
+    try std.testing.expectEqualStrings("my new passphrase", slashRestAfter("alice 123456 my new passphrase", 2));
+    try std.testing.expect(isOnyxServiceSlash("resetpass"));
+    try std.testing.expect(sessionAuthFailureEndsConnection(false));
+    try std.testing.expect(!sessionAuthFailureEndsConnection(true));
+    try std.testing.expect(roomNeedsReconnectJoinWith(true, false, false, false));
+    try std.testing.expect(!roomNeedsReconnectJoinWith(true, true, true, true));
+    try std.testing.expect(roomNeedsReconnectJoinWith(true, false, true, true));
+    try std.testing.expect(!roomNeedsReconnectJoinWith(true, false, true, false));
     try std.testing.expect(!isOnyxServiceReply("WHOIS"));
     try std.testing.expect(!isOnyxServiceReply("MOTD"));
     try std.testing.expect(!isOnyxServiceSlash("users"));
@@ -8857,6 +8917,8 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SETPASS old") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/setpass old new pass"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SETPASS old :new pass") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/resetpass alice 123456 my new passphrase"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "RESETPASS alice 123456 :my new passphrase") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/knock #locked please"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KNOCK #locked :please") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/search checklist"));
@@ -9018,6 +9080,14 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(saw_first);
     try std.testing.expect(!saw_root);
 
+    const keyed = try workspace.ensure("#keyed");
+    workspace.rooms.items[keyed].setWantRejoin(true);
+    try workspace.rooms.items[keyed].setJoinKey(gpa, "secret key");
+    try requestReconnectJoin(&workspace, &client, &workspace.rooms.items[keyed]);
+    try std.testing.expect(workspace.rooms.items[keyed].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[keyed].join_key == null);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[keyed].transcript.lines.items[workspace.rooms.items[keyed].transcript.lines.items.len - 1].text, "one token") != null);
+
     client.features = try cc.net.features.State.init(gpa, "me", .{});
     defer if (client.features) |*owned_features| owned_features.deinit();
     if (client.features) |*state|
@@ -9065,6 +9135,56 @@ test "composer notices instead of dropping speech before JOIN" {
     ));
     try std.testing.expect(std.mem.indexOf(u8, transcript.lines.items[0].text, "joined this room") != null);
     try std.testing.expectEqual(@as(usize, 0), editor.text().len);
+
+    const owned_host = try gpa.dupe(u8, "eshmaki.me");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try editor.paste("/avatar nope");
+    try std.testing.expect(try handleInputKey(
+        gpa,
+        cc.platform.event.Key{ .enter = {} },
+        &view,
+        &editor,
+        &client,
+        &transcript,
+        "me",
+        "#root",
+        true,
+        false,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, transcript.lines.items[transcript.lines.items.len - 1].text, "character is not available") != null);
+    view.shell.setSayMode(.whisper);
+    try editor.paste("psst");
+    try std.testing.expect(try handleInputKey(
+        gpa,
+        cc.platform.event.Key{ .enter = {} },
+        &view,
+        &editor,
+        &client,
+        &transcript,
+        "me",
+        "#root",
+        true,
+        false,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, transcript.lines.items[transcript.lines.items.len - 1].text, "Select a member") != null);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {
