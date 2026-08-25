@@ -515,6 +515,21 @@ fn columnHasPaperInk(image: Image, x: u32) bool {
     return false;
 }
 
+fn paperInkColumnRunCount(image: Image) u32 {
+    var runs: u32 = 0;
+    var x: u32 = 0;
+    while (x < image.width) {
+        if (!columnHasPaperInk(image, x)) {
+            x += 1;
+            continue;
+        }
+        runs += 1;
+        x += 1;
+        while (x < image.width and columnHasPaperInk(image, x)) : (x += 1) {}
+    }
+    return runs;
+}
+
 fn paperInkCenterX(image: Image, x: u32, y: u32, w: u32, h: u32) ?u32 {
     var weighted: u64 = 0;
     var mass: u64 = 0;
@@ -1433,6 +1448,26 @@ test "Color default-cast cards are standing silhouettes with local color" {
         defer portrait.deinit(gpa);
         try std.testing.expect(portrait.height >= 140);
         try std.testing.expect(portrait.height + 10 > portrait.width);
+    }
+}
+
+test "leftover Color pose cards keep one paper-ink column-run" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+    };
+    const emotions = [_]u16{ 9, 8, 7, 2, 4, 10 };
+    for (blobs) |avb_data| {
+        for (emotions) |emotion| {
+            var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, emotion, 0);
+            defer card.deinit(gpa);
+            try std.testing.expect(card.width >= 200);
+            try std.testing.expect(card.height >= 240);
+            try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(card));
+        }
     }
 }
 
