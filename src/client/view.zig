@@ -954,6 +954,14 @@ pub const View = struct {
                 else if (dialogs.fieldAcceptsText(id, self.dialog_field))
                     if (modifiers.shift) editor.extendEnd() else editor.end();
             },
+            .up => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
+                    self.cycleDialogChoiceDirection(id, self.dialog_field, false);
+            },
+            .down => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
+                    self.cycleDialogChoiceDirection(id, self.dialog_field, true);
+            },
             .page_up => {
                 if (self.dialog_first_field > 0) self.dialog_first_field -= 1;
             },
@@ -2051,7 +2059,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             5 => "Bulletin",
             6 => "Named properties",
             7 => "Room access",
-            8 => "Operator events",
+            8 => "Room events",
             9 => "Favorite rooms",
             else => "Open room in new window",
         },
@@ -3286,6 +3294,8 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .whisper => "Whisper after the wire is live",
         .invite => "Invite after the wire is live",
         .kick, .ban, .room_access, .ircx_properties, .ircx_events => "Moderation after the wire is live",
+        .invitation => "Accept after the wire is live",
+        .channel_properties => "Room topic and limits after the wire is live",
         .file_transfer => "Offer or accept a file after the wire is live",
         .call_link => "Send a meeting link after the wire is live",
         .member_profile => "Request a profile after the wire is live",
@@ -3315,7 +3325,7 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .character => "Choose who stands on the page",
         .background => "The paper behind every panel",
         .setup, .servers => "Server, port, and verified TLS",
-        .connection_features => "What this wire actually negotiated",
+        .connection_features => "What this wire is offering",
         .password => "Secure account sign-in",
         .sound => "Choose a sound and message",
         .comics_view => "Sunday page or transcript",
@@ -4355,7 +4365,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
     try std.testing.expectEqualStrings("Bulletin", menuItemLabel(4, 5));
     try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
-    try std.testing.expectEqualStrings("Operator events", menuItemLabel(4, 8));
+    try std.testing.expectEqualStrings("Room events", menuItemLabel(4, 8));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
     try std.testing.expectEqualStrings("Online members", menuItemLabel(6, 6));
     try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
@@ -4542,6 +4552,10 @@ test "dialog Home and End jump to the first and last choice" {
     _ = try view.handleDialogKey(.home, .{});
     try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
     _ = try view.handleDialogKey(.{ .char = ' ' }, .{});
+    try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expectEqualStrings("Owner", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.up, .{});
     try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
 }
 

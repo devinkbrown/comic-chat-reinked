@@ -2227,7 +2227,7 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(2, "Refresh");
         },
         .ircx_properties => try view.setDialogValueAt(0, ""),
-        .ircx_events => try view.setDialogValueAt(0, "List"),
+        .ircx_events => try view.setDialogValueAt(0, "Show"),
         .set_text_font, .text_font => {
             try view.setDialogValueAt(0, preferences.textFont());
             try view.setDialogValueAt(1, preferences.textStyle());
@@ -2249,7 +2249,7 @@ fn prefillOpenedDialog(
         .connection_features => {
             try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Offline");
             try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Not signed in" else "Offline");
-            try view.setDialogValueAt(2, if (state.ircx_data) "Enabled" else "Not enabled");
+            try view.setDialogValueAt(2, if (state.ircx_data) "Ready" else "Waiting");
             if (client) |connected| {
                 var capabilities: std.ArrayList(u8) = .empty;
                 defer capabilities.deinit(view.gpa);
@@ -2627,7 +2627,7 @@ fn applyDialogAction(
         },
         .ircx_properties => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Named properties need an extended-rooms connection.");
+                view.setDialogNotice("Named properties need a live Sunday connection.");
                 return;
             }
             const client = maybe_client orelse {
@@ -2642,9 +2642,9 @@ fn applyDialogAction(
                 view.setDialogNotice("Room and property names cannot contain spaces; values must stay on one line.");
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Get common") or std.ascii.eqlIgnoreCase(operation, "Get common properties")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Get common", "Get common properties", "Read common properties" })) {
                 try client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG");
-            } else if (std.ascii.eqlIgnoreCase(operation, "Get")) {
+            } else if (cc.client.dialogs.matchesAny(operation, &.{ "Get", "Read" })) {
                 if (property.len == 0) {
                     view.setDialogNotice("Enter one or more comma-separated property names.");
                     return;
@@ -2655,12 +2655,12 @@ fn applyDialogAction(
                     view.setDialogNotice("Enter the property to change.");
                     return;
                 }
-                try client.setProperty(entity, property, if (std.ascii.eqlIgnoreCase(operation, "Delete")) "" else property_value);
+                try client.setProperty(entity, property, if (cc.client.dialogs.matchesAny(operation, &.{ "Delete", "Remove" })) "" else property_value);
             }
         },
         .room_access => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Room access needs an extended-rooms connection.");
+                view.setDialogNotice("Room access needs a live Sunday connection.");
                 return;
             }
             const client = maybe_client orelse {
@@ -2670,18 +2670,18 @@ fn applyDialogAction(
             const operation = value;
             const level = cc.client.dialogs.accessLevelToken(view.dialogValueAt(1));
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
-            if (std.ascii.eqlIgnoreCase(operation, "List")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "List", "Show" })) {
                 try client.accessList(room.name);
-            } else if (std.ascii.eqlIgnoreCase(operation, "Delete") or std.ascii.eqlIgnoreCase(operation, "Clear")) {
-                if (mask.len == 0 and !std.ascii.eqlIgnoreCase(operation, "Clear")) {
-                    view.setDialogNotice("Enter the name pattern to delete.");
+            } else if (cc.client.dialogs.matchesAny(operation, &.{ "Delete", "Remove", "Clear", "Clear all" })) {
+                if (mask.len == 0 and !cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear all" })) {
+                    view.setDialogNotice("Enter the name pattern to remove.");
                     return;
                 }
-                if (!std.ascii.eqlIgnoreCase(operation, "Clear") and std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
+                if (!cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear all" }) and std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
                     view.setDialogNotice("Use one name pattern without spaces.");
                     return;
                 }
-                if (std.ascii.eqlIgnoreCase(operation, "Clear"))
+                if (cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear all" }))
                     try client.accessClear(room.name, level)
                 else
                     try client.accessDelete(room.name, level, mask);
@@ -2704,11 +2704,11 @@ fn applyDialogAction(
         },
         .ircx_events => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Operator events need an extended-rooms connection.");
+                view.setDialogNotice("Room events need a live Sunday connection.");
                 return;
             }
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before managing operator events.");
+                view.setDialogNotice("Connect before managing room events.");
                 return;
             };
             const operation = value;
@@ -2718,7 +2718,7 @@ fn applyDialogAction(
                 view.setDialogNotice("The optional event filter must be one word.");
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "List")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "List", "Show" })) {
                 try client.eventList(event);
             } else {
                 if (event.len == 0 or std.mem.indexOfAny(u8, event, " \r\n\x00") != null) {
@@ -4342,7 +4342,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             .ircx_properties => {
                 try view.setDialogValueAt(0, "#root");
                 try view.setDialogValueAt(1, "TOPIC,ONJOIN");
-                try view.setDialogValueAt(3, "Get");
+                try view.setDialogValueAt(3, "Read");
             },
             .room_access => {
                 try view.setDialogValueAt(0, "Add");
@@ -4352,13 +4352,13 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
                 try view.setDialogValueAt(4, "Room helper");
             },
             .ircx_events => {
-                try view.setDialogValueAt(0, "List");
+                try view.setDialogValueAt(0, "Show");
                 try view.setDialogValueAt(1, "Room");
             },
             .connection_features => {
                 try view.setDialogValueAt(0, "Offline");
                 try view.setDialogValueAt(1, "Offline");
-                try view.setDialogValueAt(2, "Not enabled");
+                try view.setDialogValueAt(2, "Waiting");
                 try view.setDialogValueAt(3, "Waiting on the wire");
             },
             .file_transfer => {
