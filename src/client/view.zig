@@ -376,11 +376,11 @@ pub const View = struct {
                     return true;
                 },
                 .home => if (self.shell.focus == .status) {
-                    self.shell.selectTranscriptLine(total_lines, 0, extend);
+                    self.jumpEarliest(total_lines);
                     return true;
                 } else return false,
                 .end => if (self.shell.focus == .status) {
-                    if (total_lines > 0) self.shell.selectTranscriptLine(total_lines, total_lines - 1, extend);
+                    self.jumpLatest();
                     return true;
                 } else return false,
                 else => return false,
@@ -510,6 +510,14 @@ pub const View = struct {
 
     pub fn jumpLatest(self: *View) void {
         self.shell.jumpLatest();
+    }
+
+    fn jumpEarliest(self: *View, total_lines: usize) void {
+        if (total_lines <= 9) {
+            self.shell.history_offset = 0;
+            return;
+        }
+        self.shell.history_offset = total_lines - 9;
     }
 
     pub fn setContentMode(self: *View, mode: shell_mod.ContentMode) void {
@@ -5077,9 +5085,10 @@ test "composer Page Up and Page Down page the transcript" {
     view.shell.focus = .status;
     view.status_panel_open = false;
     try std.testing.expect(view.handleTranscriptKey(.home, transcript.lines.items.len, false));
-    try std.testing.expectEqual(@as(?usize, 0), view.shell.transcript_cursor);
+    try std.testing.expect(view.shell.history_offset > 0);
+    try std.testing.expectEqual(shell_mod.Focus.status, view.shell.focus);
     try std.testing.expect(view.handleTranscriptKey(.end, transcript.lines.items.len, false));
-    try std.testing.expectEqual(@as(?usize, transcript.lines.items.len - 1), view.shell.transcript_cursor);
+    try std.testing.expectEqual(@as(usize, 0), view.shell.history_offset);
     try std.testing.expectEqual(shell_mod.Focus.status, view.shell.focus);
 }
 
