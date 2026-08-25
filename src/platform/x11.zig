@@ -33,7 +33,7 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local CLIPBOARD text is used only while we
-//!     still own CLIPBOARD; PRIMARY paste uses local text only while we own PRIMARY), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, and Markdown MIME,
+//!     still own CLIPBOARD; PRIMARY paste uses local text only while we own PRIMARY), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15 (plus `latin1`/`latin9`/`latin5`/`latin2`/`cyrillic`/`greek` aliases), Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear (a held button emits `.up` first; implicit-grab motion
@@ -215,16 +215,22 @@ const XConn = struct {
     mime_moz_url_priv: u32 = 0,
     mime_text_latin1: u32 = 0,
     mime_text_latin1_alt: u32 = 0,
+    mime_text_latin1_alias: u32 = 0,
     mime_text_latin9: u32 = 0,
     mime_text_latin9_alt: u32 = 0,
+    mime_text_latin9_alias: u32 = 0,
     mime_text_latin2: u32 = 0,
     mime_text_latin2_alt: u32 = 0,
+    mime_text_latin2_alias: u32 = 0,
     mime_text_latin5: u32 = 0,
     mime_text_latin5_alt: u32 = 0,
+    mime_text_latin5_alias: u32 = 0,
     mime_text_cyrillic: u32 = 0,
     mime_text_cyrillic_alt: u32 = 0,
+    mime_text_cyrillic_alias: u32 = 0,
     mime_text_greek: u32 = 0,
     mime_text_greek_alt: u32 = 0,
+    mime_text_greek_alias: u32 = 0,
     mime_text_latin3: u32 = 0,
     mime_text_latin3_alt: u32 = 0,
     mime_text_latin4: u32 = 0,
@@ -1192,16 +1198,22 @@ pub const Window = struct {
         if (self.readRtfTarget(gpa, selection, self.conn.mime_rtf_app)) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1, "ISO-8859-1")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1_alt, "ISO-8859-1")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1_alias, "ISO-8859-1")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9, "ISO-8859-15")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9_alt, "ISO-8859-15")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9_alias, "ISO-8859-15")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2, "ISO-8859-2")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2_alt, "ISO-8859-2")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2_alias, "ISO-8859-2")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin5, "ISO-8859-9")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin5_alt, "ISO-8859-9")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin5_alias, "ISO-8859-9")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cyrillic, "ISO-8859-5")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cyrillic_alt, "ISO-8859-5")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cyrillic_alias, "ISO-8859-5")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_greek, "ISO-8859-7")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_greek_alt, "ISO-8859-7")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_greek_alias, "ISO-8859-7")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin3, "ISO-8859-3")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin3_alt, "ISO-8859-3")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin4, "ISO-8859-4")) |text| return text;
@@ -3070,16 +3082,22 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_moz_url_priv = try internAtom(conn, "text/x-moz-url-priv");
     conn.mime_text_latin1 = try internAtom(conn, "text/plain;charset=ISO-8859-1");
     conn.mime_text_latin1_alt = try internAtom(conn, "text/plain;charset=iso-8859-1");
+    conn.mime_text_latin1_alias = try internAtom(conn, "text/plain;charset=latin1");
     conn.mime_text_latin9 = try internAtom(conn, "text/plain;charset=ISO-8859-15");
     conn.mime_text_latin9_alt = try internAtom(conn, "text/plain;charset=iso-8859-15");
+    conn.mime_text_latin9_alias = try internAtom(conn, "text/plain;charset=latin9");
     conn.mime_text_latin2 = try internAtom(conn, "text/plain;charset=ISO-8859-2");
     conn.mime_text_latin2_alt = try internAtom(conn, "text/plain;charset=iso-8859-2");
+    conn.mime_text_latin2_alias = try internAtom(conn, "text/plain;charset=latin2");
     conn.mime_text_latin5 = try internAtom(conn, "text/plain;charset=ISO-8859-9");
     conn.mime_text_latin5_alt = try internAtom(conn, "text/plain;charset=iso-8859-9");
+    conn.mime_text_latin5_alias = try internAtom(conn, "text/plain;charset=latin5");
     conn.mime_text_cyrillic = try internAtom(conn, "text/plain;charset=ISO-8859-5");
     conn.mime_text_cyrillic_alt = try internAtom(conn, "text/plain;charset=iso-8859-5");
+    conn.mime_text_cyrillic_alias = try internAtom(conn, "text/plain;charset=cyrillic");
     conn.mime_text_greek = try internAtom(conn, "text/plain;charset=ISO-8859-7");
     conn.mime_text_greek_alt = try internAtom(conn, "text/plain;charset=iso-8859-7");
+    conn.mime_text_greek_alias = try internAtom(conn, "text/plain;charset=greek");
     conn.mime_text_latin3 = try internAtom(conn, "text/plain;charset=ISO-8859-3");
     conn.mime_text_latin3_alt = try internAtom(conn, "text/plain;charset=iso-8859-3");
     conn.mime_text_latin4 = try internAtom(conn, "text/plain;charset=ISO-8859-4");
@@ -3876,27 +3894,27 @@ fn isRtfAtom(conn: *const XConn, atom: u32) bool {
 }
 
 fn isLatin1Atom(conn: *const XConn, atom: u32) bool {
-    return atom != 0 and (atom == conn.mime_text_latin1 or atom == conn.mime_text_latin1_alt);
+    return atom != 0 and (atom == conn.mime_text_latin1 or atom == conn.mime_text_latin1_alt or atom == conn.mime_text_latin1_alias);
 }
 
 fn isLatin9Atom(conn: *const XConn, atom: u32) bool {
-    return atom != 0 and (atom == conn.mime_text_latin9 or atom == conn.mime_text_latin9_alt);
+    return atom != 0 and (atom == conn.mime_text_latin9 or atom == conn.mime_text_latin9_alt or atom == conn.mime_text_latin9_alias);
 }
 
 fn isLatin2Atom(conn: *const XConn, atom: u32) bool {
-    return atom != 0 and (atom == conn.mime_text_latin2 or atom == conn.mime_text_latin2_alt);
+    return atom != 0 and (atom == conn.mime_text_latin2 or atom == conn.mime_text_latin2_alt or atom == conn.mime_text_latin2_alias);
 }
 
 fn isLatin5Atom(conn: *const XConn, atom: u32) bool {
-    return atom != 0 and (atom == conn.mime_text_latin5 or atom == conn.mime_text_latin5_alt);
+    return atom != 0 and (atom == conn.mime_text_latin5 or atom == conn.mime_text_latin5_alt or atom == conn.mime_text_latin5_alias);
 }
 
 fn isCyrillicAtom(conn: *const XConn, atom: u32) bool {
-    return atom != 0 and (atom == conn.mime_text_cyrillic or atom == conn.mime_text_cyrillic_alt);
+    return atom != 0 and (atom == conn.mime_text_cyrillic or atom == conn.mime_text_cyrillic_alt or atom == conn.mime_text_cyrillic_alias);
 }
 
 fn isGreekAtom(conn: *const XConn, atom: u32) bool {
-    return atom != 0 and (atom == conn.mime_text_greek or atom == conn.mime_text_greek_alt);
+    return atom != 0 and (atom == conn.mime_text_greek or atom == conn.mime_text_greek_alt or atom == conn.mime_text_greek_alias);
 }
 
 fn isLatin3Atom(conn: *const XConn, atom: u32) bool {
@@ -4355,6 +4373,12 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .koi8r = 165,
         .mime_text_utf16 = 166,
         .mime_text_utf16_alt = 167,
+        .mime_text_latin1_alias = 168,
+        .mime_text_latin9_alias = 169,
+        .mime_text_latin2_alias = 170,
+        .mime_text_latin5_alias = 171,
+        .mime_text_cyrillic_alias = 172,
+        .mime_text_greek_alias = 173,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -4472,6 +4496,18 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 167));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 166));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 167));
+    try std.testing.expect(isLatin1Atom(&conn, 168));
+    try std.testing.expect(isLatin9Atom(&conn, 169));
+    try std.testing.expect(isLatin2Atom(&conn, 170));
+    try std.testing.expect(isLatin5Atom(&conn, 171));
+    try std.testing.expect(isCyrillicAtom(&conn, 172));
+    try std.testing.expect(isGreekAtom(&conn, 173));
+    try std.testing.expect(isClipboardTextTarget(&conn, 168));
+    try std.testing.expect(isClipboardTextTarget(&conn, 171));
+    try std.testing.expect(isClipboardTextTarget(&conn, 173));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 168));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 170));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 172));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));

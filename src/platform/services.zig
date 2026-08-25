@@ -580,20 +580,36 @@ pub fn isMarkdownMime(mime: []const u8) bool {
     return mimeTypeEquals(mime, "text/markdown") or mimeTypeEquals(mime, "text/x-markdown");
 }
 
+/// Interned receive-only MIME for a recognized 8-bit `text/plain;charset=...`.
+/// Never returns the incoming slice.
+pub fn knownLatinPlainMime(mime: []const u8) ?[]const u8 {
+    if (isKoi8rCharset(mime)) return "KOI8-R";
+    const charset = mimeCharset(mime) orelse return null;
+    if (isIso88591Charset(charset)) return "text/plain;charset=ISO-8859-1";
+    if (isIso885915Charset(charset)) return "text/plain;charset=ISO-8859-15";
+    if (isIso88592Charset(charset)) return "text/plain;charset=ISO-8859-2";
+    if (isIso88599Charset(charset)) return "text/plain;charset=ISO-8859-9";
+    if (isIso88595Charset(charset)) return "text/plain;charset=ISO-8859-5";
+    if (isIso88597Charset(charset)) return "text/plain;charset=ISO-8859-7";
+    if (isIso88593Charset(charset)) return "text/plain;charset=ISO-8859-3";
+    if (isIso88594Charset(charset)) return "text/plain;charset=ISO-8859-4";
+    if (isIso88596Charset(charset)) return "text/plain;charset=ISO-8859-6";
+    if (isIso88598Charset(charset)) return "text/plain;charset=ISO-8859-8";
+    if (isIso885913Charset(charset)) return "text/plain;charset=ISO-8859-13";
+    if (isWindows1252Charset(charset)) return "text/plain;charset=windows-1252";
+    if (isWindows1251Charset(charset)) return "text/plain;charset=windows-1251";
+    if (isWindows1250Charset(charset)) return "text/plain;charset=windows-1250";
+    if (isWindows1253Charset(charset)) return "text/plain;charset=windows-1253";
+    if (isWindows1254Charset(charset)) return "text/plain;charset=windows-1254";
+    if (isWindows1255Charset(charset)) return "text/plain;charset=windows-1255";
+    if (isWindows1256Charset(charset)) return "text/plain;charset=windows-1256";
+    if (isWindows1257Charset(charset)) return "text/plain;charset=windows-1257";
+    if (isKoi8rCharset(charset)) return "KOI8-R";
+    return null;
+}
+
 pub fn isLatinPlainMime(mime: []const u8) bool {
-    if (isKoi8rCharset(mime)) return true;
-    const charset = mimeCharset(mime) orelse return false;
-    return isIso88591Charset(charset) or isIso885915Charset(charset) or
-        isIso88592Charset(charset) or isIso88599Charset(charset) or
-        isIso88595Charset(charset) or isIso88597Charset(charset) or
-        isIso88593Charset(charset) or isIso88594Charset(charset) or
-        isIso88596Charset(charset) or isIso88598Charset(charset) or
-        isIso885913Charset(charset) or
-        isWindows1252Charset(charset) or isWindows1251Charset(charset) or
-        isWindows1250Charset(charset) or isWindows1253Charset(charset) or
-        isWindows1254Charset(charset) or isWindows1255Charset(charset) or
-        isWindows1256Charset(charset) or isWindows1257Charset(charset) or
-        isKoi8rCharset(charset);
+    return knownLatinPlainMime(mime) != null;
 }
 
 pub fn decodePlainMime(gpa: std.mem.Allocator, mime: []const u8, bytes: []const u8) ![]u8 {
@@ -2331,6 +2347,13 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     try std.testing.expect(isMarkdownMime("text/markdown"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=iso-8859-15"));
     try std.testing.expect(!isLatinPlainMime("text/plain;charset=utf-8"));
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-1", knownLatinPlainMime("text/plain;charset=latin1").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-15", knownLatinPlainMime("text/plain;charset=latin-9").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-2", knownLatinPlainMime("text/plain;charset=latin-2").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-9", knownLatinPlainMime("text/plain;charset=latin5").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-5", knownLatinPlainMime("text/plain;charset=cyrillic").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-7", knownLatinPlainMime("text/plain;charset=greek").?);
+    try std.testing.expect(knownLatinPlainMime("text/plain;charset=utf-8") == null);
     const euro = try decodePlainByCharset(gpa, "\xa4", "ISO-8859-15");
     defer gpa.free(euro);
     try std.testing.expectEqualStrings("€", euro);

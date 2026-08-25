@@ -42,7 +42,7 @@
 //! tracks the seat; a held button emits `.up` before the `(-1,-1)` clear.
 //! NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
 //! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
-//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R `text/plain` charset MIME,
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/13/15 (plus `latin1`/`latin9`/`latin5`/`latin2`/`cyrillic`/`greek` aliases), Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R `text/plain` charset MIME,
 //! Markdown, and extra KDE5/Mozilla-priv/KDE suggested-filename file MIME are accepted.
 //! `present()` skips
 //! commits while the toplevel is suspended; leaving suspended or gaining
@@ -247,18 +247,25 @@ const latin_mime_types = [_][]const u8{
     "text/plain;charset=ISO-8859-1",
     "text/plain;charset=iso-8859-1",
     "text/plain;charset=latin1",
+    "text/plain;charset=latin-1",
     "text/plain;charset=ISO-8859-15",
     "text/plain;charset=iso-8859-15",
     "text/plain;charset=latin9",
+    "text/plain;charset=latin-9",
     "text/plain;charset=ISO-8859-2",
     "text/plain;charset=iso-8859-2",
+    "text/plain;charset=latin2",
+    "text/plain;charset=latin-2",
     "text/plain;charset=ISO-8859-9",
     "text/plain;charset=iso-8859-9",
     "text/plain;charset=latin5",
+    "text/plain;charset=latin-5",
     "text/plain;charset=ISO-8859-5",
     "text/plain;charset=iso-8859-5",
+    "text/plain;charset=cyrillic",
     "text/plain;charset=ISO-8859-7",
     "text/plain;charset=iso-8859-7",
+    "text/plain;charset=greek",
     "text/plain;charset=ISO-8859-3",
     "text/plain;charset=iso-8859-3",
     "text/plain;charset=ISO-8859-4",
@@ -2975,7 +2982,7 @@ fn knownTextMime(mime: []const u8) ?[]const u8 {
     if (services.isRtfMime(mime)) return "text/rtf";
     if (services.isDesktopFileMime(mime)) return "x-special/gnome-copied-files";
     if (services.isCompoundTextMime(mime)) return "COMPOUND_TEXT";
-    if (services.isLatinPlainMime(mime)) return "text/plain;charset=ISO-8859-1";
+    if (services.knownLatinPlainMime(mime)) |known| return known;
     if (services.isMarkdownMime(mime)) return "text/markdown";
     return null;
 }
@@ -3814,6 +3821,13 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("application/rtf"));
     try std.testing.expect(isPlainTextMime("COMPOUND_TEXT"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-1"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=latin1"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=latin-2"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=cyrillic"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=greek"));
+    try std.testing.expectEqualStrings("text/plain;charset=latin-2", knownTextMime("text/plain;charset=latin-2").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-2", knownTextMime("text/plain;charset=iso8859-2").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-15", knownTextMime("text/plain;charset=latin-9").?);
     try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-15"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-9"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-5"));
