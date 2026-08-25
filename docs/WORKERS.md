@@ -101,7 +101,7 @@ hash.
   uses the drop timestamp. Middle-click pastes PRIMARY as typed keys.
   Receive-only `text/html` strips tags to plain text. Clipboard text normalizes
   CR/LF to LF. Central European Latin-2, Latin-9, Greek, Hebrew, Arabic,
-  Armenian, Georgian,
+  Armenian, Georgian, Thai,
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
   requests. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`

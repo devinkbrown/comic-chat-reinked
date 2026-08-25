@@ -20,7 +20,8 @@
 //!     core cursor and physical WM size hints reinstalled), ICCCM
 //!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
 //!     including `text/plain;charset=utf8`, `text/uri-list`, and
-//!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, receive-only
+//!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, Armenian/Georgian
+//!     keysyms, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys, TARGETS-first XDND,
 //!     clipboard-manager handoff, UTF-8 BOM
@@ -280,6 +281,7 @@ pub fn keysymToKey(sym: u32) Key {
     if (xkb.charForX11Latin9(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Armenian(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Georgian(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Thai(sym)) |ch| return .{ .char = ch };
     return switch (sym) {
         0xff08 => .backspace,
         0xff09 => .tab,
@@ -3144,6 +3146,8 @@ test "Keymap.translate uses group bits 13-14 without reading the next key" {
     try std.testing.expectEqual(Key{ .char = 0x0178 }, keysymToKey(0x13be));
     try std.testing.expectEqual(Key{ .char = 0x0561 }, keysymToKey(0x14b3));
     try std.testing.expectEqual(Key{ .char = 0x10d0 }, keysymToKey(0x15d0));
+    try std.testing.expectEqual(Key{ .char = 0x0e01 }, keysymToKey(0x0da1));
+    try std.testing.expectEqual(Key{ .char = 0x0e59 }, keysymToKey(0x0df9));
 
     var pair = [_]u32{ 'a', 'A', 'b', 'B' };
     const km2 = Keymap{ .syms = &pair, .per = 2, .min = 8 };

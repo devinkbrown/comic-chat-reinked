@@ -14,7 +14,7 @@
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
 //! group-2 character of a non-US or dual-layout keymap actually correct.
 //! Named Central European letters, X11 Latin-2 keysyms (`0x01a0`–`0x01ff`),
-//! Latin-9 OE/Ydiaeresis, Greek, Hebrew, Arabic, Armenian, and Georgian
+//! Latin-9 OE/Ydiaeresis, Greek, Hebrew, Arabic, Armenian, Georgian, and Thai
 //! letters resolve to
 //! characters without an IME. A
 //! bounded dead-key / Multi_key composer plus optional XCompose locale
@@ -968,6 +968,92 @@ const named_georgian_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Georgian_fi", 0x10f6 },
 });
 
+const named_thai_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "Thai_kokai", 0x0e01 },
+    .{ "Thai_khokhai", 0x0e02 },
+    .{ "Thai_khokhuat", 0x0e03 },
+    .{ "Thai_khokhwai", 0x0e04 },
+    .{ "Thai_khokhon", 0x0e05 },
+    .{ "Thai_khorakhang", 0x0e06 },
+    .{ "Thai_ngongu", 0x0e07 },
+    .{ "Thai_chochan", 0x0e08 },
+    .{ "Thai_choching", 0x0e09 },
+    .{ "Thai_chochang", 0x0e0a },
+    .{ "Thai_soso", 0x0e0b },
+    .{ "Thai_chochoe", 0x0e0c },
+    .{ "Thai_yoying", 0x0e0d },
+    .{ "Thai_dochada", 0x0e0e },
+    .{ "Thai_topatak", 0x0e0f },
+    .{ "Thai_thothan", 0x0e10 },
+    .{ "Thai_thonangmontho", 0x0e11 },
+    .{ "Thai_thophuthao", 0x0e12 },
+    .{ "Thai_nonen", 0x0e13 },
+    .{ "Thai_dodek", 0x0e14 },
+    .{ "Thai_totao", 0x0e15 },
+    .{ "Thai_thothung", 0x0e16 },
+    .{ "Thai_thothahan", 0x0e17 },
+    .{ "Thai_thothong", 0x0e18 },
+    .{ "Thai_nonu", 0x0e19 },
+    .{ "Thai_bobaimai", 0x0e1a },
+    .{ "Thai_popla", 0x0e1b },
+    .{ "Thai_phophung", 0x0e1c },
+    .{ "Thai_fofa", 0x0e1d },
+    .{ "Thai_phophan", 0x0e1e },
+    .{ "Thai_fofan", 0x0e1f },
+    .{ "Thai_phosamphao", 0x0e20 },
+    .{ "Thai_moma", 0x0e21 },
+    .{ "Thai_yoyak", 0x0e22 },
+    .{ "Thai_rorua", 0x0e23 },
+    .{ "Thai_ru", 0x0e24 },
+    .{ "Thai_loling", 0x0e25 },
+    .{ "Thai_lu", 0x0e26 },
+    .{ "Thai_wowaen", 0x0e27 },
+    .{ "Thai_sosala", 0x0e28 },
+    .{ "Thai_sorusi", 0x0e29 },
+    .{ "Thai_sosua", 0x0e2a },
+    .{ "Thai_hohip", 0x0e2b },
+    .{ "Thai_lochula", 0x0e2c },
+    .{ "Thai_oang", 0x0e2d },
+    .{ "Thai_honokhuk", 0x0e2e },
+    .{ "Thai_paiyannoi", 0x0e2f },
+    .{ "Thai_saraa", 0x0e30 },
+    .{ "Thai_maihanakat", 0x0e31 },
+    .{ "Thai_saraaa", 0x0e32 },
+    .{ "Thai_saraam", 0x0e33 },
+    .{ "Thai_sarai", 0x0e34 },
+    .{ "Thai_saraii", 0x0e35 },
+    .{ "Thai_saraue", 0x0e36 },
+    .{ "Thai_sarauee", 0x0e37 },
+    .{ "Thai_sarau", 0x0e38 },
+    .{ "Thai_sarauu", 0x0e39 },
+    .{ "Thai_phinthu", 0x0e3a },
+    .{ "Thai_baht", 0x0e3f },
+    .{ "Thai_sarae", 0x0e40 },
+    .{ "Thai_saraae", 0x0e41 },
+    .{ "Thai_sarao", 0x0e42 },
+    .{ "Thai_saraaimaimuan", 0x0e43 },
+    .{ "Thai_saraaimaimalai", 0x0e44 },
+    .{ "Thai_lakkhangyao", 0x0e45 },
+    .{ "Thai_maiyamok", 0x0e46 },
+    .{ "Thai_maitaikhu", 0x0e47 },
+    .{ "Thai_maiek", 0x0e48 },
+    .{ "Thai_maitho", 0x0e49 },
+    .{ "Thai_maitri", 0x0e4a },
+    .{ "Thai_maichattawa", 0x0e4b },
+    .{ "Thai_thanthakhat", 0x0e4c },
+    .{ "Thai_nikhahit", 0x0e4d },
+    .{ "Thai_leksun", 0x0e50 },
+    .{ "Thai_leknung", 0x0e51 },
+    .{ "Thai_leksong", 0x0e52 },
+    .{ "Thai_leksam", 0x0e53 },
+    .{ "Thai_leksi", 0x0e54 },
+    .{ "Thai_lekha", 0x0e55 },
+    .{ "Thai_lekhok", 0x0e56 },
+    .{ "Thai_lekchet", 0x0e57 },
+    .{ "Thai_lekpaet", 0x0e58 },
+    .{ "Thai_lekkao", 0x0e59 },
+});
+
 /// ISO-8859-2 codepoints for X11 Latin-2 keysyms `0x01a0`–`0x01ff`.
 const latin2_01a0 = [_]u21{
     0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
@@ -999,6 +1085,7 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     if (named_arabic_keysyms.get(name)) |character| return character;
     if (named_armenian_keysyms.get(name)) |character| return character;
     if (named_georgian_keysyms.get(name)) |character| return character;
+    if (named_thai_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
         if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return null;
@@ -1077,6 +1164,15 @@ pub fn charForX11Armenian(sym: u32) ?u21 {
 pub fn charForX11Georgian(sym: u32) ?u21 {
     if (sym < 0x15d0 or sym > 0x15f6) return null;
     return @intCast(0x10d0 + (sym - 0x15d0));
+}
+
+/// Legacy X11 Thai keysyms. `0x0da1`–`0x0df9` sit 0x60 below U+0E01–U+0E59,
+/// skipping the unused U+0E3B–U+0E3E hole.
+pub fn charForX11Thai(sym: u32) ?u21 {
+    if (sym < 0x0da1 or sym > 0x0df9) return null;
+    const ch: u21 = @intCast(sym + 0x60);
+    if (ch >= 0x0e3b and ch <= 0x0e3e) return null;
+    return ch;
 }
 
 /// ISO-8859-15 leftovers used by Western European layouts (OE, Ydiaeresis).
@@ -1696,6 +1792,13 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(@as(u21, 0x10f6), charForKeysym("Georgian_fi").?);
     try std.testing.expectEqual(@as(u21, 0x10d0), charForX11Georgian(0x15d0).?);
     try std.testing.expectEqual(@as(u21, 0x10f6), charForX11Georgian(0x15f6).?);
+    try std.testing.expectEqual(@as(u21, 0x0e01), charForKeysym("Thai_kokai").?);
+    try std.testing.expectEqual(@as(u21, 0x0e3f), charForKeysym("Thai_baht").?);
+    try std.testing.expectEqual(@as(u21, 0x0e59), charForKeysym("Thai_lekkao").?);
+    try std.testing.expectEqual(@as(u21, 0x0e01), charForX11Thai(0x0da1).?);
+    try std.testing.expectEqual(@as(u21, 0x0e3f), charForX11Thai(0x0ddf).?);
+    try std.testing.expectEqual(@as(u21, 0x0e59), charForX11Thai(0x0df9).?);
+    try std.testing.expect(charForX11Thai(0x0ddb) == null);
     try std.testing.expectEqual(NamedKey.backspace, namedKeyForKeysym("BackSpace").?);
     try std.testing.expectEqual(NamedKey.page_up, namedKeyForKeysym("Prior").?);
     try std.testing.expectEqual(@as(?NamedKey, null), namedKeyForKeysym("nonexistent_keysym_name"));
