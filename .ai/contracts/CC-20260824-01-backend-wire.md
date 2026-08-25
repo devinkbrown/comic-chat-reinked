@@ -122,6 +122,13 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Retarget last-key and last-invite hints when 470 forwards a room
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 20 leftovers in scope
+
+- Do not PART the last remaining room from the toolbar or `/part` (keeps `want_rejoin` for 001)
+- Invite-only `473` fills `last_invite_channel` for the invitation dialog
+- ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 19 leftovers in scope
 
 - Notification Join room, `/join`, and automation Join room reuse the stored key and set `want_rejoin`

@@ -2230,9 +2230,10 @@ fn handleWindowEvent(
                     if (index == 1) break :toolbar false;
                     if (index == 3) {
                         if (workspace.active) |active_index| {
-                            const active_room = &workspace.rooms.items[active_index];
-                            if (client) |connected_client| try connected_client.part(active_room.name);
-                            if (workspace.rooms.items.len > 1) _ = workspace.remove(active_index);
+                            if (canLeaveActiveRoom(workspace.rooms.items.len)) {
+                                if (client) |connected_client| try connected_client.part(workspace.rooms.items[active_index].name);
+                                _ = workspace.remove(active_index);
+                            }
                         }
                     }
                     if (index >= 19 and index <= 22) {
@@ -3832,7 +3833,7 @@ fn handleWorkspaceInputKey(
         }
         if (std.mem.eql(u8, text, "/part")) {
             if (workspace.active) |index| {
-                if (workspace.rooms.items.len > 1) {
+                if (canLeaveActiveRoom(workspace.rooms.items.len)) {
                     if (maybe_client) |client| try client.part(workspace.rooms.items[index].name);
                     _ = workspace.remove(index);
                 }
@@ -4174,7 +4175,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
         301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
         322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
         710, 711, 712, 713, 714, 715, 717, 718, 732, 733, 734 => true,
-        801...819, 824, 825, 900...908, 913...925 => true,
+        801...819, 824, 825, 900...908 => true,
         else => false,
     };
 }
@@ -4427,7 +4428,17 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "513") or
         std.mem.eql(u8, command, "517") or
         std.mem.eql(u8, command, "525") or
-        std.mem.eql(u8, command, "531");
+        std.mem.eql(u8, command, "531") or
+        std.mem.eql(u8, command, "913") or
+        std.mem.eql(u8, command, "914") or
+        std.mem.eql(u8, command, "915") or
+        std.mem.eql(u8, command, "916") or
+        std.mem.eql(u8, command, "917") or
+        std.mem.eql(u8, command, "918") or
+        std.mem.eql(u8, command, "919") or
+        std.mem.eql(u8, command, "923") or
+        std.mem.eql(u8, command, "924") or
+        std.mem.eql(u8, command, "925");
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
@@ -4584,6 +4595,10 @@ fn applySelfLeftChannel(
     return true;
 }
 
+fn canLeaveActiveRoom(room_count: usize) bool {
+    return room_count > 1;
+}
+
 fn roomNeedsReconnectJoin(room: *const cc.client.workspace.Room, client: *const cc.net.client.Client) bool {
     return room.want_rejoin and !client.restoresChannel(room.name);
 }
@@ -4673,6 +4688,8 @@ fn applyJoinDenied(
     }
     if (std.mem.eql(u8, msg.command, "475") and channel.len != 0)
         try state.replaceOwned(workspace.gpa, &state.last_key_channel, channel);
+    if (std.mem.eql(u8, msg.command, "473") and channel.len != 0)
+        try state.replaceOwned(workspace.gpa, &state.last_invite_channel, channel);
     refreshJoinedState(workspace, state, "join denied");
     return true;
 }
@@ -5910,6 +5927,7 @@ test "self leave and join denial clear membership without a live socket" {
     try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &denied));
     try std.testing.expect(!client.hasRestorationTargets());
     try std.testing.expect(!workspace.rooms.items[locked].want_rejoin);
+    try std.testing.expectEqualStrings("#locked", state.last_invite_channel.?);
     try std.testing.expectEqualStrings("join denied", state.status);
     try std.testing.expectEqualStrings("Cannot join #locked: Cannot join channel (+i)", workspace.rooms.items[locked].transcript.lines.items[0].text);
 
@@ -6169,6 +6187,16 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isJoinDeniedNumeric("520"));
     try std.testing.expect(isCommandFailureNumeric("926"));
     try std.testing.expect(isCommandFailureNumeric("927"));
+    try std.testing.expect(isCommandFailureNumeric("913"));
+    try std.testing.expect(isCommandFailureNumeric("918"));
+    try std.testing.expect(isCommandFailureNumeric("923"));
+    try std.testing.expect(isCommandFailureNumeric("925"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("913"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("923"));
+    try std.testing.expect(isVisibleServerWorkflowReply("804"));
+    try std.testing.expect(isVisibleServerWorkflowReply("818"));
+    try std.testing.expect(!canLeaveActiveRoom(1));
+    try std.testing.expect(canLeaveActiveRoom(2));
     try std.testing.expect(isAuthFailureNumeric("463"));
     try std.testing.expect(isAuthFailureNumeric("464"));
     try std.testing.expect(isVisibleServerWorkflowReply("466"));
