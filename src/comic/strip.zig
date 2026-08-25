@@ -1774,6 +1774,8 @@ test "Anna Color tall balloon keeps her face clear" {
             }
         }
         if (face_peach + high_red < 20) continue;
+        // Dest paints after balloons on Color, so peach stays visible even
+        // when a docked cloud is taller than the dest gap.
         try std.testing.expect(face_peach > 8);
         checked += 1;
     }
