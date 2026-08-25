@@ -8,11 +8,11 @@
 //!
 //! Keyboard: the compositor-provided XKB keymap fd is received (see
 //! `xkb.zig`'s bounded text-format parser) and drives translation for the
-//! configured layout's base, Shift, and AltGr/ISO Level3 symbols — non-US
-//! layouts now produce their real characters, not a hardcoded US table.
-//! Client-side key repeat (Wayland deliberately leaves this to the client,
-//! unlike X11's native auto-repeat) is implemented via `repeat_info` +
-//! `Window.checkRepeat`.
+//! configured layout's base, Shift, AltGr/ISO Level3, and group-2 symbols
+//! — non-US and dual-layout keymaps produce their real characters, not a
+//! hardcoded US table. Client-side key repeat (Wayland deliberately leaves
+//! this to the client, unlike X11's native auto-repeat) is implemented via
+//! `repeat_info` + `Window.checkRepeat`. Keyboard leave resets compose.
 //!
 //! Dead-key and Multi_key sequences are composed client-side from the keymap
 //! names (see `xkb.Compose`), including an optional bounded XCompose locale
@@ -22,15 +22,19 @@
 //! cursor rectangle so IME candidate windows sit on the composer strip.
 //! Fractional buffer scale uses `wp_fractional_scale_v1` +
 //! `wp_viewporter` when advertised, otherwise the entered `wl_output`
-//! integer scale. Clipboard uses `wl_data_device` and
+//! integer scale; the fallback shm cursor is refreshed when that scale
+//! changes. Clipboard uses `wl_data_device` and
 //! `zwp_primary_selection_v1` when present, including
-//! `text/plain;charset=utf8` and `text/uri-list`. Text and `file:` drops
-//! arrive as typed keys (no new Event variant). A `wp_cursor_shape_v1`
-//! default pointer is used when advertised, otherwise a scaled shm arrow.
-//! `xdg_toplevel_icon_v1` is set when advertised. xdg-shell records
-//! maximized/fullscreen configure states and advertises the same min/max
-//! size as the X11 WM hints. High-resolution `axis_value120` wheels snap
-//! to the same logical ticks as discrete axes.
+//! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
+//! UTF-16 BOM decode. Text and `file:` drops arrive as typed keys (no new
+//! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
+//! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
+//! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
+//! when advertised. When a decoration manager is advertised, the client
+//! requests server-side decorations (`zxdg` or `xdg`). xdg-shell records
+//! maximized/fullscreen/tiled/suspended configure states and advertises
+//! the same min/max size as the X11 WM hints. High-resolution
+//! `axis_value120` wheels snap to the same logical ticks as discrete axes.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -115,8 +119,18 @@ const xdg_max_height: u32 = 8192;
 const xdg_state_maximized: u32 = 1;
 const xdg_state_fullscreen: u32 = 2;
 const xdg_state_activated: u32 = 4;
+const xdg_state_tiled_left: u32 = 5;
+const xdg_state_tiled_right: u32 = 6;
+const xdg_state_tiled_top: u32 = 7;
+const xdg_state_tiled_bottom: u32 = 8;
+const xdg_state_suspended: u32 = 9;
 const data_offer_accept: u16 = 0;
 const data_offer_finish: u16 = 3;
+const data_offer_set_actions: u16 = 4;
+const dnd_action_copy: u32 = 1;
+const decoration_get_toplevel: u16 = 1;
+const decoration_set_mode: u16 = 1;
+const decoration_mode_server_side: u32 = 2;
 const text_input_destroy: u16 = 0;
 const text_input_enable: u16 = 1;
 const text_input_disable: u16 = 2;
@@ -159,6 +173,8 @@ const Globals = struct {
     primary_manager: Global = .{},
     cursor_shape_manager: Global = .{},
     toplevel_icon_manager: Global = .{},
+    decoration_manager: Global = .{},
+    decoration_zxdg: bool = true,
 
     fn record(self: *Globals, name: u32, interface: []const u8, version: u32) void {
         const value = Global{ .name = name, .version = version };
@@ -187,6 +203,12 @@ const Globals = struct {
             self.cursor_shape_manager = value;
         } else if (std.mem.eql(u8, interface, "xdg_toplevel_icon_manager_v1") and self.toplevel_icon_manager.name == 0) {
             self.toplevel_icon_manager = value;
+        } else if (std.mem.eql(u8, interface, "zxdg_decoration_manager_v1") and self.decoration_manager.name == 0) {
+            self.decoration_manager = value;
+            self.decoration_zxdg = true;
+        } else if (std.mem.eql(u8, interface, "xdg_decoration_manager_v1") and self.decoration_manager.name == 0) {
+            self.decoration_manager = value;
+            self.decoration_zxdg = false;
         }
     }
 };
@@ -439,6 +461,8 @@ pub const Window = struct {
     dnd_mime: []const u8 = "",
     toplevel_maximized: bool = false,
     toplevel_fullscreen: bool = false,
+    toplevel_tiled: bool = false,
+    toplevel_suspended: bool = false,
     cursor_shape_manager_id: u32 = 0,
     cursor_shape_device_id: u32 = 0,
     cursor_surface_id: u32 = 0,
@@ -448,6 +472,8 @@ pub const Window = struct {
     toplevel_icon_manager_id: u32 = 0,
     toplevel_icon_id: u32 = 0,
     icon_buffer: ?Buffer = null,
+    decoration_manager_id: u32 = 0,
+    decoration_id: u32 = 0,
     last_serial: u32 = 0,
     clipboard_text: []u8 = &.{},
     axis_have_discrete: bool = false,
@@ -478,6 +504,7 @@ pub const Window = struct {
     /// back to evdevToKey's hardcoded US table) and if the compositor sent
     /// an unsupported format or a keymap this bounded parser could not read.
     xkb_keymap: ?xkb.Keymap = null,
+    xkb_group: u32 = 0,
     /// Repeats per second and initial hold delay from the compositor's
     /// repeat_info (wl_keyboard v4+); non-positive rate means repeat is
     /// disabled entirely, matching the Wayland protocol's own convention.
@@ -571,6 +598,18 @@ pub const Window = struct {
             self.toplevel_icon_manager_id = try self.conn.allocId();
             try sendBind(&self.conn, self.gpa, self.registry_id, globals.toplevel_icon_manager, "xdg_toplevel_icon_manager_v1", 1, self.toplevel_icon_manager_id);
         }
+        if (globals.decoration_manager.name != 0) {
+            self.decoration_manager_id = try self.conn.allocId();
+            try sendBind(
+                &self.conn,
+                self.gpa,
+                self.registry_id,
+                globals.decoration_manager,
+                if (globals.decoration_zxdg) "zxdg_decoration_manager_v1" else "xdg_decoration_manager_v1",
+                1,
+                self.decoration_manager_id,
+            );
+        }
         if (globals.text_input_manager.name != 0) {
             self.text_input_manager_id = try self.conn.allocId();
             try sendBind(&self.conn, self.gpa, self.registry_id, globals.text_input_manager, "zwp_text_input_manager_v3", 1, self.text_input_manager_id);
@@ -598,6 +637,11 @@ pub const Window = struct {
         try sendString(&self.conn, self.gpa, self.xdg_toplevel_id, xdg_toplevel_set_app_id, "comicchat");
         try sendTwoU32(&self.conn, self.xdg_toplevel_id, xdg_toplevel_set_min_size, xdg_min_width, xdg_min_height);
         try sendTwoU32(&self.conn, self.xdg_toplevel_id, xdg_toplevel_set_max_size, xdg_max_width, xdg_max_height);
+        if (self.decoration_manager_id != 0) {
+            self.decoration_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.decoration_manager_id, decoration_get_toplevel, self.decoration_id, self.xdg_toplevel_id);
+            try sendOneU32(&self.conn, self.decoration_id, decoration_set_mode, decoration_mode_server_side);
+        }
 
         // xdg-shell forbids attaching a buffer before this initial, empty
         // commit has elicited a configure which the client acknowledges.
@@ -838,7 +882,10 @@ pub const Window = struct {
                     self.output_scales[index] = @intCast(announced);
                     const previous = self.output_scale;
                     self.output_scale = self.currentOutputScale();
-                    if (self.configured and previous != self.output_scale) return Event.expose;
+                    if (self.configured and previous != self.output_scale) {
+                        self.refreshFallbackCursor();
+                        return Event.expose;
+                    }
                 }
             }
             return null;
@@ -903,6 +950,11 @@ pub const Window = struct {
                     const states = msg.body[12 .. 12 + array_len];
                     self.toplevel_maximized = configureContainsState(states, xdg_state_maximized);
                     self.toplevel_fullscreen = configureContainsState(states, xdg_state_fullscreen);
+                    self.toplevel_tiled = configureContainsState(states, xdg_state_tiled_left) or
+                        configureContainsState(states, xdg_state_tiled_right) or
+                        configureContainsState(states, xdg_state_tiled_top) or
+                        configureContainsState(states, xdg_state_tiled_bottom);
+                    self.toplevel_suspended = configureContainsState(states, xdg_state_suspended);
                     if (configureContainsState(states, xdg_state_activated)) {
                         self.refreshTextInput() catch {};
                     }
@@ -1295,8 +1347,11 @@ pub const Window = struct {
                 if (body.len != 20) return error.InvalidWaylandMessage;
                 // Modifier bit positions are defined by the compositor's XKB
                 // keymap. This dependency-free backend intentionally ignores
-                // that keymap, so retain the physical evdev key state above
-                // instead of guessing Shift/Caps bit indices.
+                // those bits, so retain the physical evdev key state above
+                // instead of guessing Shift/Caps indices. The group index is
+                // the layout slot and is used when the keymap published two
+                // keysym lists.
+                self.xkb_group = get32(body[16..20]);
                 return null;
             },
             5 => { // repeat_info(rate, delay), available because the seat is bound at v4+
@@ -1336,16 +1391,16 @@ pub const Window = struct {
     /// simply the base character's uppercase form).
     fn translateKey(self: *Window, code: u32, shift: bool) Key {
         if (self.xkb_keymap) |*keymap| {
-            if (self.alt_right) {
+            if (self.xkb_group == 0 and self.alt_right) {
                 if (keymap.keysymForLevel(code, .level3)) |keysym| {
                     if (xkb.charForKeysym(keysym)) |ch| return .{ .char = ch };
                     if (xkb.namedKeyForKeysym(keysym)) |named| return namedKeyToKey(named);
                 }
             }
-            if (keymap.keysymFor(code, false)) |base_keysym| {
+            if (keymap.keysymForGroupLevel(code, self.xkb_group, .base)) |base_keysym| {
                 const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
                 const effective_shift = if (is_letter) (shift != self.caps_lock) else shift;
-                if (keymap.keysymFor(code, effective_shift)) |keysym| {
+                if (keymap.keysymForGroupLevel(code, self.xkb_group, if (effective_shift) .shift else .base)) |keysym| {
                     if (xkb.charForKeysym(keysym)) |ch| return .{ .char = ch };
                     if (xkb.namedKeyForKeysym(keysym)) |named| return namedKeyToKey(named);
                 }
@@ -1356,13 +1411,13 @@ pub const Window = struct {
 
     fn currentKeysymName(self: *const Window, code: u32, shift: bool) ?[]const u8 {
         const keymap = self.xkb_keymap orelse return null;
-        if (self.alt_right) {
+        if (self.xkb_group == 0 and self.alt_right) {
             if (keymap.keysymForLevel(code, .level3)) |name| return name;
         }
-        if (keymap.keysymFor(code, false)) |base_keysym| {
+        if (keymap.keysymForGroupLevel(code, self.xkb_group, .base)) |base_keysym| {
             const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
             const effective_shift = if (is_letter) (shift != self.caps_lock) else shift;
-            return keymap.keysymFor(code, effective_shift);
+            return keymap.keysymForGroupLevel(code, self.xkb_group, if (effective_shift) .shift else .base);
         }
         return null;
     }
@@ -1443,7 +1498,10 @@ pub const Window = struct {
         }
         const previous = self.output_scale;
         self.output_scale = self.currentOutputScale();
-        if (self.configured and previous != self.output_scale) return Event.expose;
+        if (self.configured and previous != self.output_scale) {
+            self.refreshFallbackCursor();
+            return Event.expose;
+        }
         return null;
     }
 
@@ -1509,13 +1567,13 @@ pub const Window = struct {
                             return owned;
                         }
                     }
-                    return text;
+                    return decodeClipboardBytes(gpa, text);
                 }
                 if (last_empty) |prev| gpa.free(prev);
                 last_empty = text;
             } else |_| {}
         }
-        if (last_empty) |text| return text;
+        if (last_empty) |text| return decodeClipboardBytes(gpa, text);
         return error.MissingDataOffer;
     }
 
@@ -1602,6 +1660,7 @@ pub const Window = struct {
     fn acceptDrop(self: *Window, offer_id: u32, serial: u32) !void {
         const mime = if (self.dnd_mime.len != 0) self.dnd_mime else "text/plain;charset=utf-8";
         try sendAccept(&self.conn, self.gpa, offer_id, data_offer_accept, serial, mime);
+        sendTwoU32(&self.conn, offer_id, data_offer_set_actions, dnd_action_copy, dnd_action_copy) catch {};
     }
 
     fn takeDrop(self: *Window) ?Event {
@@ -1743,6 +1802,16 @@ pub const Window = struct {
         return null;
     }
 
+    fn refreshFallbackCursor(self: *Window) void {
+        if (self.cursor_shape_device_id != 0) return;
+        if (self.cursor_buffer) |*buffer| {
+            sendEmpty(&self.conn, buffer.id, buffer_destroy) catch {};
+            buffer.deinit();
+            self.cursor_buffer = null;
+        }
+        self.applyPointerCursor();
+    }
+
     fn applyPointerCursor(self: *Window) void {
         if (self.pointer_id == 0 or self.last_serial == 0) return;
         if (self.cursor_shape_device_id != 0) {
@@ -1873,6 +1942,8 @@ pub const Window = struct {
         if (self.toplevel_icon_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_id, 0);
         if (self.icon_buffer) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
         if (self.toplevel_icon_manager_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_manager_id, 0);
+        if (self.decoration_id != 0) try sendEmpty(&self.conn, self.decoration_id, 0);
+        if (self.decoration_manager_id != 0) try sendEmpty(&self.conn, self.decoration_manager_id, 0);
         if (self.xdg_toplevel_id != 0) try sendEmpty(&self.conn, self.xdg_toplevel_id, xdg_toplevel_destroy);
         if (self.xdg_surface_id != 0) try sendEmpty(&self.conn, self.xdg_surface_id, xdg_surface_destroy);
         if (self.surface_id != 0) try sendEmpty(&self.conn, self.surface_id, surface_destroy);
@@ -2045,6 +2116,12 @@ fn sendFourI32(conn: *Connection, object: u32, opcode: u16, a: i32, b: i32, c: i
     putI32(req[16..20], c);
     putI32(req[20..24], d);
     try conn.writeAll(&req);
+}
+
+fn decodeClipboardBytes(gpa: std.mem.Allocator, text: []u8) ![]u8 {
+    const decoded = services.clipboardBytesToUtf8(gpa, text) catch return text;
+    gpa.free(text);
+    return decoded;
 }
 
 fn sendSetCursor(conn: *Connection, pointer: u32, serial: u32, surface: u32, hotspot_x: i32, hotspot_y: i32) !void {
@@ -2832,11 +2909,14 @@ test "registry records fractional scale, viewporter, and primary selection" {
     globals.record(5, "zwp_primary_selection_device_manager_v1", 1);
     globals.record(6, "wp_cursor_shape_manager_v1", 1);
     globals.record(7, "xdg_toplevel_icon_manager_v1", 1);
+    globals.record(8, "zxdg_decoration_manager_v1", 1);
     try std.testing.expectEqual(@as(u32, 3), globals.viewporter.name);
     try std.testing.expectEqual(@as(u32, 4), globals.fractional_manager.name);
     try std.testing.expectEqual(@as(u32, 5), globals.primary_manager.name);
     try std.testing.expectEqual(@as(u32, 6), globals.cursor_shape_manager.name);
     try std.testing.expectEqual(@as(u32, 7), globals.toplevel_icon_manager.name);
+    try std.testing.expectEqual(@as(u32, 8), globals.decoration_manager.name);
+    try std.testing.expect(globals.decoration_zxdg);
 }
 
 test "plain-text MIME set covers UTF-8 and ICCCM names" {
@@ -2878,5 +2958,11 @@ test "xdg toplevel configure states include activated" {
     put32(fullscreen[0..4], xdg_state_fullscreen);
     try std.testing.expect(configureContainsState(&fullscreen, xdg_state_fullscreen));
     try std.testing.expect(!configureContainsState(&fullscreen, xdg_state_maximized));
+    var tiled: [4]u8 = undefined;
+    put32(tiled[0..4], xdg_state_tiled_left);
+    try std.testing.expect(configureContainsState(&tiled, xdg_state_tiled_left));
+    var suspended: [4]u8 = undefined;
+    put32(suspended[0..4], xdg_state_suspended);
+    try std.testing.expect(configureContainsState(&suspended, xdg_state_suspended));
 }
 const pointer_release: u16 = 1;

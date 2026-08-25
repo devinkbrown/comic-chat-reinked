@@ -153,8 +153,65 @@ fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
             return null;
         }
     }
+    if (std.mem.indexOfScalar(u8, rest, '?')) |q| rest = rest[0..q];
+    if (std.mem.indexOfScalar(u8, rest, '#')) |h| rest = rest[0..h];
     if (rest.len == 0) return null;
     return percentDecode(rest, buf);
+}
+
+/// Clipboard bytes to UTF-8: strip a UTF-8 BOM or decode UTF-16 with BOM.
+pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, bytes, "\xEF\xBB\xBF")) {
+        return gpa.dupe(u8, bytes[3..]);
+    }
+    if (bytes.len >= 2 and bytes.len % 2 == 0) {
+        if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) {
+            return utf16ToUtf8(gpa, bytes[2..], .little);
+        }
+        if (std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
+            return utf16ToUtf8(gpa, bytes[2..], .big);
+        }
+    }
+    return gpa.dupe(u8, bytes);
+}
+
+/// Decode `UTF16_STRING` / UTF-16 clipboard bytes. Honors a BOM when present,
+/// otherwise assumes little-endian (the usual X11/Windows convention).
+pub fn clipboardUtf16BytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (bytes.len >= 2) {
+        if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) {
+            return utf16ToUtf8(gpa, bytes[2..], .little);
+        }
+        if (std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
+            return utf16ToUtf8(gpa, bytes[2..], .big);
+        }
+    }
+    return utf16ToUtf8(gpa, bytes, .little);
+}
+
+fn utf16ToUtf8(gpa: std.mem.Allocator, bytes: []const u8, endian: std.builtin.Endian) ![]u8 {
+    if (bytes.len % 2 != 0) return error.TruncatedUtf16;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i + 1 < bytes.len) {
+        const unit = std.mem.readInt(u16, bytes[i..][0..2], endian);
+        i += 2;
+        var codepoint: u21 = unit;
+        if (unit >= 0xD800 and unit <= 0xDBFF) {
+            if (i + 1 >= bytes.len) return error.TruncatedUtf16;
+            const low = std.mem.readInt(u16, bytes[i..][0..2], endian);
+            i += 2;
+            if (low < 0xDC00 or low > 0xDFFF) return error.InvalidUtf16;
+            codepoint = 0x10000 + (((@as(u21, unit) - 0xD800) << 10) | (low - 0xDC00));
+        } else if (unit >= 0xDC00 and unit <= 0xDFFF) {
+            return error.InvalidUtf16;
+        }
+        var buf: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(codepoint, &buf) catch return error.InvalidUtf16;
+        try out.appendSlice(gpa, buf[0..n]);
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 fn percentDecode(src: []const u8, buf: []u8) ?[]const u8 {
@@ -645,6 +702,7 @@ test "uri-list drop prefers a local file path and skips comments" {
     try std.testing.expectEqualStrings("/tmp/chat room.ccc", path);
     try std.testing.expectEqualStrings("/tmp/a.ccc", firstPathFromUriList("file://localhost/tmp/a.ccc\n", &buf).?);
     try std.testing.expectEqualStrings("/tmp/b.ccc", firstPathFromUriList("file:/tmp/b.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/c.ccc", firstPathFromUriList("file:///tmp/c.ccc?download=1#top\n", &buf).?);
     try std.testing.expect(firstPathFromUriList("file://remote.example/tmp/a.ccc\n", &buf) == null);
     try std.testing.expect(firstPathFromUriList("https://example.test/a\n", &buf) == null);
     try std.testing.expectEqualStrings("hello", firstDropText("hello\n", &buf).?);
@@ -683,4 +741,20 @@ test "window mark and arrow cursor produce opaque pixels" {
     var bits: [64]u8 = undefined;
     encodeBitmapPlane(&bits, &arrow, 16, 16, false);
     try std.testing.expect(bits[0] & 1 != 0);
+}
+
+test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
+    const gpa = std.testing.allocator;
+    const stripped = try clipboardBytesToUtf8(gpa, "\xEF\xBB\xBFhello");
+    defer gpa.free(stripped);
+    try std.testing.expectEqualStrings("hello", stripped);
+    const le = try clipboardBytesToUtf8(gpa, "\xFF\xFE" ++ "h\x00i\x00");
+    defer gpa.free(le);
+    try std.testing.expectEqualStrings("hi", le);
+    const be = try clipboardBytesToUtf8(gpa, "\xFE\xFF" ++ "\x00h\x00i");
+    defer gpa.free(be);
+    try std.testing.expectEqualStrings("hi", be);
+    const raw_le = try clipboardUtf16BytesToUtf8(gpa, "h\x00i\x00");
+    defer gpa.free(raw_le);
+    try std.testing.expectEqualStrings("hi", raw_le);
 }

@@ -10,9 +10,11 @@
 //! separate undertaking — this parser covers `xkb_keycodes` (physical key
 //! name <-> numeric code) and `xkb_symbols` (key name -> the keysym list for
 //! levels 1–3: unshifted, Shift, and AltGr/ISO Level3 when the keymap lists
-//! a third keysym). That is what makes the base, shifted, and AltGr
-//! character of a non-US layout actually correct. A bounded dead-key /
-//! Multi_key composer plus optional XCompose locale tables (`~/.XCompose`,
+//! a third keysym, plus a second group when the keymap publishes two
+//! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
+//! group-2 character of a non-US or dual-layout keymap actually correct. A
+//! bounded dead-key / Multi_key composer plus optional XCompose locale
+//! tables (`~/.XCompose`,
 //! `XCOMPOSEFILE`, `%L`) cover European accents (see `Compose`). A
 //! level-4+ keysym, if present, is ignored. IME input method integration
 //! is a separate protocol (text-input-unstable-v3) and out of scope for this
@@ -48,6 +50,8 @@ const Levels = struct {
     base: []const u8,
     shifted: []const u8,
     level3: ?[]const u8 = null,
+    group2_base: ?[]const u8 = null,
+    group2_shifted: ?[]const u8 = null,
 };
 
 /// Which of the three bounded XKB levels to read.
@@ -90,8 +94,26 @@ pub const Keymap = struct {
     /// Level3. Level3 returns null when the keymap listed fewer than three
     /// symbols for that key so the caller can fall back to Shift/base.
     pub fn keysymForLevel(self: *const Keymap, evdev_code: u32, level: Level) ?[]const u8 {
+        return self.keysymForGroupLevel(evdev_code, 0, level);
+    }
+
+    /// Group 0 is the first keysym list; group 1 is the second list when the
+    /// keymap published two groups (`[ a, A ], [ Cyrillic_ef, ... ]`).
+    pub fn keysymForGroupLevel(self: *const Keymap, evdev_code: u32, group: u32, level: Level) ?[]const u8 {
         const name = self.code_to_name.get(xkbKeycodeFromEvdev(evdev_code)) orelse return null;
         const levels = self.name_to_levels.get(name) orelse return null;
+        if (group != 0) {
+            const base = levels.group2_base orelse return switch (level) {
+                .base => levels.base,
+                .shift => levels.shifted,
+                .level3 => levels.level3,
+            };
+            return switch (level) {
+                .base => base,
+                .shift => levels.group2_shifted orelse base,
+                .level3 => null,
+            };
+        }
         return switch (level) {
             .base => levels.base,
             .shift => levels.shifted,
@@ -278,11 +300,28 @@ fn parseSymbols(
                     break; // level 4+ ignored, see module doc.
                 }
             }
+            var group2_base: ?[]const u8 = null;
+            var group2_shifted: ?[]const u8 = null;
+            if (try secondKeysymList(key_body)) |group2| {
+                var group_it = std.mem.splitScalar(u8, group2, ',');
+                while (group_it.next()) |raw| {
+                    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+                    if (trimmed.len == 0) continue;
+                    if (group2_base == null) {
+                        group2_base = trimmed;
+                    } else {
+                        group2_shifted = trimmed;
+                        break;
+                    }
+                }
+            }
             if (base) |b| {
                 try out.put(gpa, try arena.dupe(u8, name), .{
                     .base = try arena.dupe(u8, b),
                     .shifted = try arena.dupe(u8, shifted orelse b),
                     .level3 = if (level3) |third| try arena.dupe(u8, third) else null,
+                    .group2_base = if (group2_base) |g2| try arena.dupe(u8, g2) else null,
+                    .group2_shifted = if (group2_shifted) |g2s| try arena.dupe(u8, g2s) else null,
                 });
             }
         }
@@ -293,9 +332,26 @@ fn parseSymbols(
 /// Finds the contents of the first `[ ... ]` in a `key <NAME> { ... }` body
 /// (the keysym list; may be preceded by `symbols[Group1] =` or nothing).
 fn firstKeysymList(key_body: []const u8) ParseError!?[]const u8 {
-    const open = std.mem.indexOfScalar(u8, key_body, '[') orelse return null;
-    const close = std.mem.indexOfScalarPos(u8, key_body, open, ']') orelse return error.MalformedKeymap;
-    return key_body[open + 1 .. close];
+    return keysymListAt(key_body, 0);
+}
+
+fn secondKeysymList(key_body: []const u8) ParseError!?[]const u8 {
+    return keysymListAt(key_body, 1);
+}
+
+fn keysymListAt(key_body: []const u8, want: usize) ParseError!?[]const u8 {
+    var found: usize = 0;
+    var search: usize = 0;
+    while (search < key_body.len) {
+        const open = std.mem.indexOfScalarPos(u8, key_body, search, '[') orelse return null;
+        const close = std.mem.indexOfScalarPos(u8, key_body, open, ']') orelse return error.MalformedKeymap;
+        const inner = std.mem.trim(u8, key_body[open + 1 .. close], " \t\r\n");
+        search = close + 1;
+        if (std.mem.startsWith(u8, inner, "Group")) continue;
+        if (found == want) return key_body[open + 1 .. close];
+        found += 1;
+    }
+    return null;
 }
 
 fn skipToNextToken(body: []const u8, i: *usize) void {
@@ -468,6 +524,84 @@ const named_char_keysyms = std.StaticStringMap(u8).initComptime(.{
     .{ "udiaeresis", 0xfc },
 });
 
+/// Legacy X11 Cyrillic keysyms `0x06c0`–`0x06ff` (lowercase then uppercase),
+/// plus `XK_Cyrillic_io` / `XK_Cyrillic_IO`. Used by a US+ru group-2 layout.
+const cyrillic_06c0 = [_]u21{
+    0x044e, 0x0430, 0x0431, 0x0446, 0x0434, 0x0435, 0x0444, 0x0433,
+    0x0445, 0x0438, 0x0439, 0x043a, 0x043b, 0x043c, 0x043d, 0x043e,
+    0x043f, 0x044f, 0x0440, 0x0441, 0x0442, 0x0443, 0x0436, 0x0432,
+    0x044c, 0x044b, 0x0437, 0x0448, 0x044d, 0x0449, 0x0447, 0x044a,
+};
+
+const named_cyrillic_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "Cyrillic_yu", 0x044e },
+    .{ "Cyrillic_a", 0x0430 },
+    .{ "Cyrillic_be", 0x0431 },
+    .{ "Cyrillic_tse", 0x0446 },
+    .{ "Cyrillic_de", 0x0434 },
+    .{ "Cyrillic_ie", 0x0435 },
+    .{ "Cyrillic_ef", 0x0444 },
+    .{ "Cyrillic_ghe", 0x0433 },
+    .{ "Cyrillic_ha", 0x0445 },
+    .{ "Cyrillic_i", 0x0438 },
+    .{ "Cyrillic_shorti", 0x0439 },
+    .{ "Cyrillic_ka", 0x043a },
+    .{ "Cyrillic_el", 0x043b },
+    .{ "Cyrillic_em", 0x043c },
+    .{ "Cyrillic_en", 0x043d },
+    .{ "Cyrillic_o", 0x043e },
+    .{ "Cyrillic_pe", 0x043f },
+    .{ "Cyrillic_ya", 0x044f },
+    .{ "Cyrillic_er", 0x0440 },
+    .{ "Cyrillic_es", 0x0441 },
+    .{ "Cyrillic_te", 0x0442 },
+    .{ "Cyrillic_u", 0x0443 },
+    .{ "Cyrillic_zhe", 0x0436 },
+    .{ "Cyrillic_ve", 0x0432 },
+    .{ "Cyrillic_softsign", 0x044c },
+    .{ "Cyrillic_yeru", 0x044b },
+    .{ "Cyrillic_ze", 0x0437 },
+    .{ "Cyrillic_sha", 0x0448 },
+    .{ "Cyrillic_e", 0x044d },
+    .{ "Cyrillic_shcha", 0x0449 },
+    .{ "Cyrillic_che", 0x0447 },
+    .{ "Cyrillic_hardsign", 0x044a },
+    .{ "Cyrillic_YU", 0x042e },
+    .{ "Cyrillic_A", 0x0410 },
+    .{ "Cyrillic_BE", 0x0411 },
+    .{ "Cyrillic_TSE", 0x0426 },
+    .{ "Cyrillic_DE", 0x0414 },
+    .{ "Cyrillic_IE", 0x0415 },
+    .{ "Cyrillic_EF", 0x0424 },
+    .{ "Cyrillic_GHE", 0x0413 },
+    .{ "Cyrillic_HA", 0x0425 },
+    .{ "Cyrillic_I", 0x0418 },
+    .{ "Cyrillic_SHORTI", 0x0419 },
+    .{ "Cyrillic_KA", 0x041a },
+    .{ "Cyrillic_EL", 0x041b },
+    .{ "Cyrillic_EM", 0x041c },
+    .{ "Cyrillic_EN", 0x041d },
+    .{ "Cyrillic_O", 0x041e },
+    .{ "Cyrillic_PE", 0x041f },
+    .{ "Cyrillic_YA", 0x042f },
+    .{ "Cyrillic_ER", 0x0420 },
+    .{ "Cyrillic_ES", 0x0421 },
+    .{ "Cyrillic_TE", 0x0422 },
+    .{ "Cyrillic_U", 0x0423 },
+    .{ "Cyrillic_ZHE", 0x0416 },
+    .{ "Cyrillic_VE", 0x0412 },
+    .{ "Cyrillic_SOFTSIGN", 0x042c },
+    .{ "Cyrillic_YERU", 0x042b },
+    .{ "Cyrillic_ZE", 0x0417 },
+    .{ "Cyrillic_SHA", 0x0428 },
+    .{ "Cyrillic_E", 0x042d },
+    .{ "Cyrillic_SHCHA", 0x0429 },
+    .{ "Cyrillic_CHE", 0x0427 },
+    .{ "Cyrillic_HARDSIGN", 0x042a },
+    .{ "Cyrillic_io", 0x0451 },
+    .{ "Cyrillic_IO", 0x0401 },
+});
+
 /// Resolves a keysym name to a plain character, if it is one. Covers the
 /// bare-letter/digit case ("a", "A", "5") and the named-punctuation table
 /// above; returns null for anything else (a named key, or an unrecognized
@@ -476,10 +610,22 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     if (name.len == 1 and std.ascii.isPrint(name[0])) return name[0];
     if (std.mem.eql(u8, name, "EuroSign") or std.mem.eql(u8, name, "euro")) return 0x20ac;
     if (named_char_keysyms.get(name)) |character| return character;
+    if (named_cyrillic_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
         if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return null;
         return value;
+    }
+    return null;
+}
+
+/// Legacy X11 Cyrillic keysyms used by a second keyboard group.
+pub fn charForX11Cyrillic(sym: u32) ?u21 {
+    if (sym == 0x06a3) return 0x0451;
+    if (sym == 0x06b3) return 0x0401;
+    if (sym >= 0x06c0 and sym <= 0x06ff) {
+        const lower = cyrillic_06c0[(sym - 0x06c0) & 0x1f];
+        return if (sym >= 0x06e0) lower - 0x20 else lower;
     }
     return null;
 }
@@ -1014,6 +1160,28 @@ test "parse keeps the third keysym as ISO Level3 / AltGr" {
     try std.testing.expectEqual(@as(u21, 0xb3), charForKeysym("threesuperior").?);
     try std.testing.expectEqual(@as(u21, 0x20ac), charForKeysym("EuroSign").?);
     try std.testing.expectEqual(@as(?[]const u8, null), keymap.keysymForLevel(28, .level3));
+}
+
+test "parse keeps a second keysym list as keyboard group 2" {
+    const text =
+        \\xkb_keymap {
+        \\  xkb_keycodes "evdev" {
+        \\      <AC01> = 38;
+        \\  };
+        \\  xkb_symbols "pc+us+ru:2" {
+        \\      key <AC01> { [ a, A ], [ Cyrillic_ef, Cyrillic_EF ] };
+        \\  };
+        \\};
+    ;
+    var keymap = try parse(std.testing.allocator, 1, text);
+    defer keymap.deinit();
+    try std.testing.expectEqualStrings("a", keymap.keysymForGroupLevel(30, 0, .base).?);
+    try std.testing.expectEqualStrings("Cyrillic_ef", keymap.keysymForGroupLevel(30, 1, .base).?);
+    try std.testing.expectEqualStrings("Cyrillic_EF", keymap.keysymForGroupLevel(30, 1, .shift).?);
+    try std.testing.expectEqual(@as(u21, 0x0444), charForKeysym("Cyrillic_ef").?);
+    try std.testing.expectEqual(@as(u21, 0x0424), charForKeysym("Cyrillic_EF").?);
+    try std.testing.expectEqual(@as(u21, 0x0444), charForX11Cyrillic(0x06c6).?);
+    try std.testing.expectEqual(@as(u21, 0x0424), charForX11Cyrillic(0x06e6).?);
 }
 
 test "parse rejects an unsupported keymap format" {

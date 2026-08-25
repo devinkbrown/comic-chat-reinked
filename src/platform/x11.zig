@@ -9,18 +9,21 @@
 //!   * `show(...)` — one-shot: open a window, draw an image, wait for a
 //!     keypress / close.
 //!   * `Window` — interactive: open/present/nextEvent/fd, with keyboard
-//!     translation (GetKeyboardMapping, including Mod5/AltGr and bounded
-//!     dead-key/Multi_key compose plus optional XCompose locale tables),
-//!     integer HiDPI scale (env + `Xft.dpi`, refreshed on root
-//!     `RESOURCE_MANAGER` changes), ICCCM CLIPBOARD+PRIMARY (INCR,
-//!     UTF8_STRING then STRING/TEXT/GTK text MIME including
-//!     `text/plain;charset=utf8` and `text/uri-list`, TIMESTAMP,
-//!     clipboard-manager handoff), XDND text/`file:` drops injected as
-//!     typed keys, `_NET_WM_STATE` maximize/fullscreen tracking, a scaled
+//!     translation (GetKeyboardMapping, including Mod5/AltGr, group bits
+//!     13–14, MappingNotify refresh that does not drop queued events, and
+//!     bounded dead-key/Multi_key compose plus optional XCompose locale
+//!     tables; compose resets on FocusOut), integer HiDPI scale (env +
+//!     `Xft.dpi`, refreshed on root `RESOURCE_MANAGER` changes, with the
+//!     core cursor and physical WM size hints reinstalled), ICCCM
+//!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
+//!     including `text/plain;charset=utf8`, `text/uri-list`, and
+//!     `UTF16_STRING`, TIMESTAMP, clipboard-manager handoff, UTF-8 BOM
+//!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
+//!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden tracking, a scaled
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/allowed actions,
-//!     WM_TAKE_FOCUS, WM_LOCALE_NAME, WM size hints, and resize/close
-//!     events, suitable for a poll(2)-driven client event loop.
+//!     WM_TAKE_FOCUS, WM_LOCALE_NAME, physical WM size hints, and
+//!     resize/close events, suitable for a poll(2)-driven client event loop.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -127,6 +130,8 @@ const XConn = struct {
     net_wm_state_fullscreen: u32 = 0,
     net_wm_icon: u32 = 0,
     net_wm_state_attention: u32 = 0,
+    net_wm_state_hidden: u32 = 0,
+    utf16_string: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -195,6 +200,22 @@ pub const Keymap = struct {
         const shift = (state & 0x1) != 0;
         const lock = (state & 0x2) != 0;
         const level3 = (state & 0x80) != 0; // Mod5 / ISO_Level3_Shift
+        const group = (state >> 13) & 0x3;
+
+        if (group != 0) {
+            const g0_idx = idx + @as(usize, group) * 2;
+            const key_end = idx + self.per;
+            if (g0_idx < key_end and g0_idx < self.syms.len) {
+                const g0 = self.syms[g0_idx];
+                const g1 = if (g0_idx + 1 < key_end and g0_idx + 1 < self.syms.len) self.syms[g0_idx + 1] else 0;
+                var grouped = g0;
+                if (shift and g1 != 0) grouped = g1;
+                if ((shift and g1 == 0) or (lock and !shift)) {
+                    if (grouped >= 'a' and grouped <= 'z') grouped -= 32;
+                }
+                if (grouped != 0) return grouped;
+            }
+        }
 
         if (level3 and (s2 != 0 or s3 != 0)) {
             if (shift and s3 != 0) return s3;
@@ -219,6 +240,7 @@ pub const Keymap = struct {
 pub fn keysymToKey(sym: u32) Key {
     if (sym >= 0x20 and sym <= 0xff) return .{ .char = @intCast(sym) };
     if (sym >= 0x01000000 and sym <= 0x0110ffff) return .{ .char = @intCast(sym - 0x01000000) };
+    if (xkb.charForX11Cyrillic(sym)) |ch| return .{ .char = ch };
     return switch (sym) {
         0xff08 => .backspace,
         0xff09 => .tab,
@@ -293,6 +315,8 @@ pub const Window = struct {
     wm_fullscreen: bool,
     cursor_id: u32,
     wm_urgent: bool,
+    wm_hidden: bool,
+    pending_events: std.ArrayList([32]u8),
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
         if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
@@ -347,6 +371,8 @@ pub const Window = struct {
             .wm_fullscreen = false,
             .cursor_id = 0,
             .wm_urgent = false,
+            .wm_hidden = false,
+            .pending_events = .empty,
         };
         self.loadComposeFromEnv(env);
         errdefer self.unloadCompose();
@@ -378,7 +404,7 @@ pub const Window = struct {
         try setAllowedActions(&self.conn, self.window);
         try setWmLocaleName(&self.conn, self.window, env);
         try setClientMachine(&self.conn, self.window);
-        try setSizeHints(&self.conn, self.window, w, h);
+        try setSizeHints(&self.conn, self.window, pixel_w, pixel_h, self.scale);
         try setXdndAware(&self.conn, self.window);
         try setNetWmState(&self.conn, self.window, &.{});
         try selectRootPropertyNotify(&self.conn);
@@ -397,6 +423,7 @@ pub const Window = struct {
         self.conn.stream.close(self.conn.io);
         self.threaded.deinit();
         self.pending_chars.deinit(self.gpa);
+        self.pending_events.deinit(self.gpa);
         if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
         self.unloadCompose();
         self.gpa.destroy(self);
@@ -474,6 +501,10 @@ pub const Window = struct {
     /// (after poll) to avoid stalling, or when blocking is intended.
     pub fn nextEvent(self: *Window) !Event {
         if (self.takePendingKey()) |event| return event;
+        if (self.pending_events.items.len != 0) {
+            const raw = self.pending_events.orderedRemove(0);
+            return self.decode(raw);
+        }
         var raw: [32]u8 = undefined;
         try readExact(&self.conn, &raw);
         return self.decode(raw);
@@ -540,7 +571,22 @@ pub const Window = struct {
                 self.claimFocus(self.last_user_time);
                 return .other;
             },
-            10 => return .other, // FocusOut
+            10 => { // FocusOut
+                self.compose.reset();
+                return .other;
+            },
+            18 => { // UnmapNotify
+                self.wm_hidden = true;
+                return .other;
+            },
+            19 => { // MapNotify
+                self.wm_hidden = false;
+                return .other;
+            },
+            34 => { // MappingNotify
+                if (event[1] == 1) self.refreshKeymap();
+                return .other;
+            },
             12 => return .expose,
             17 => return .close, // DestroyNotify
             22 => { // ConfigureNotify
@@ -632,23 +678,29 @@ pub const Window = struct {
         return self.convertAndRead(gpa, atom_primary);
     }
 
+    fn decodeClipboardBytes(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ![]u8 {
+        const decoded = services.clipboardBytesToUtf8(gpa, bytes) catch return bytes;
+        gpa.free(bytes);
+        return decoded;
+    }
+
     fn convertAndRead(self: *Window, gpa: std.mem.Allocator, selection: u32) !?[]u8 {
         if (self.convertTarget(gpa, selection, self.conn.utf8_string, self.conn.utf8_string)) |text| {
             if (text) |bytes| {
-                if (bytes.len != 0) return bytes;
+                if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
                 gpa.free(bytes);
             }
         } else |_| {}
         if (self.convertTarget(gpa, selection, atom_string, atom_string)) |text| {
             if (text) |bytes| {
-                if (bytes.len != 0) return bytes;
+                if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
                 gpa.free(bytes);
             }
         } else |_| {}
         if (self.conn.mime_text_utf8 != 0) {
             if (self.convertTarget(gpa, selection, self.conn.mime_text_utf8, self.conn.mime_text_utf8)) |text| {
                 if (text) |bytes| {
-                    if (bytes.len != 0) return bytes;
+                    if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
                     gpa.free(bytes);
                 }
             } else |_| {}
@@ -656,7 +708,7 @@ pub const Window = struct {
         if (self.conn.mime_text_utf8_alt != 0) {
             if (self.convertTarget(gpa, selection, self.conn.mime_text_utf8_alt, self.conn.mime_text_utf8_alt)) |text| {
                 if (text) |bytes| {
-                    if (bytes.len != 0) return bytes;
+                    if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
                     gpa.free(bytes);
                 }
             } else |_| {}
@@ -664,7 +716,21 @@ pub const Window = struct {
         if (self.conn.mime_text_plain != 0) {
             if (self.convertTarget(gpa, selection, self.conn.mime_text_plain, self.conn.mime_text_plain)) |text| {
                 if (text) |bytes| {
-                    if (bytes.len != 0) return bytes;
+                    if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
+                    gpa.free(bytes);
+                }
+            } else |_| {}
+        }
+        if (self.conn.utf16_string != 0) {
+            if (self.convertTarget(gpa, selection, self.conn.utf16_string, self.conn.utf16_string)) |text| {
+                if (text) |bytes| {
+                    if (bytes.len != 0) {
+                        const decoded = services.clipboardUtf16BytesToUtf8(gpa, bytes) catch {
+                            return try self.decodeClipboardBytes(gpa, bytes);
+                        };
+                        gpa.free(bytes);
+                        return decoded;
+                    }
                     gpa.free(bytes);
                 }
             } else |_| {}
@@ -673,13 +739,16 @@ pub const Window = struct {
             if (self.convertTarget(gpa, selection, self.conn.mime_uri_list, self.conn.mime_uri_list)) |text| {
                 if (text) |bytes| {
                     if (self.takeUriListPath(gpa, bytes)) |path| return path;
-                    if (bytes.len != 0) return bytes;
+                    if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
                     gpa.free(bytes);
                 }
             } else |_| {}
         }
         if (self.conn.text == 0) return null;
-        return self.convertTarget(gpa, selection, self.conn.text, self.conn.text);
+        if (self.convertTarget(gpa, selection, self.conn.text, self.conn.text)) |text| {
+            if (text) |bytes| return try self.decodeClipboardBytes(gpa, bytes);
+        } else |_| {}
+        return null;
     }
 
     fn takeUriListPath(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ?[]u8 {
@@ -702,8 +771,10 @@ pub const Window = struct {
                 if (get32(raw[20..24]) == 0) return null;
                 return try self.readSelectionProperty(gpa, property);
             }
-            _ = self.handleProtocolEvent(raw);
             if (kind == 0) return error.X11ServerError;
+            if (!self.handleProtocolEvent(raw) and self.pending_events.items.len < 32) {
+                self.pending_events.append(self.gpa, raw) catch {};
+            }
         }
         return error.ClipboardTimeout;
     }
@@ -1012,6 +1083,9 @@ pub const Window = struct {
         const new_scale = detectScale(self.gpa, &self.conn, env) catch return null;
         if (new_scale == self.scale) return null;
         self.scale = new_scale;
+        if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
+        self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, new_scale, env) catch 0;
+        setSizeHints(&self.conn, self.window, self.pixel_width, self.pixel_height, new_scale) catch {};
         const w = physicalToLogical(self.pixel_width, new_scale);
         const h = physicalToLogical(self.pixel_height, new_scale);
         if (w == self.width and h == self.height) return .expose;
@@ -1080,6 +1154,7 @@ pub const Window = struct {
             self.conn.mime_text_utf8_alt,
             self.conn.mime_text_plain,
             self.conn.mime_uri_list,
+            self.conn.utf16_string,
             self.conn.text,
             atom_string,
         };
@@ -1090,7 +1165,16 @@ pub const Window = struct {
                     if (target == self.conn.mime_uri_list) {
                         if (self.takeUriListPath(gpa, bytes)) |path| return path;
                     }
-                    if (bytes.len != 0) return bytes;
+                    if (bytes.len != 0) {
+                        if (target == self.conn.utf16_string) {
+                            const decoded = services.clipboardUtf16BytesToUtf8(gpa, bytes) catch {
+                                return try self.decodeClipboardBytes(gpa, bytes);
+                            };
+                            gpa.free(bytes);
+                            return decoded;
+                        }
+                        return try self.decodeClipboardBytes(gpa, bytes);
+                    }
                     gpa.free(bytes);
                 }
             } else |_| {}
@@ -1133,6 +1217,9 @@ pub const Window = struct {
         } else if (atom == self.conn.net_wm_state_fullscreen) {
             if (add) self.wm_fullscreen = true;
             if (remove) self.wm_fullscreen = false;
+        } else if (atom == self.conn.net_wm_state_hidden) {
+            if (add) self.wm_hidden = true;
+            if (remove) self.wm_hidden = false;
         }
     }
 
@@ -1140,6 +1227,7 @@ pub const Window = struct {
         if (atom == self.conn.net_wm_state_max_horz) return self.wm_max_horz;
         if (atom == self.conn.net_wm_state_max_vert) return self.wm_max_vert;
         if (atom == self.conn.net_wm_state_fullscreen) return self.wm_fullscreen;
+        if (atom == self.conn.net_wm_state_hidden) return self.wm_hidden;
         return false;
     }
 
@@ -1163,13 +1251,21 @@ pub const Window = struct {
         self.wm_max_horz = false;
         self.wm_max_vert = false;
         self.wm_fullscreen = false;
+        self.wm_hidden = false;
         var off: usize = 0;
         while (off + 4 <= bytes.len) : (off += 4) {
             const atom = get32(bytes[off..][0..4]);
             if (atom == self.conn.net_wm_state_max_horz) self.wm_max_horz = true;
             if (atom == self.conn.net_wm_state_max_vert) self.wm_max_vert = true;
             if (atom == self.conn.net_wm_state_fullscreen) self.wm_fullscreen = true;
+            if (atom == self.conn.net_wm_state_hidden) self.wm_hidden = true;
         }
+    }
+
+    fn refreshKeymap(self: *Window) void {
+        const next = fetchKeymapStashing(self.gpa, &self.conn, &self.pending_events) catch return;
+        self.keymap.deinit(self.gpa);
+        self.keymap = next;
     }
 };
 
@@ -1474,6 +1570,41 @@ fn fetchKeymap(gpa: std.mem.Allocator, conn: *XConn) !Keymap {
     return .{ .syms = syms, .per = per, .min = conn.min_keycode };
 }
 
+/// Same as fetchKeymap, but queues MappingNotify-adjacent events instead of
+/// dropping them. Used after the event loop has started.
+fn fetchKeymapStashing(gpa: std.mem.Allocator, conn: *XConn, stash: *std.ArrayList([32]u8)) !Keymap {
+    const count: u8 = conn.max_keycode - conn.min_keycode + 1;
+    var req: [8]u8 = @splat(0);
+    req[0] = 101;
+    put16(req[2..4], 2);
+    req[4] = conn.min_keycode;
+    req[5] = count;
+    try writeAll(conn, &req);
+
+    var header: [32]u8 = undefined;
+    while (true) {
+        try readExact(conn, &header);
+        switch (header[0]) {
+            0 => return error.X11ServerError,
+            1 => break,
+            else => {
+                if (stash.items.len < 32) try stash.append(gpa, header);
+            },
+        }
+    }
+
+    const per = header[1];
+    const total = @as(usize, get32(header[4..8]));
+    const syms = try gpa.alloc(u32, total);
+    errdefer gpa.free(syms);
+    const raw = try gpa.alloc(u8, total * 4);
+    defer gpa.free(raw);
+    try readExact(conn, raw);
+    for (syms, 0..) |*s, i| s.* = get32(raw[i * 4 .. i * 4 + 4]);
+
+    return .{ .syms = syms, .per = per, .min = conn.min_keycode };
+}
+
 /// Wait for the next reply, skipping (discarding) any events that arrive
 /// first. Only used during setup, before the event loop starts.
 fn readReply(conn: *XConn) ![32]u8 {
@@ -1607,15 +1738,16 @@ fn incrThreshold(conn: *const XConn) usize {
     return @min((@as(usize, max_units) - 8) * 4 / 2, incr_chunk_bytes);
 }
 
-fn setSizeHints(conn: *XConn, window: u32, w: u32, h: u32) !void {
+fn setSizeHints(conn: *XConn, window: u32, pixel_w: u32, pixel_h: u32, scale: u32) !void {
+    const s = @max(scale, 1);
     var hints: [18]u32 = @splat(0);
     hints[0] = size_hint_p_min | size_hint_p_max | size_hint_p_base;
-    hints[5] = 160;
-    hints[6] = 120;
-    hints[7] = 8192;
-    hints[8] = 8192;
-    hints[15] = w;
-    hints[16] = h;
+    hints[5] = 160 * s;
+    hints[6] = 120 * s;
+    hints[7] = @min(8192 * s, 32767);
+    hints[8] = @min(8192 * s, 32767);
+    hints[15] = pixel_w;
+    hints[16] = pixel_h;
     try changeProperty32(conn, window, atom_wm_normal_hints, atom_wm_size_hints, &hints);
 }
 
@@ -1728,6 +1860,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_state_fullscreen = try internAtom(conn, "_NET_WM_STATE_FULLSCREEN");
     conn.net_wm_icon = try internAtom(conn, "_NET_WM_ICON");
     conn.net_wm_state_attention = try internAtom(conn, "_NET_WM_STATE_DEMANDS_ATTENTION");
+    conn.net_wm_state_hidden = try internAtom(conn, "_NET_WM_STATE_HIDDEN");
+    conn.utf16_string = try internAtom(conn, "UTF16_STRING");
 }
 
 fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
@@ -2165,7 +2299,8 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
     if (target == 0) return false;
     return target == conn.utf8_string or target == atom_string or target == conn.text or
         target == conn.mime_text_plain or target == conn.mime_text_utf8 or
-        target == conn.mime_text_utf8_alt or target == conn.mime_uri_list;
+        target == conn.mime_text_utf8_alt or target == conn.mime_uri_list or
+        target == conn.utf16_string;
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -2414,12 +2549,14 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .timestamp = 104,
         .mime_text_utf8_alt = 105,
         .mime_uri_list = 106,
+        .utf16_string = 107,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
     try std.testing.expect(isClipboardTextTarget(&conn, 103));
     try std.testing.expect(isClipboardTextTarget(&conn, 105));
     try std.testing.expect(isClipboardTextTarget(&conn, 106));
+    try std.testing.expect(isClipboardTextTarget(&conn, 107));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 }
 
@@ -2467,4 +2604,19 @@ test "Keymap.translate uses Mod5 for ISO Level3 when a third keysym exists" {
     try std.testing.expectEqual(Key{ .char = '@' }, km.translate(10, 1));
     try std.testing.expectEqual(Key{ .char = 0xb3 }, km.translate(10, 0x80));
     try std.testing.expectEqual(Key{ .char = 0xa3 }, km.translate(10, 0x81));
+}
+
+test "Keymap.translate uses group bits 13-14 without reading the next key" {
+    var grouped = [_]u32{ 'a', 'A', 'z', 'Z' };
+    const km = Keymap{ .syms = &grouped, .per = 4, .min = 10 };
+    try std.testing.expectEqual(Key{ .char = 'a' }, km.translate(10, 0));
+    try std.testing.expectEqual(Key{ .char = 'z' }, km.translate(10, 1 << 13));
+    try std.testing.expectEqual(Key{ .char = 'Z' }, km.translate(10, (1 << 13) | 1));
+    try std.testing.expectEqual(Key{ .char = 0x0444 }, keysymToKey(0x06c6));
+    try std.testing.expectEqual(Key{ .char = 0x0424 }, keysymToKey(0x06e6));
+
+    var pair = [_]u32{ 'a', 'A', 'b', 'B' };
+    const km2 = Keymap{ .syms = &pair, .per = 2, .min = 8 };
+    try std.testing.expectEqual(Key{ .char = 'a' }, km2.translate(8, 1 << 13));
+    try std.testing.expectEqual(Key{ .char = 'b' }, km2.translate(9, 0));
 }

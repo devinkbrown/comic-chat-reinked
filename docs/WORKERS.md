@@ -75,24 +75,32 @@ hash.
 - `src/client/` owns portable view/input behavior shared by native backends.
 - The direct Wayland keyboard path parses the compositor's real XKB keymap
   (`src/platform/xkb.zig`, base + Shift + AltGr/ISO Level3 when a third
-  keysym is listed), implements client-side key-repeat (`repeat_info` +
-  `Window.checkRepeat`), and applies a bounded dead-key / Multi_key composer
-  plus optional XCompose locale tables (`XCOMPOSEFILE`, `~/.XCompose`,
-  system `%L`, capped file size/entries/include depth). A US evdev fallback
-  remains before the first keymap arrives or for an out-of-scope keysym. Do
-  not claim a full input-method editor — committed IME text uses
-  text-input-v3 when advertised, with a multiline hint and a bounded
-  composer-strip cursor rectangle. X11 claims focus via `WM_TAKE_FOCUS` /
-  FocusIn and does not speak XIM. Text and `file:` drops use XDND /
-  `wl_data_device` and are injected as existing key events (no new Event
-  variant). Clipboard MIME includes `text/plain;charset=utf8` and
-  `text/uri-list`. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
-  property changes. Both backends track maximized/fullscreen window state.
-  X11 installs a scaled core cursor and `_NET_WM_ICON`, and `notify` sets
-  urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn. Wayland uses
-  `wp_cursor_shape_v1` or a scaled shm arrow and `xdg_toplevel_icon_v1`
-  when advertised. See `xkb.zig` and `compose_file.zig` for the exact
-  parsing scope. Do not add an AT-SPI bus or a Wayland→X11 fallback.
+  keysym is listed, plus group 2 when a second keysym list is published),
+  implements client-side key-repeat (`repeat_info` + `Window.checkRepeat`),
+  and applies a bounded dead-key / Multi_key composer plus optional XCompose
+  locale tables (`XCOMPOSEFILE`, `~/.XCompose`, system `%L`, capped file
+  size/entries/include depth). A US evdev fallback remains before the first
+  keymap arrives or for an out-of-scope keysym. Do not claim a full
+  input-method editor — committed IME text uses text-input-v3 when
+  advertised, with a multiline hint and a bounded composer-strip cursor
+  rectangle. X11 claims focus via `WM_TAKE_FOCUS` / FocusIn, resets compose
+  on FocusOut, honors group bits 13–14, and refreshes GetKeyboardMapping on
+  MappingNotify without dropping queued events. It does not speak XIM. Text
+  and `file:` drops use XDND / `wl_data_device` and are injected as existing
+  key events (no new Event variant); Wayland sends `data_offer.set_actions`
+  copy when accepting a drop. Clipboard MIME includes
+  `text/plain;charset=utf8`, `text/uri-list`, and X11 `UTF16_STRING`, with
+  UTF-8 BOM strip and UTF-16 decode. X11 re-reads `Xft.dpi` when the root
+  `RESOURCE_MANAGER` property changes and reinstalls the scaled cursor plus
+  physical WM size hints. Both backends track maximized/fullscreen window
+  state; X11 also tracks `_NET_WM_STATE_HIDDEN`, and Wayland records
+  tiled/suspended xdg states. When advertised, Wayland requests server-side
+  decorations. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
+  `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
+  Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
+  `xdg_toplevel_icon_v1` when advertised. See `xkb.zig` and
+  `compose_file.zig` for the exact parsing scope. Do not add an AT-SPI bus
+  or a Wayland→X11 fallback.
 
 ## Change rules
 
