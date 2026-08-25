@@ -1836,7 +1836,6 @@ test "leftover dest gesture pose cards keep authored pad" {
         @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
     };
     const emotions = [_]u16{ 11, 12, 13, 14 };
-    var checked: usize = 0;
     for (blobs) |avb_data| {
         for (emotions) |emotion| {
             var card = bgb.decodePoseForEmotion(gpa, avb_data, .body, emotion, 0) catch |err| switch (err) {
@@ -1851,10 +1850,8 @@ test "leftover dest gesture pose cards keep authored pad" {
             try std.testing.expect(ink.x >= 2);
             try std.testing.expect(ink.x + ink.w + 2 <= card.width);
             try std.testing.expect(ink.w < 200);
-            checked += 1;
         }
     }
-    _ = checked;
 }
 
 test "Maynard Color keeps pose-authored cool paint without a tan wash" {
