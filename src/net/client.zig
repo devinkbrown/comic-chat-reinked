@@ -1514,6 +1514,9 @@ pub const Client = struct {
         password: []u8,
     ) !void {
         defer std.crypto.secureZero(u8, password);
+        try self.validateOutgoingText(account_or_star);
+        try self.validateOutgoingText(email_or_star);
+        try self.validateOutgoingText(password);
         try self.appendCommand("REGISTER", &.{ account_or_star, email_or_star, password });
         try self.queueOut(.interactive, false, true);
     }
@@ -1526,6 +1529,9 @@ pub const Client = struct {
 
     pub fn identify(self: *Client, account: []const u8, password: []const u8, totp: []const u8) !void {
         if (account.len == 0 or password.len == 0) return error.InvalidIrcParameter;
+        try self.validateOutgoingText(account);
+        try self.validateOutgoingText(password);
+        if (totp.len != 0) try self.validateOutgoingText(totp);
         if (totp.len == 0)
             try self.appendCommandTrailing("IDENTIFY", &.{ account, password })
         else
@@ -1540,12 +1546,16 @@ pub const Client = struct {
 
     pub fn dropAccount(self: *Client, account: []const u8, password: []const u8) !void {
         if (account.len == 0 or password.len == 0) return error.InvalidIrcParameter;
+        try self.validateOutgoingText(account);
+        try self.validateOutgoingText(password);
         try self.appendCommandTrailing("DROP", &.{ account, password });
         try self.queueOut(.interactive, false, true);
     }
 
     pub fn ghost(self: *Client, nick: []const u8, password: []const u8) !void {
         if (nick.len == 0 or password.len == 0) return error.InvalidIrcParameter;
+        try self.validateOutgoingText(nick);
+        try self.validateOutgoingText(password);
         try self.appendCommandTrailing("GHOST", &.{ nick, password });
         try self.queueOut(.interactive, false, true);
     }

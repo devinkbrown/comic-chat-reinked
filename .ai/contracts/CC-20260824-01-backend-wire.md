@@ -175,6 +175,19 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 48 leftovers in scope
+
+- Session-sync restored rooms stay sendable after 001 (no composer black
+  hole while waiting for JOIN/366); first-visit `want_rejoin` still JOINs
+- Composer speech before JOIN is an English notice, not a silent drop
+- `/avatar` `InvalidIrcParameter`, pending-topic rejection, 470 dest
+  `ensure`, and toolbar PART stay English
+- `/create` key, `/identify`/`/register`/`/ghost`/`/drop` passwords, and
+  `/setpass` keep leftover-of-line text; IDENTIFY/GHOST/DROP/REGISTER
+  honor UTF8ONLY; slash `/ban`/`/except`/`/invex` honor advertised EXTBAN
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 47 leftovers in scope
 
 - Inbound PRIVMSG/NOTICE/WHISPER/DATA `workspaceRoomForIncoming` uses
