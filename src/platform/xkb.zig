@@ -11,10 +11,11 @@
 //! name <-> numeric code) and `xkb_symbols` (key name -> the keysym list for
 //! levels 1–3: unshifted, Shift, and AltGr/ISO Level3 when the keymap lists
 //! a third keysym). That is what makes the base, shifted, and AltGr
-//! character of a non-US layout actually correct. Compose/dead-key sequences
-//! are not represented; a level-4+ keysym, if present, is ignored. IME
-//! input method integration is a separate protocol (text-input-unstable-v3)
-//! and out of scope for this parser.
+//! character of a non-US layout actually correct. A bounded dead-key and
+//! Multi_key composer covers the common European accents (see `Compose`).
+//! A level-4+ keysym, if present, is ignored. IME input method integration
+//! is a separate protocol (text-input-unstable-v3) and out of scope for this
+//! parser.
 //!
 //! Wayland's wl_keyboard.key event reports the physical key as a raw evdev
 //! scancode. XKB numeric keycodes are that scancode plus 8 (a fixed offset
@@ -480,6 +481,328 @@ pub fn namedKeyForKeysym(name: []const u8) ?NamedKey {
     return named_keysyms.get(name);
 }
 
+/// Dead-key accents this bounded composer understands. The names match the
+/// XKB `dead_*` keysyms and the X11 `XK_dead_*` range 0xfe50–0xfe5c.
+pub const Dead = enum {
+    grave,
+    acute,
+    circumflex,
+    tilde,
+    macron,
+    breve,
+    abovedot,
+    diaeresis,
+    abovering,
+    doubleacute,
+    caron,
+    cedilla,
+    ogonek,
+};
+
+pub const x11_multi_key: u32 = 0xff20;
+
+/// Result of feeding one key into `Compose`. `pending` means the key was
+/// consumed and the caller should not emit a character yet.
+pub const Outcome = union(enum) {
+    pending,
+    char: u21,
+};
+
+/// One-accent dead-key plus two-key Multi_key composer. No locale files, no
+/// libxkbcommon: the pair table is the common Western-European set that
+/// US-International / Compose users actually type. Escape/control cancel;
+/// space or a doubled dead key emits the standalone accent.
+pub const Compose = struct {
+    dead: ?Dead = null,
+    multi: bool = false,
+    first: ?u21 = null,
+
+    pub fn reset(self: *Compose) void {
+        self.* = .{};
+    }
+
+    pub fn active(self: *const Compose) bool {
+        return self.dead != null or self.multi;
+    }
+
+    pub fn feedDead(self: *Compose, dead: Dead) Outcome {
+        if (self.dead == dead and self.first == null and !self.multi) {
+            self.reset();
+            return .{ .char = standalone(dead) };
+        }
+        self.dead = dead;
+        self.multi = false;
+        self.first = null;
+        return .pending;
+    }
+
+    pub fn feedMulti(self: *Compose) Outcome {
+        self.dead = null;
+        self.multi = true;
+        self.first = null;
+        return .pending;
+    }
+
+    pub fn feedChar(self: *Compose, ch: u21) Outcome {
+        if (self.dead) |dead| {
+            self.reset();
+            if (ch == ' ') return .{ .char = standalone(dead) };
+            if (ch <= 0xff) {
+                if (composePair(dead, @intCast(ch))) |out| return .{ .char = out };
+            }
+            return .{ .char = ch };
+        }
+        if (self.multi) {
+            if (self.first) |a| {
+                self.reset();
+                if (a <= 0xff and ch <= 0xff) {
+                    if (multiPair(@intCast(a), @intCast(ch))) |out| return .{ .char = out };
+                }
+                return .{ .char = ch };
+            }
+            self.first = ch;
+            return .pending;
+        }
+        return .{ .char = ch };
+    }
+};
+
+pub fn deadForKeysym(name: []const u8) ?Dead {
+    const dead_names = std.StaticStringMap(Dead).initComptime(.{
+        .{ "dead_grave", .grave },
+        .{ "dead_acute", .acute },
+        .{ "dead_circumflex", .circumflex },
+        .{ "dead_tilde", .tilde },
+        .{ "dead_macron", .macron },
+        .{ "dead_breve", .breve },
+        .{ "dead_abovedot", .abovedot },
+        .{ "dead_diaeresis", .diaeresis },
+        .{ "dead_abovering", .abovering },
+        .{ "dead_doubleacute", .doubleacute },
+        .{ "dead_caron", .caron },
+        .{ "dead_cedilla", .cedilla },
+        .{ "dead_ogonek", .ogonek },
+    });
+    return dead_names.get(name);
+}
+
+pub fn deadForX11(sym: u32) ?Dead {
+    return switch (sym) {
+        0xfe50 => .grave,
+        0xfe51 => .acute,
+        0xfe52 => .circumflex,
+        0xfe53 => .tilde,
+        0xfe54 => .macron,
+        0xfe55 => .breve,
+        0xfe56 => .abovedot,
+        0xfe57 => .diaeresis,
+        0xfe58 => .abovering,
+        0xfe59 => .doubleacute,
+        0xfe5a => .caron,
+        0xfe5b => .cedilla,
+        0xfe5c => .ogonek,
+        else => null,
+    };
+}
+
+pub fn isMultiKeyName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "Multi_key");
+}
+
+fn standalone(dead: Dead) u21 {
+    return switch (dead) {
+        .grave => '`',
+        .acute => 0xb4,
+        .circumflex => '^',
+        .tilde => '~',
+        .macron => 0xaf,
+        .breve => 0x02d8,
+        .abovedot => 0x02d9,
+        .diaeresis => 0xa8,
+        .abovering => 0x02da,
+        .doubleacute => 0x02dd,
+        .caron => 0x02c7,
+        .cedilla => 0xb8,
+        .ogonek => 0x02db,
+    };
+}
+
+fn composePair(dead: Dead, base: u8) ?u21 {
+    return switch (dead) {
+        .acute => switch (base) {
+            'a' => 0xe1,
+            'A' => 0xc1,
+            'c' => 0x107,
+            'C' => 0x106,
+            'e' => 0xe9,
+            'E' => 0xc9,
+            'i' => 0xed,
+            'I' => 0xcd,
+            'n' => 0x144,
+            'N' => 0x143,
+            'o' => 0xf3,
+            'O' => 0xd3,
+            's' => 0x15b,
+            'S' => 0x15a,
+            'u' => 0xfa,
+            'U' => 0xda,
+            'y' => 0xfd,
+            'Y' => 0xdd,
+            'z' => 0x17a,
+            'Z' => 0x179,
+            else => null,
+        },
+        .grave => switch (base) {
+            'a' => 0xe0,
+            'A' => 0xc0,
+            'e' => 0xe8,
+            'E' => 0xc8,
+            'i' => 0xec,
+            'I' => 0xcc,
+            'o' => 0xf2,
+            'O' => 0xd2,
+            'u' => 0xf9,
+            'U' => 0xd9,
+            else => null,
+        },
+        .circumflex => switch (base) {
+            'a' => 0xe2,
+            'A' => 0xc2,
+            'e' => 0xea,
+            'E' => 0xca,
+            'i' => 0xee,
+            'I' => 0xce,
+            'o' => 0xf4,
+            'O' => 0xd4,
+            'u' => 0xfb,
+            'U' => 0xdb,
+            else => null,
+        },
+        .tilde => switch (base) {
+            'a' => 0xe3,
+            'A' => 0xc3,
+            'n' => 0xf1,
+            'N' => 0xd1,
+            'o' => 0xf5,
+            'O' => 0xd5,
+            else => null,
+        },
+        .diaeresis => switch (base) {
+            'a' => 0xe4,
+            'A' => 0xc4,
+            'e' => 0xeb,
+            'E' => 0xcb,
+            'i' => 0xef,
+            'I' => 0xcf,
+            'o' => 0xf6,
+            'O' => 0xd6,
+            'u' => 0xfc,
+            'U' => 0xdc,
+            'y' => 0xff,
+            'Y' => 0x178,
+            else => null,
+        },
+        .cedilla => switch (base) {
+            'c' => 0xe7,
+            'C' => 0xc7,
+            's' => 0x15f,
+            'S' => 0x15e,
+            else => null,
+        },
+        .caron => switch (base) {
+            'c' => 0x10d,
+            'C' => 0x10c,
+            'd' => 0x10f,
+            'D' => 0x10e,
+            'e' => 0x11b,
+            'E' => 0x11a,
+            'n' => 0x148,
+            'N' => 0x147,
+            'r' => 0x159,
+            'R' => 0x158,
+            's' => 0x161,
+            'S' => 0x160,
+            't' => 0x165,
+            'T' => 0x164,
+            'z' => 0x17e,
+            'Z' => 0x17d,
+            else => null,
+        },
+        .macron => switch (base) {
+            'a' => 0x101,
+            'A' => 0x100,
+            'e' => 0x113,
+            'E' => 0x112,
+            'i' => 0x12b,
+            'I' => 0x12a,
+            'o' => 0x14d,
+            'O' => 0x14c,
+            'u' => 0x16b,
+            'U' => 0x16a,
+            else => null,
+        },
+        .breve => switch (base) {
+            'a' => 0x103,
+            'A' => 0x102,
+            else => null,
+        },
+        .abovering => switch (base) {
+            'a' => 0xe5,
+            'A' => 0xc5,
+            else => null,
+        },
+        .ogonek => switch (base) {
+            'a' => 0x105,
+            'A' => 0x104,
+            'e' => 0x119,
+            'E' => 0x118,
+            else => null,
+        },
+        .doubleacute => switch (base) {
+            'o' => 0x151,
+            'O' => 0x150,
+            'u' => 0x171,
+            'U' => 0x170,
+            else => null,
+        },
+        .abovedot => switch (base) {
+            'z' => 0x17c,
+            'Z' => 0x17b,
+            else => null,
+        },
+    };
+}
+
+fn deadFromPunct(c: u8) ?Dead {
+    return switch (c) {
+        '\'' => .acute,
+        '`' => .grave,
+        '^' => .circumflex,
+        '~' => .tilde,
+        '"' => .diaeresis,
+        ',' => .cedilla,
+        else => null,
+    };
+}
+
+fn multiPair(a: u8, b: u8) ?u21 {
+    if (deadFromPunct(a)) |dead| {
+        if (composePair(dead, b)) |out| return out;
+    }
+    if (deadFromPunct(b)) |dead| {
+        if (composePair(dead, a)) |out| return out;
+    }
+    if ((a == 'o' or a == 'O') and (b == 'a' or b == 'A')) {
+        return if (std.ascii.isUpper(a) or std.ascii.isUpper(b)) 0xc5 else 0xe5;
+    }
+    if (a == '/' and (b == 'o' or b == 'O')) return if (b == 'O') 0xd8 else 0xf8;
+    if (b == '/' and (a == 'o' or a == 'O')) return if (a == 'O') 0xd8 else 0xf8;
+    if (a == '=' and (b == 'e' or b == 'E' or b == 'c' or b == 'C')) return 0x20ac;
+    if (b == '=' and (a == 'e' or a == 'E' or a == 'c' or a == 'C')) return 0x20ac;
+    if (a == 's' and b == 's') return 0xdf;
+    return null;
+}
+
 test "extractSection finds a brace-balanced body and ignores an unrelated prefix match" {
     const text =
         \\xkb_keymap {
@@ -600,4 +923,44 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(NamedKey.backspace, namedKeyForKeysym("BackSpace").?);
     try std.testing.expectEqual(NamedKey.page_up, namedKeyForKeysym("Prior").?);
     try std.testing.expectEqual(@as(?NamedKey, null), namedKeyForKeysym("nonexistent_keysym_name"));
+}
+
+test "dead-key compose arms, combines, and emits a standalone accent" {
+    var compose: Compose = .{};
+    try std.testing.expectEqual(Dead.acute, deadForKeysym("dead_acute").?);
+    try std.testing.expectEqual(Dead.acute, deadForX11(0xfe51).?);
+    try std.testing.expect(deadForKeysym("a") == null);
+    try std.testing.expectEqual(Outcome.pending, compose.feedDead(.acute));
+    try std.testing.expect(compose.active());
+    try std.testing.expectEqual(Outcome{ .char = 0xe9 }, compose.feedChar('e'));
+    try std.testing.expect(!compose.active());
+
+    try std.testing.expectEqual(Outcome.pending, compose.feedDead(.tilde));
+    try std.testing.expectEqual(Outcome{ .char = 0xf1 }, compose.feedChar('n'));
+
+    try std.testing.expectEqual(Outcome.pending, compose.feedDead(.diaeresis));
+    try std.testing.expectEqual(Outcome{ .char = 0xa8 }, compose.feedChar(' '));
+
+    try std.testing.expectEqual(Outcome.pending, compose.feedDead(.grave));
+    try std.testing.expectEqual(Outcome{ .char = '`' }, compose.feedDead(.grave));
+}
+
+test "Multi_key compose accepts punctuation+letter in either order" {
+    var compose: Compose = .{};
+    try std.testing.expect(isMultiKeyName("Multi_key"));
+    try std.testing.expectEqual(Outcome.pending, compose.feedMulti());
+    try std.testing.expectEqual(Outcome.pending, compose.feedChar('\''));
+    try std.testing.expectEqual(Outcome{ .char = 0xe1 }, compose.feedChar('a'));
+
+    try std.testing.expectEqual(Outcome.pending, compose.feedMulti());
+    try std.testing.expectEqual(Outcome.pending, compose.feedChar('n'));
+    try std.testing.expectEqual(Outcome{ .char = 0xf1 }, compose.feedChar('~'));
+
+    try std.testing.expectEqual(Outcome.pending, compose.feedMulti());
+    try std.testing.expectEqual(Outcome.pending, compose.feedChar('='));
+    try std.testing.expectEqual(Outcome{ .char = 0x20ac }, compose.feedChar('e'));
+
+    try std.testing.expectEqual(Outcome.pending, compose.feedMulti());
+    try std.testing.expectEqual(Outcome.pending, compose.feedChar('s'));
+    try std.testing.expectEqual(Outcome{ .char = 0xdf }, compose.feedChar('s'));
 }

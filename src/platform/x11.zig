@@ -9,16 +9,18 @@
 //!   * `show(...)` — one-shot: open a window, draw an image, wait for a
 //!     keypress / close.
 //!   * `Window` — interactive: open/present/nextEvent/fd, with keyboard
-//!     translation (GetKeyboardMapping, including Mod5/AltGr), integer HiDPI
-//!     scale, ICCCM CLIPBOARD+PRIMARY (INCR for large transfers), WM size
-//!     hints, and resize/close events, suitable for a poll(2)-driven client
-//!     event loop.
+//!     translation (GetKeyboardMapping, including Mod5/AltGr and bounded
+//!     dead-key/Multi_key compose), integer HiDPI scale, ICCCM
+//!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING), EWMH ping/type,
+//!     WM size hints, and resize/close events, suitable for a poll(2)-driven
+//!     client event loop.
 
 const std = @import("std");
 const linux = std.os.linux;
 const net = std.Io.net;
 const shared_event = @import("event.zig");
 const services = @import("services.zig");
+const xkb = @import("xkb.zig");
 
 const image_depth = 24;
 const z_pixmap = 2;
@@ -45,6 +47,9 @@ const atom_cardinal = 6;
 const atom_string = 31;
 const atom_primary = 1;
 const atom_wm_class = 67;
+const atom_wm_hints = 35;
+const atom_wm_client_machine = 36;
+const atom_wm_icon_name = 37;
 const atom_wm_name = 39;
 const atom_wm_normal_hints = 40;
 const atom_wm_size_hints = 41;
@@ -81,6 +86,9 @@ const XConn = struct {
     incr: u32 = 0,
     net_wm_name: u32 = 0,
     net_wm_pid: u32 = 0,
+    net_wm_ping: u32 = 0,
+    net_wm_window_type: u32 = 0,
+    net_wm_window_type_normal: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -235,6 +243,7 @@ pub const Window = struct {
     incr_property: u32,
     incr_target: u32,
     incr_offset: usize,
+    compose: xkb.Compose,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
         if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
@@ -277,6 +286,7 @@ pub const Window = struct {
             .incr_property = 0,
             .incr_target = 0,
             .incr_offset = 0,
+            .compose = .{},
         };
         errdefer self.threaded.deinit();
         const io = self.threaded.io();
@@ -301,6 +311,9 @@ pub const Window = struct {
         try setTitle(&self.conn, self.window, title);
         try setWmClass(&self.conn, self.window, "comicchat", "Reinked");
         try setNetWmPid(&self.conn, self.window);
+        try setWmHints(&self.conn, self.window);
+        try setNetWmWindowType(&self.conn, self.window);
+        try setClientMachine(&self.conn, self.window);
         try setSizeHints(&self.conn, self.window, w, h);
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
@@ -382,15 +395,15 @@ pub const Window = struct {
             2 => { // KeyPress
                 const keycode = event[1];
                 const state = get16(event[28..30]);
-                return .{ .key = .{
-                    .key = self.keymap.translate(keycode, state),
-                    .modifiers = .{
-                        .shift = state & 1 != 0,
-                        .control = state & 4 != 0,
-                        .alt = state & 8 != 0 or state & 0x80 != 0,
-                        .super = state & 64 != 0,
-                    },
-                } };
+                const modifiers = shared_event.Modifiers{
+                    .shift = state & 1 != 0,
+                    .control = state & 4 != 0,
+                    .alt = state & 8 != 0 or state & 0x80 != 0,
+                    .super = state & 64 != 0,
+                };
+                const key = self.translateComposed(keycode, state, modifiers.control);
+                if (key == null) return .other;
+                return .{ .key = .{ .key = key.?, .modifiers = modifiers } };
             },
             4, 5, 6 => {
                 const raw_x: i32 = @as(i16, @bitCast(get16(event[24..26])));
@@ -458,8 +471,13 @@ pub const Window = struct {
                 return .other;
             },
             33 => { // ClientMessage
-                if (get32(event[8..12]) == self.conn.wm_protocols and
-                    get32(event[12..16]) == self.conn.wm_delete_window) return .close;
+                if (get32(event[8..12]) == self.conn.wm_protocols) {
+                    const protocol = get32(event[12..16]);
+                    if (protocol == self.conn.wm_delete_window) return .close;
+                    if (self.conn.net_wm_ping != 0 and protocol == self.conn.net_wm_ping) {
+                        self.replyNetWmPing(event) catch {};
+                    }
+                }
                 return .other;
             },
             else => return .other,
@@ -491,7 +509,17 @@ pub const Window = struct {
     }
 
     fn convertAndRead(self: *Window, gpa: std.mem.Allocator, selection: u32) !?[]u8 {
-        try convertSelection(&self.conn, self.window, selection, self.conn.utf8_string, self.conn.utf8_string);
+        if (self.convertTarget(gpa, selection, self.conn.utf8_string, self.conn.utf8_string)) |text| {
+            if (text) |bytes| {
+                if (bytes.len != 0) return bytes;
+                gpa.free(bytes);
+            }
+        } else |_| {}
+        return self.convertTarget(gpa, selection, atom_string, atom_string);
+    }
+
+    fn convertTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32, property: u32) !?[]u8 {
+        try convertSelection(&self.conn, self.window, selection, target, property);
         var attempts: u16 = 0;
         while (attempts < 64) : (attempts += 1) {
             var raw: [32]u8 = undefined;
@@ -500,12 +528,64 @@ pub const Window = struct {
             if (kind == 31) {
                 if (get32(raw[8..12]) != self.window) continue;
                 if (get32(raw[20..24]) == 0) return null;
-                return try self.readSelectionProperty(gpa, self.conn.utf8_string);
+                return try self.readSelectionProperty(gpa, property);
             }
             _ = self.handleProtocolEvent(raw);
             if (kind == 0) return error.X11ServerError;
         }
         return error.ClipboardTimeout;
+    }
+
+    fn translateComposed(self: *Window, keycode: u8, state: u16, control: bool) ?Key {
+        const sym = self.keymap.keysym(keycode, state);
+        if (control) {
+            self.compose.reset();
+            return keysymToKey(sym);
+        }
+        if (xkb.deadForX11(sym)) |dead| {
+            return switch (self.compose.feedDead(dead)) {
+                .pending => null,
+                .char => |ch| .{ .char = ch },
+            };
+        }
+        if (sym == xkb.x11_multi_key) {
+            _ = self.compose.feedMulti();
+            return null;
+        }
+        const key = keysymToKey(sym);
+        return switch (key) {
+            .escape => blk: {
+                self.compose.reset();
+                break :blk .escape;
+            },
+            .char => |ch| switch (self.compose.feedChar(ch)) {
+                .pending => null,
+                .char => |out| .{ .char = out },
+            },
+            else => blk: {
+                self.compose.reset();
+                break :blk key;
+            },
+        };
+    }
+
+    fn replyNetWmPing(self: *Window, event: [32]u8) !void {
+        var req: [44]u8 = @splat(0);
+        req[0] = 25; // SendEvent
+        req[1] = 1; // propagate
+        put16(req[2..4], 11);
+        put32(req[4..8], self.conn.screen.root);
+        put32(req[8..12], (1 << 19) | (1 << 20)); // SubstructureNotify | SubstructureRedirect
+        req[12] = 33;
+        req[13] = 32;
+        put32(req[16..20], self.window);
+        put32(req[20..24], get32(event[8..12]));
+        put32(req[24..28], get32(event[12..16]));
+        put32(req[28..32], get32(event[16..20]));
+        put32(req[32..36], get32(event[20..24]));
+        put32(req[36..40], get32(event[24..28]));
+        put32(req[40..44], get32(event[28..32]));
+        try writeAll(&self.conn, &req);
     }
 
     fn readSelectionProperty(self: *Window, gpa: std.mem.Allocator, property: u32) !?[]u8 {
@@ -805,8 +885,10 @@ fn createGc(conn: *XConn, gc: u32, drawable: u32) !void {
 fn installWmClose(conn: *XConn, window: u32) !void {
     conn.wm_protocols = try internAtom(conn, "WM_PROTOCOLS");
     conn.wm_delete_window = try internAtom(conn, "WM_DELETE_WINDOW");
+    if (conn.net_wm_ping == 0) conn.net_wm_ping = try internAtom(conn, "_NET_WM_PING");
 
-    var req: [28]u8 = @splat(0);
+    const atoms = [_]u32{ conn.wm_delete_window, conn.net_wm_ping };
+    var req: [32]u8 = @splat(0);
     req[0] = 18;
     req[1] = prop_replace;
     put16(req[2..4], @intCast(req.len / 4));
@@ -814,14 +896,16 @@ fn installWmClose(conn: *XConn, window: u32) !void {
     put32(req[8..12], conn.wm_protocols);
     put32(req[12..16], atom_atom);
     req[16] = 32;
-    put32(req[20..24], 1);
-    put32(req[24..28], conn.wm_delete_window);
+    put32(req[20..24], atoms.len);
+    put32(req[24..28], atoms[0]);
+    put32(req[28..32], atoms[1]);
     try writeAll(conn, &req);
 }
 
 fn setTitle(conn: *XConn, window: u32, title: []const u8) !void {
     if (title.len == 0 or title.len > 255) return;
     try changePropertyBytes(conn, window, atom_wm_name, atom_string, title);
+    try changePropertyBytes(conn, window, atom_wm_icon_name, atom_string, title);
     if (conn.net_wm_name != 0 and conn.utf8_string != 0) {
         try changePropertyBytes(conn, window, conn.net_wm_name, conn.utf8_string, title);
     }
@@ -842,6 +926,26 @@ fn setNetWmPid(conn: *XConn, window: u32) !void {
     if (conn.net_wm_pid == 0) return;
     const pid: u32 = @intCast(@max(0, linux.getpid()));
     try changeProperty32(conn, window, conn.net_wm_pid, atom_cardinal, &.{pid});
+}
+
+fn setWmHints(conn: *XConn, window: u32) !void {
+    var hints: [9]u32 = @splat(0);
+    hints[0] = 1 | 2; // InputHint | StateHint
+    hints[1] = 1; // input
+    hints[2] = 1; // NormalState
+    try changeProperty32(conn, window, atom_wm_hints, atom_wm_hints, &hints);
+}
+
+fn setNetWmWindowType(conn: *XConn, window: u32) !void {
+    if (conn.net_wm_window_type == 0 or conn.net_wm_window_type_normal == 0) return;
+    try changeProperty32(conn, window, conn.net_wm_window_type, atom_atom, &.{conn.net_wm_window_type_normal});
+}
+
+fn setClientMachine(conn: *XConn, window: u32) !void {
+    var hostname_buf: [64]u8 = undefined;
+    const hostname = localHostname(&hostname_buf);
+    if (hostname.len == 0) return;
+    try changePropertyBytes(conn, window, atom_wm_client_machine, atom_string, hostname);
 }
 
 fn internAtom(conn: *XConn, name: []const u8) !u32 {
@@ -1107,6 +1211,9 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.incr = try internAtom(conn, "INCR");
     conn.net_wm_name = try internAtom(conn, "_NET_WM_NAME");
     conn.net_wm_pid = try internAtom(conn, "_NET_WM_PID");
+    conn.net_wm_ping = try internAtom(conn, "_NET_WM_PING");
+    conn.net_wm_window_type = try internAtom(conn, "_NET_WM_WINDOW_TYPE");
+    conn.net_wm_window_type_normal = try internAtom(conn, "_NET_WM_WINDOW_TYPE_NORMAL");
 }
 
 fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8) !u32 {
@@ -1540,6 +1647,12 @@ test "x11 setup parser reads spec offsets (vendor@16, screens@20, keycodes@26)" 
     try std.testing.expectEqual(@as(u8, 8), setup.min_keycode);
     try std.testing.expectEqual(@as(u8, 255), setup.max_keycode);
     try std.testing.expectEqual(@as(u32, 0xffffff), setup.screen.white_pixel);
+}
+
+test "x11 dead keysyms stay non-character until the composer combines them" {
+    try std.testing.expectEqual(Key.other, keysymToKey(0xfe51));
+    try std.testing.expectEqual(xkb.Dead.acute, xkb.deadForX11(0xfe51).?);
+    try std.testing.expectEqual(xkb.x11_multi_key, @as(u32, 0xff20));
 }
 
 test "keysymToKey maps printable ASCII and editing keys" {

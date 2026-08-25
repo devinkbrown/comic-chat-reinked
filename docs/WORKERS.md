@@ -75,10 +75,11 @@ hash.
 - `src/client/` owns portable view/input behavior shared by native backends.
 - The direct Wayland keyboard path parses the compositor's real XKB keymap
   (`src/platform/xkb.zig`, base + Shift + AltGr/ISO Level3 when a third
-  keysym is listed) and implements client-side key-repeat (`repeat_info` +
-  `Window.checkRepeat`), with a US evdev fallback before the first keymap
-  arrives or for an out-of-scope keysym. Do not claim compose/dead-key
-  sequences or a full input-method editor — committed IME text uses
+  keysym is listed), implements client-side key-repeat (`repeat_info` +
+  `Window.checkRepeat`), and applies a bounded dead-key / Multi_key composer
+  for common European accents. A US evdev fallback remains before the first
+  keymap arrives or for an out-of-scope keysym. Do not claim a full
+  input-method editor or locale compose files — committed IME text uses
   text-input-v3 when advertised; see `xkb.zig`'s module doc for the exact
   parsing scope.
 

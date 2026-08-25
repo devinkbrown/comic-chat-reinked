@@ -50,13 +50,63 @@ pub fn environValue(env: []const u8, name: []const u8) ?[]const u8 {
 /// `GDK_SCALE` / `QT_SCALE_FACTOR` win because XWayland often leaves `Xft.dpi`
 /// at 96 while the desktop is already 2×.
 pub fn scaleFromEnvironment(env: []const u8) ?u32 {
-    if (environValue(env, "GDK_SCALE")) |value| {
-        if (parsePositiveScale(value)) |scale| return scale;
-    }
+    if (gdkScaleProduct(env)) |scale| return scale;
     if (environValue(env, "QT_SCALE_FACTOR")) |value| {
         if (parsePositiveScale(value)) |scale| return scale;
     }
+    if (environValue(env, "QT_SCREEN_SCALE_FACTORS")) |value| {
+        if (parseQtScreenScale(value)) |scale| return scale;
+    }
     return null;
+}
+
+fn gdkScaleProduct(env: []const u8) ?u32 {
+    const gdk = environValue(env, "GDK_SCALE");
+    const dpi = environValue(env, "GDK_DPI_SCALE");
+    if (gdk == null and dpi == null) return null;
+    var product: f32 = 1;
+    var any = false;
+    if (gdk) |value| {
+        if (parseScaleFactor(value, 1, 8)) |scale| {
+            product *= scale;
+            any = true;
+        }
+    }
+    if (dpi) |value| {
+        if (parseScaleFactor(value, 0.25, 8)) |scale| {
+            product *= scale;
+            any = true;
+        }
+    }
+    if (!any) return null;
+    return clampScale(product);
+}
+
+fn parseQtScreenScale(value: []const u8) ?u32 {
+    var rest = std.mem.trim(u8, value, " \t");
+    if (std.mem.indexOfScalar(u8, rest, ';')) |semi| rest = rest[0..semi];
+    if (std.mem.lastIndexOfScalar(u8, rest, '=')) |eq| rest = rest[eq + 1 ..];
+    return parsePositiveScale(rest);
+}
+
+fn parseScaleFactor(value: []const u8, min: f32, max: f32) ?f32 {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.fmt.parseInt(u32, trimmed, 10)) |scale| {
+        const as_float: f32 = @floatFromInt(scale);
+        if (as_float < min or as_float > max) return null;
+        return as_float;
+    } else |_| {}
+    const parsed = std.fmt.parseFloat(f32, trimmed) catch return null;
+    if (parsed < min or parsed > max) return null;
+    return parsed;
+}
+
+fn clampScale(value: f32) ?u32 {
+    if (value < 1 or value > 8) return null;
+    const rounded: u32 = @intFromFloat(@round(value));
+    if (rounded < 1 or rounded > 8) return null;
+    return rounded;
 }
 
 pub fn scaleFromDpi(dpi: u32) u32 {
@@ -339,6 +389,8 @@ test "integer scale comes from toolkit env, then rounded DPI" {
     try std.testing.expectEqual(@as(u32, 2), scaleFromEnvironment("QT_SCALE_FACTOR=1\x00GDK_SCALE=2\x00").?);
     try std.testing.expectEqual(@as(u32, 3), scaleFromEnvironment("QT_SCALE_FACTOR=2.6\x00").?);
     try std.testing.expect(scaleFromEnvironment("GDK_SCALE=0\x00") == null);
+    try std.testing.expectEqual(@as(u32, 1), scaleFromEnvironment("GDK_SCALE=2\x00GDK_DPI_SCALE=0.5\x00").?);
+    try std.testing.expectEqual(@as(u32, 2), scaleFromEnvironment("QT_SCREEN_SCALE_FACTORS=DP-1=2;HDMI-1=1\x00").?);
     try std.testing.expectEqual(@as(u32, 1), scaleFromDpi(96));
     try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(144));
     try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(192));

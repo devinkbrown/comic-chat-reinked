@@ -266,14 +266,16 @@ backdrops, face expressions, and fonts are embedded in the binaries.
 pass a host and/or channel to override either default.
 
 The direct Wayland client parses compositor XKB keymaps (base, Shift, and
-AltGr/ISO Level3 when listed), implements configured key repeat, accepts
-committed compose/dead-key/IME text through text-input-v3, maps native touch
-contacts to the shared interaction contract, tracks entered `wl_output`
-integer scale plus `wp_fractional_scale_v1`/`wp_viewporter` when advertised,
-and copies through `wl_data_device` and `zwp_primary_selection_v1`.
+AltGr/ISO Level3 when listed), implements configured key repeat, composes
+bounded dead-key / Multi_key accents, accepts committed IME text through
+text-input-v3, maps native touch contacts to the shared interaction contract,
+tracks entered `wl_output` integer scale plus `wp_fractional_scale_v1` /
+`wp_viewporter` when advertised, and copies through `wl_data_device` and
+`zwp_primary_selection_v1`.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
-`GDK_SCALE`/`Xft.dpi`, and owns ICCCM CLIPBOARD+PRIMARY including INCR.
+`GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi`, owns ICCCM CLIPBOARD+PRIMARY including
+INCR with a STRING fallback, and replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,
 scaled presentation, keyboard/pointer input, IRC traffic, and clean close

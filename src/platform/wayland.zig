@@ -14,9 +14,10 @@
 //! unlike X11's native auto-repeat) is implemented via `repeat_info` +
 //! `Window.checkRepeat`.
 //!
-//! Committed compose/dead-key/IME text is received through text-input-v3 when
-//! the compositor advertises it. The bounded XKB parser remains the fallback
-//! for compositors without that protocol. Fractional buffer scale uses
+//! Dead-key and Multi_key sequences are composed client-side from the keymap
+//! names (see `xkb.Compose`). Committed IME text is received through
+//! text-input-v3 when the compositor advertises it; IME preedit suppresses
+//! the keyboard/compose path. Fractional buffer scale uses
 //! `wp_fractional_scale_v1` + `wp_viewporter` when advertised, otherwise the
 //! entered `wl_output` integer scale. Clipboard uses `wl_data_device` and
 //! `zwp_primary_selection_v1` when present.
@@ -383,6 +384,7 @@ pub const Window = struct {
     axis_have_discrete: bool = false,
     ime_composing: bool = false,
     last_committed: ?u21 = null,
+    compose: xkb.Compose = .{},
     committed_text: std.ArrayList(u21) = .empty,
     committed_text_offset: usize = 0,
 
@@ -1064,6 +1066,7 @@ pub const Window = struct {
                 self.super_right = false;
                 self.held_key_code = null;
                 self.ime_composing = false;
+                self.compose.reset();
                 return null;
             },
             3 => { // key(serial, time, key, state)
@@ -1104,11 +1107,17 @@ pub const Window = struct {
                 if (is_modifier) return null;
                 if (self.ime_composing or self.last_committed != null) return null;
                 const shifted = self.shift_left or self.shift_right;
+                const control = self.control_left or self.control_right;
+                const key = self.translateComposed(code, shifted, control);
+                if (key == null) {
+                    self.held_key_code = null;
+                    return null;
+                }
                 return .{ .key = .{
-                    .key = self.translateKey(code, shifted),
+                    .key = key.?,
                     .modifiers = .{
                         .shift = shifted,
-                        .control = self.control_left or self.control_right,
+                        .control = control,
                         .alt = self.alt_left or self.alt_right,
                         .super = self.super_left or self.super_right,
                     },
@@ -1175,6 +1184,53 @@ pub const Window = struct {
             }
         }
         return evdevToKey(code, shift, self.caps_lock);
+    }
+
+    fn currentKeysymName(self: *const Window, code: u32, shift: bool) ?[]const u8 {
+        const keymap = self.xkb_keymap orelse return null;
+        if (self.alt_right) {
+            if (keymap.keysymForLevel(code, .level3)) |name| return name;
+        }
+        if (keymap.keysymFor(code, false)) |base_keysym| {
+            const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
+            const effective_shift = if (is_letter) (shift != self.caps_lock) else shift;
+            return keymap.keysymFor(code, effective_shift);
+        }
+        return null;
+    }
+
+    fn translateComposed(self: *Window, code: u32, shift: bool, control: bool) ?Key {
+        if (control) {
+            self.compose.reset();
+            return self.translateKey(code, shift);
+        }
+        if (self.currentKeysymName(code, shift)) |name| {
+            if (xkb.deadForKeysym(name)) |dead| {
+                return switch (self.compose.feedDead(dead)) {
+                    .pending => null,
+                    .char => |ch| .{ .char = ch },
+                };
+            }
+            if (xkb.isMultiKeyName(name)) {
+                _ = self.compose.feedMulti();
+                return null;
+            }
+        }
+        const key = self.translateKey(code, shift);
+        return switch (key) {
+            .escape => blk: {
+                self.compose.reset();
+                break :blk .escape;
+            },
+            .char => |ch| switch (self.compose.feedChar(ch)) {
+                .pending => null,
+                .char => |out| .{ .char = out },
+            },
+            else => blk: {
+                if (self.compose.active()) self.compose.reset();
+                break :blk key;
+            },
+        };
     }
 
     fn outputIndex(self: *const Window, id: u32) ?usize {
@@ -1278,13 +1334,21 @@ pub const Window = struct {
     }
 
     fn receiveOffer(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16) ![]u8 {
+        if (self.receiveMime(gpa, offer_id, opcode, "text/plain;charset=utf-8")) |text| {
+            if (text.len != 0) return text;
+            gpa.free(text);
+        } else |_| {}
+        return self.receiveMime(gpa, offer_id, opcode, "text/plain");
+    }
+
+    fn receiveMime(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16, mime: []const u8) ![]u8 {
         var fds: [2]i32 = undefined;
         switch (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
             .SUCCESS => {},
             else => return error.PipeFailed,
         }
         defer _ = linux.close(fds[0]);
-        try sendReceiveFd(&self.conn, offer_id, opcode, "text/plain;charset=utf-8", fds[1]);
+        try sendReceiveFd(&self.conn, offer_id, opcode, mime, fds[1]);
         _ = linux.close(fds[1]);
         try self.roundtrip();
         return try readFdAll(gpa, fds[0], max_clipboard_bytes);
