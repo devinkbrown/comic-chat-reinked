@@ -8178,6 +8178,8 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expectEqualStrings("#locked", parseJoinSlash("/JOIN #locked secret").?.channel);
     try std.testing.expectEqualStrings("secret", parseJoinSlash("/join #locked secret").?.key);
     try std.testing.expectEqualStrings("", parseJoinSlash("/join").?.channel);
+    try std.testing.expectEqualStrings("My channel rules", slashRestAfter("SET #zig DESC My channel rules", 3));
+    try std.testing.expectEqualStrings("was abusive", slashRestAfter("DENY alice was abusive", 2));
     try std.testing.expect(!isOnyxServiceReply("WHOIS"));
     try std.testing.expect(!isOnyxServiceReply("MOTD"));
     try std.testing.expect(!isOnyxServiceSlash("users"));
