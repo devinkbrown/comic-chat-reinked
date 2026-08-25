@@ -33,9 +33,12 @@
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
 //! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
 //! when advertised. When a decoration manager is advertised, the client
-//! requests server-side decorations (`zxdg` or `xdg`). xdg-shell records
+//! requests server-side decorations (`zxdg` or `xdg`) and re-requests SSD
+//! once if the compositor configures client-side mode. xdg-shell records
 //! maximized/fullscreen/tiled/suspended configure states and advertises
-//! the same min/max size as the X11 WM hints. High-resolution
+//! the same min/max size as the X11 WM hints. `present()` attaches a
+//! `wl_surface.frame` callback and coalesces later commits until it fires.
+//! High-resolution
 //! `axis_value120` wheels snap to the same logical ticks as discrete axes.
 
 const std = @import("std");
@@ -65,6 +68,7 @@ const buffer_destroy: u16 = 0;
 const surface_destroy: u16 = 0;
 const surface_attach: u16 = 1;
 const surface_damage: u16 = 2;
+const surface_frame: u16 = 3;
 const surface_commit: u16 = 6;
 const surface_set_buffer_scale: u16 = 8;
 const surface_damage_buffer: u16 = 9;
@@ -132,6 +136,7 @@ const data_offer_set_actions: u16 = 4;
 const dnd_action_copy: u32 = 1;
 const decoration_get_toplevel: u16 = 1;
 const decoration_set_mode: u16 = 1;
+const decoration_mode_client_side: u32 = 1;
 const decoration_mode_server_side: u32 = 2;
 const text_input_destroy: u16 = 0;
 const text_input_enable: u16 = 1;
@@ -385,6 +390,15 @@ const Connection = struct {
     }
 };
 
+const PendingPresent = struct {
+    buffer_id: u32,
+    pixel_w: u32,
+    pixel_h: u32,
+    logical_w: u32,
+    logical_h: u32,
+    use_viewport: bool,
+};
+
 const Buffer = struct {
     id: u32,
     width: u32,
@@ -487,6 +501,10 @@ pub const Window = struct {
     icon_buffer: ?Buffer = null,
     decoration_manager_id: u32 = 0,
     decoration_id: u32 = 0,
+    decoration_mode: u32 = 0,
+    decoration_retry: bool = false,
+    frame_callback_id: u32 = 0,
+    pending_present: ?PendingPresent = null,
     last_serial: u32 = 0,
     clipboard_text: []u8 = &.{},
     axis_have_discrete: bool = false,
@@ -764,25 +782,76 @@ pub const Window = struct {
         scaleNearestTo(destination, pixels, w, h, pixel_w, pixel_h);
         buffer.busy = true;
 
-        if (self.compositor_version >= 3) {
-            try sendOneU32(&self.conn, self.surface_id, surface_set_buffer_scale, if (dims.use_viewport) 1 else self.output_scale);
+        const pending = PendingPresent{
+            .buffer_id = buffer.id,
+            .pixel_w = pixel_w,
+            .pixel_h = pixel_h,
+            .logical_w = w,
+            .logical_h = h,
+            .use_viewport = dims.use_viewport,
+        };
+        if (self.frame_callback_id != 0) {
+            if (self.pending_present) |old| {
+                if (old.buffer_id != pending.buffer_id) self.unbusyBuffer(old.buffer_id);
+            }
+            self.pending_present = pending;
+            return;
         }
-        if (dims.use_viewport) {
+        try self.attachAndCommit(pending);
+        self.requestFrame();
+    }
+
+    fn attachAndCommit(self: *Window, pending: PendingPresent) !void {
+        if (self.compositor_version >= 3) {
+            try sendOneU32(&self.conn, self.surface_id, surface_set_buffer_scale, if (pending.use_viewport) 1 else self.output_scale);
+        }
+        if (pending.use_viewport) {
             try sendTwoU32(
                 &self.conn,
                 self.viewport_id,
                 viewport_set_destination,
-                @bitCast(@as(i32, @intCast(w))),
-                @bitCast(@as(i32, @intCast(h))),
+                @bitCast(@as(i32, @intCast(pending.logical_w))),
+                @bitCast(@as(i32, @intCast(pending.logical_h))),
             );
         }
-        try sendAttach(&self.conn, self.surface_id, buffer.id);
+        try sendAttach(&self.conn, self.surface_id, pending.buffer_id);
         if (self.compositor_version >= 4) {
-            try sendDamage(&self.conn, self.surface_id, surface_damage_buffer, pixel_w, pixel_h);
+            try sendDamage(&self.conn, self.surface_id, surface_damage_buffer, pending.pixel_w, pending.pixel_h);
         } else {
-            try sendDamage(&self.conn, self.surface_id, surface_damage, w, h);
+            try sendDamage(&self.conn, self.surface_id, surface_damage, pending.logical_w, pending.logical_h);
         }
         try sendEmpty(&self.conn, self.surface_id, surface_commit);
+    }
+
+    fn requestFrame(self: *Window) void {
+        if (self.frame_callback_id != 0) return;
+        const callback = self.conn.allocId() catch return;
+        sendOneU32(&self.conn, self.surface_id, surface_frame, callback) catch return;
+        self.frame_callback_id = callback;
+    }
+
+    fn finishFrameCallback(self: *Window) void {
+        self.frame_callback_id = 0;
+        const pending = self.pending_present orelse return;
+        self.pending_present = null;
+        self.attachAndCommit(pending) catch {
+            self.unbusyBuffer(pending.buffer_id);
+            return;
+        };
+        self.requestFrame();
+    }
+
+    fn unbusyBuffer(self: *Window, buffer_id: u32) void {
+        for (self.buffers.items) |*buffer| {
+            if (buffer.id == buffer_id) {
+                buffer.busy = false;
+                return;
+            }
+        }
+    }
+
+    fn shouldDeferPresent(frame_callback_id: u32) bool {
+        return frame_callback_id != 0;
     }
 
     fn bufferDimensions(self: *const Window, logical_w: u32, logical_h: u32) struct { w: u32, h: u32, use_viewport: bool } {
@@ -966,6 +1035,21 @@ pub const Window = struct {
         }
         if (self.touch_id != 0 and msg.object == self.touch_id) {
             return try self.touchEvent(msg.opcode, msg.body);
+        }
+        if (self.frame_callback_id != 0 and msg.object == self.frame_callback_id) {
+            self.finishFrameCallback();
+            return null;
+        }
+        if (self.decoration_id != 0 and msg.object == self.decoration_id) {
+            if (msg.opcode == 0 and msg.body.len >= 4) {
+                const mode = get32(msg.body);
+                self.decoration_mode = mode;
+                if (decorationModeIsClientSide(mode) and !self.decoration_retry) {
+                    self.decoration_retry = true;
+                    sendOneU32(&self.conn, self.decoration_id, decoration_set_mode, decoration_mode_server_side) catch {};
+                }
+            }
+            return null;
         }
         if (msg.object == self.xdg_toplevel_id) {
             switch (msg.opcode) {
@@ -2284,6 +2368,10 @@ fn shouldSuppressImeDuplicate(last: ?u21, key: Key) bool {
     };
 }
 
+fn decorationModeIsClientSide(mode: u32) bool {
+    return mode == decoration_mode_client_side;
+}
+
 fn configureContainsState(bytes: []const u8, state: u32) bool {
     var off: usize = 0;
     while (off + 4 <= bytes.len) : (off += 4) {
@@ -3111,5 +3199,16 @@ test "xdg toplevel configure states include activated" {
     var suspended: [4]u8 = undefined;
     put32(suspended[0..4], xdg_state_suspended);
     try std.testing.expect(configureContainsState(&suspended, xdg_state_suspended));
+}
+
+test "Wayland present defers a second commit until the frame callback" {
+    try std.testing.expect(!Window.shouldDeferPresent(0));
+    try std.testing.expect(Window.shouldDeferPresent(7));
+}
+
+test "decoration configure retries SSD only for client-side mode" {
+    try std.testing.expect(decorationModeIsClientSide(decoration_mode_client_side));
+    try std.testing.expect(!decorationModeIsClientSide(decoration_mode_server_side));
+    try std.testing.expect(!decorationModeIsClientSide(0));
 }
 const pointer_release: u16 = 1;

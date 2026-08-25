@@ -13,11 +13,15 @@
 //!     13–14, MappingNotify refresh that does not drop queued events, and
 //!     bounded dead-key/Multi_key compose plus optional XCompose locale
 //!     tables; compose resets on FocusOut), integer HiDPI scale (env +
-//!     `Xft.dpi`, refreshed on root `RESOURCE_MANAGER` changes, with the
+//!     `Xft.dpi`, refreshed on root `RESOURCE_MANAGER` changes, RANDR
+//!     `ScreenChangeNotify` plus cached per-output millimeters when the
+//!     window moves, VisibilityNotify (skip Expose while fully obscured),
+//!     with the
 //!     core cursor and physical WM size hints reinstalled), ICCCM
 //!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
 //!     including `text/plain;charset=utf8`, `text/uri-list`, and
-//!     `UTF16_STRING`, TIMESTAMP, clipboard-manager handoff, UTF-8 BOM
+//!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests,
+//!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
 //!     `WM_STATE` / `WM_CHANGE_STATE` iconic tracking, a scaled
@@ -43,7 +47,10 @@ const event_button_press: u32 = 1 << 2;
 const event_button_release: u32 = 1 << 3;
 const event_pointer_motion: u32 = 1 << 6;
 const event_exposure: u32 = 1 << 15;
+const event_visibility_change: u32 = 1 << 16;
 const event_structure: u32 = 1 << 17;
+const visibility_fully_obscured: u8 = 2;
+const max_randr_crtcs: usize = 8;
 const event_focus_change: u32 = 1 << 21;
 const event_property_change: u32 = 1 << 22;
 
@@ -135,6 +142,8 @@ const XConn = struct {
     utf16_string: u32 = 0,
     wm_state: u32 = 0,
     wm_change_state: u32 = 0,
+    multiple: u32 = 0,
+    atom_pair: u32 = 0,
     randr_opcode: u8 = 0,
     randr_event: u8 = 0,
 
@@ -144,6 +153,16 @@ const XConn = struct {
         self.next_id += 1;
         return (self.screen.resource_base & ~self.resource_mask) | slot;
     }
+};
+
+const ScaleSource = enum { env, xft, physical, fallback };
+
+const RandrCrtc = struct {
+    x: i32 = 0,
+    y: i32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    width_mm: u32 = 0,
 };
 
 const Screen = struct {
@@ -250,6 +269,7 @@ pub fn keysymToKey(sym: u32) Key {
     if (xkb.charForX11Cyrillic(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Latin2(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Greek(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Hebrew(sym)) |ch| return .{ .char = ch };
     return switch (sym) {
         0xff08 => .backspace,
         0xff09 => .tab,
@@ -325,6 +345,10 @@ pub const Window = struct {
     cursor_id: u32,
     wm_urgent: bool,
     wm_hidden: bool,
+    fully_obscured: bool,
+    scale_source: ScaleSource,
+    randr_crtcs: [max_randr_crtcs]RandrCrtc,
+    randr_crtc_count: u8,
     pending_events: std.ArrayList([32]u8),
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
@@ -381,6 +405,10 @@ pub const Window = struct {
             .cursor_id = 0,
             .wm_urgent = false,
             .wm_hidden = false,
+            .fully_obscured = false,
+            .scale_source = .fallback,
+            .randr_crtcs = @splat(.{}),
+            .randr_crtc_count = 0,
             .pending_events = .empty,
         };
         self.loadComposeFromEnv(env);
@@ -394,7 +422,9 @@ pub const Window = struct {
 
         try internSessionAtoms(&self.conn);
         enableRandr(&self.conn) catch {};
-        self.scale = try detectScale(gpa, &self.conn, env, &self.pending_events);
+        const detected = try detectScale(gpa, &self.conn, env, &self.pending_events, 0, 0, 0, self.randrCrtcs());
+        self.scale = detected.scale;
+        self.scale_source = detected.source;
         const pixel_w = try std.math.mul(u32, w, self.scale);
         const pixel_h = try std.math.mul(u32, h, self.scale);
         if (pixel_w > std.math.maxInt(u16) or pixel_h > std.math.maxInt(u16)) return error.InvalidWindowSize;
@@ -423,6 +453,8 @@ pub const Window = struct {
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
         try mapWindow(&self.conn, self.window);
+        self.refreshRandrCrtcs();
+        if (self.refreshOutputScale()) |_| {}
         return self;
     }
 
@@ -595,28 +627,46 @@ pub const Window = struct {
             19 => { // MapNotify
                 self.wm_hidden = false;
                 self.readWmState();
+                self.refreshRandrCrtcs();
+                if (self.refreshOutputScale()) |ev| return ev;
+                return .other;
+            },
+            15 => { // VisibilityNotify
+                const was_obscured = self.fully_obscured;
+                self.fully_obscured = visibilityIsFullyObscured(event[8]);
+                if (was_obscured and !self.fully_obscured) return .expose;
                 return .other;
             },
             34 => { // MappingNotify
                 if (event[1] == 1) self.refreshKeymap();
                 return .other;
             },
-            12 => return .expose,
+            12 => { // Expose
+                if (self.fully_obscured) return .other;
+                return .expose;
+            },
             17 => return .close, // DestroyNotify
             22 => { // ConfigureNotify
                 const pixel_w: u32 = get16(event[20..22]);
                 const pixel_h: u32 = get16(event[22..24]);
                 if (pixel_w == 0 or pixel_h == 0) return .other;
-                const w = physicalToLogical(pixel_w, self.scale);
-                const h = physicalToLogical(pixel_h, self.scale);
-                if (w == self.width and h == self.height and pixel_w == self.pixel_width and pixel_h == self.pixel_height) {
-                    return .other;
-                }
+                const size_changed = pixel_w != self.pixel_width or pixel_h != self.pixel_height;
                 self.pixel_width = pixel_w;
                 self.pixel_height = pixel_h;
-                self.width = w;
-                self.height = h;
-                return .{ .resize = .{ .w = w, .h = h } };
+                const scale_ev = self.refreshOutputScale();
+                const w = physicalToLogical(pixel_w, self.scale);
+                const h = physicalToLogical(pixel_h, self.scale);
+                if (w != self.width or h != self.height) {
+                    self.width = w;
+                    self.height = h;
+                    return .{ .resize = .{ .w = w, .h = h } };
+                }
+                if (size_changed) {
+                    self.width = w;
+                    self.height = h;
+                    return .{ .resize = .{ .w = w, .h = h } };
+                }
+                return scale_ev orelse .other;
             },
             28 => { // PropertyNotify
                 const window = get32(event[4..8]);
@@ -979,10 +1029,14 @@ pub const Window = struct {
         var served: u32 = 0;
         if (ours and property != 0) {
             if (target == self.conn.targets) {
-                var atoms: [12]u32 = undefined;
+                var atoms: [14]u32 = undefined;
                 var n: usize = 0;
                 atoms[n] = self.conn.targets;
                 n += 1;
+                if (self.conn.multiple != 0) {
+                    atoms[n] = self.conn.multiple;
+                    n += 1;
+                }
                 if (self.conn.timestamp != 0) {
                     atoms[n] = self.conn.timestamp;
                     n += 1;
@@ -1019,6 +1073,10 @@ pub const Window = struct {
                 }
                 try changePropertyAtoms(&self.conn, requestor, property, atoms[0..n]);
                 served = property;
+            } else if (target == self.conn.multiple) {
+                if (self.serveMultiple(requestor, property)) {
+                    served = property;
+                } else |_| {}
             } else if (target == self.conn.timestamp) {
                 const stamp = if (self.clipboard_time != 0) self.clipboard_time else 1;
                 try changeProperty32(&self.conn, requestor, property, atom_integer, &.{stamp});
@@ -1134,9 +1192,25 @@ pub const Window = struct {
     fn refreshScale(self: *Window) ?Event {
         const env = services.readEnviron(self.gpa) catch return null;
         defer self.gpa.free(env);
-        const new_scale = detectScale(self.gpa, &self.conn, env, &self.pending_events) catch return null;
-        if (new_scale == self.scale) return null;
+        const detected = detectScale(self.gpa, &self.conn, env, &self.pending_events, self.window, self.pixel_width, self.pixel_height, self.randrCrtcs()) catch return null;
+        return self.applyScale(detected.scale, detected.source, env);
+    }
+
+    fn refreshOutputScale(self: *Window) ?Event {
+        if (self.scale_source == .env or self.scale_source == .xft) return null;
+        const env = services.readEnviron(self.gpa) catch return null;
+        defer self.gpa.free(env);
+        const scale = scaleFromCachedCrtcs(self.gpa, &self.conn, self.window, self.pixel_width, self.pixel_height, self.randrCrtcs(), &self.pending_events) orelse return null;
+        return self.applyScale(scale, .physical, env);
+    }
+
+    fn applyScale(self: *Window, new_scale: u32, source: ScaleSource, env: []const u8) ?Event {
+        if (new_scale == self.scale) {
+            self.scale_source = source;
+            return null;
+        }
         self.scale = new_scale;
+        self.scale_source = source;
         if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
         self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, new_scale, env, &self.pending_events) catch 0;
         setSizeHints(&self.conn, self.window, self.pixel_width, self.pixel_height, new_scale) catch {};
@@ -1146,6 +1220,66 @@ pub const Window = struct {
         self.width = w;
         self.height = h;
         return .{ .resize = .{ .w = w, .h = h } };
+    }
+
+    fn randrCrtcs(self: *const Window) []const RandrCrtc {
+        return self.randr_crtcs[0..self.randr_crtc_count];
+    }
+
+    fn refreshRandrCrtcs(self: *Window) void {
+        const next = fetchRandrCrtcs(self.gpa, &self.conn, &self.pending_events) catch return;
+        self.randr_crtcs = next.crtcs;
+        self.randr_crtc_count = next.count;
+    }
+
+    fn serveMultiple(self: *Window, requestor: u32, property: u32) !void {
+        if (self.conn.multiple == 0 or self.conn.atom_pair == 0 or property == 0) return error.ClipboardUnavailable;
+        const bytes = try getWindowProperty(self.gpa, &self.conn, requestor, property, &self.pending_events);
+        defer self.gpa.free(bytes);
+        if (bytes.len < 8 or bytes.len % 8 != 0 or bytes.len > 64 * 4) return error.BadMultiple;
+        var pairs: [32]u32 = undefined;
+        const count = bytes.len / 4;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            pairs[i] = get32(bytes[i * 4 ..][0..4]);
+        }
+        var pair_i: usize = 0;
+        while (pair_i + 1 < count) : (pair_i += 2) {
+            const pair_target = pairs[pair_i];
+            var pair_prop = pairs[pair_i + 1];
+            if (pair_prop == 0) pair_prop = pair_target;
+            if (!self.servePairTarget(requestor, pair_target, pair_prop)) {
+                pairs[pair_i + 1] = 0;
+            }
+        }
+        try changeProperty32(&self.conn, requestor, property, self.conn.atom_pair, pairs[0..count]);
+    }
+
+    fn servePairTarget(self: *Window, requestor: u32, target: u32, property: u32) bool {
+        if (property == 0 or target == 0) return false;
+        if (target == self.conn.targets) {
+            var atoms: [4]u32 = undefined;
+            var n: usize = 0;
+            atoms[n] = self.conn.targets;
+            n += 1;
+            if (self.conn.utf8_string != 0) {
+                atoms[n] = self.conn.utf8_string;
+                n += 1;
+            }
+            atoms[n] = atom_string;
+            n += 1;
+            changePropertyAtoms(&self.conn, requestor, property, atoms[0..n]) catch return false;
+            return true;
+        }
+        if (target == self.conn.timestamp) {
+            const stamp = if (self.clipboard_time != 0) self.clipboard_time else 1;
+            changeProperty32(&self.conn, requestor, property, atom_integer, &.{stamp}) catch return false;
+            return true;
+        }
+        if (!isClipboardTextTarget(&self.conn, target)) return false;
+        if (self.clipboard_text.len > max_clipboard_bytes) return false;
+        changePropertyBytes(&self.conn, requestor, property, target, self.clipboard_text) catch return false;
+        return true;
     }
 
     fn handleXdndEnter(self: *Window, event: [32]u8) void {
@@ -1332,6 +1466,7 @@ pub const Window = struct {
         const dims = randrScreenChangeSize(event);
         if (dims.width_px != 0) self.conn.screen.width_px = dims.width_px;
         if (dims.width_mm != 0) self.conn.screen.width_mm = dims.width_mm;
+        self.refreshRandrCrtcs();
         return self.refreshScale() orelse .other;
     }
 
@@ -1484,8 +1619,8 @@ fn createWindow(conn: *XConn, window: u32, w: u16, h: u16) !void {
         conn.screen.white_pixel,
         conn.screen.black_pixel,
         event_key_press | event_button_press | event_button_release |
-            event_pointer_motion | event_exposure | event_structure |
-            event_focus_change | event_property_change,
+            event_pointer_motion | event_exposure | event_visibility_change |
+            event_structure | event_focus_change | event_property_change,
     };
     const value_mask = cw_back_pixel | cw_border_pixel | cw_event_mask;
     var req: [44]u8 = @splat(0);
@@ -1932,6 +2067,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.utf16_string = try internAtom(conn, "UTF16_STRING");
     conn.wm_state = try internAtom(conn, "WM_STATE");
     conn.wm_change_state = try internAtom(conn, "WM_CHANGE_STATE");
+    conn.multiple = try internAtom(conn, "MULTIPLE");
+    conn.atom_pair = try internAtom(conn, "ATOM_PAIR");
 }
 
 fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
@@ -2072,14 +2209,163 @@ fn sendXdndClientMessage(conn: *XConn, dest: u32, typ: u32, data: [5]u32) !void 
     try writeAll(conn, &req);
 }
 
-fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8, stash: ?*std.ArrayList([32]u8)) !u32 {
-    if (services.scaleFromEnvironment(env)) |scale| return scale;
+fn detectScale(
+    gpa: std.mem.Allocator,
+    conn: *XConn,
+    env: []const u8,
+    stash: ?*std.ArrayList([32]u8),
+    window: u32,
+    pixel_w: u32,
+    pixel_h: u32,
+    crtcs: []const RandrCrtc,
+) !struct { scale: u32, source: ScaleSource } {
+    if (services.scaleFromEnvironment(env)) |scale| return .{ .scale = scale, .source = .env };
     if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager, stash)) |resources| {
         defer gpa.free(resources);
-        if (services.parseXftDpi(resources)) |dpi| return services.scaleFromDpi(dpi);
+        if (services.parseXftDpi(resources)) |dpi| return .{ .scale = services.scaleFromDpi(dpi), .source = .xft };
     } else |_| {}
-    if (services.scaleFromScreenMm(conn.screen.width_px, conn.screen.width_mm)) |scale| return scale;
-    return 1;
+    if (scaleFromCachedCrtcs(gpa, conn, window, pixel_w, pixel_h, crtcs, stash)) |scale| return .{ .scale = scale, .source = .physical };
+    if (services.scaleFromScreenMm(conn.screen.width_px, conn.screen.width_mm)) |scale| {
+        return .{ .scale = scale, .source = .physical };
+    }
+    return .{ .scale = 1, .source = .fallback };
+}
+
+fn scaleFromCachedCrtcs(gpa: std.mem.Allocator, conn: *XConn, window: u32, pixel_w: u32, pixel_h: u32, crtcs: []const RandrCrtc, stash: ?*std.ArrayList([32]u8)) ?u32 {
+    if (window == 0 or crtcs.len == 0) return null;
+    const pos = translateWindowToRoot(gpa, conn, window, stash) orelse return null;
+    const x = pos.x + @divTrunc(@as(i32, @intCast(pixel_w)), 2);
+    const y = pos.y + @divTrunc(@as(i32, @intCast(pixel_h)), 2);
+    const crtc = crtcContaining(crtcs, x, y) orelse crtcContaining(crtcs, pos.x, pos.y) orelse return null;
+    return services.scaleFromScreenMm(crtc.width, crtc.width_mm);
+}
+
+fn visibilityIsFullyObscured(state: u8) bool {
+    return state == visibility_fully_obscured;
+}
+
+fn crtcContains(crtc: RandrCrtc, x: i32, y: i32) bool {
+    if (crtc.width == 0 or crtc.height == 0) return false;
+    return x >= crtc.x and y >= crtc.y and
+        x < crtc.x + @as(i32, @intCast(crtc.width)) and
+        y < crtc.y + @as(i32, @intCast(crtc.height));
+}
+
+fn crtcContaining(crtcs: []const RandrCrtc, x: i32, y: i32) ?RandrCrtc {
+    for (crtcs) |crtc| {
+        if (crtcContains(crtc, x, y)) return crtc;
+    }
+    return null;
+}
+
+fn translateWindowToRoot(gpa: std.mem.Allocator, conn: *XConn, window: u32, stash: ?*std.ArrayList([32]u8)) ?struct { x: i32, y: i32 } {
+    var req: [16]u8 = @splat(0);
+    req[0] = 40; // TranslateCoordinates
+    put16(req[2..4], 4);
+    put32(req[4..8], window);
+    put32(req[8..12], conn.screen.root);
+    writeAll(conn, &req) catch return null;
+    const reply = readReplyMaybeStashing(gpa, conn, stash) catch return null;
+    if (reply[1] == 0) return null;
+    const x: i32 = @as(i16, @bitCast(get16(reply[12..14])));
+    const y: i32 = @as(i16, @bitCast(get16(reply[14..16])));
+    return .{ .x = x, .y = y };
+}
+
+fn readReplyExtra(gpa: std.mem.Allocator, conn: *XConn, stash: ?*std.ArrayList([32]u8)) !struct { header: [32]u8, extra: []u8 } {
+    const header = try readReplyMaybeStashing(gpa, conn, stash);
+    const extra_words = get32(header[4..8]);
+    if (extra_words > 256 * 1024) return error.ReplyTooLarge;
+    const extra = try gpa.alloc(u8, extra_words * 4);
+    errdefer gpa.free(extra);
+    if (extra.len != 0) try readExact(conn, extra);
+    return .{ .header = header, .extra = extra };
+}
+
+fn fetchRandrCrtcs(gpa: std.mem.Allocator, conn: *XConn, stash: ?*std.ArrayList([32]u8)) !struct { crtcs: [max_randr_crtcs]RandrCrtc, count: u8 } {
+    var result: [max_randr_crtcs]RandrCrtc = @splat(.{});
+    if (conn.randr_opcode == 0) return .{ .crtcs = result, .count = 0 };
+    var req: [8]u8 = @splat(0);
+    req[0] = conn.randr_opcode;
+    req[1] = 25; // GetScreenResourcesCurrent
+    put16(req[2..4], 2);
+    put32(req[4..8], conn.screen.root);
+    try writeAll(conn, &req);
+    const resources = try readReplyExtra(gpa, conn, stash);
+    defer gpa.free(resources.extra);
+    const n_crtcs = get16(resources.header[16..18]);
+    const config_ts = get32(resources.header[12..16]);
+    const crtc_bytes = @as(usize, n_crtcs) * 4;
+    if (resources.extra.len < crtc_bytes) return .{ .crtcs = result, .count = 0 };
+    var count: u8 = 0;
+    var i: usize = 0;
+    while (i < n_crtcs and count < max_randr_crtcs) : (i += 1) {
+        const crtc_id = get32(resources.extra[i * 4 ..][0..4]);
+        if (crtc_id == 0) continue;
+        if (randrCrtcInfo(gpa, conn, crtc_id, config_ts, stash)) |crtc| {
+            result[count] = crtc;
+            count += 1;
+        } else |_| {}
+    }
+    return .{ .crtcs = result, .count = count };
+}
+
+fn randrCrtcInfo(
+    gpa: std.mem.Allocator,
+    conn: *XConn,
+    crtc: u32,
+    config_ts: u32,
+    stash: ?*std.ArrayList([32]u8),
+) !RandrCrtc {
+    var req: [12]u8 = @splat(0);
+    req[0] = conn.randr_opcode;
+    req[1] = 20; // GetCrtcInfo
+    put16(req[2..4], 3);
+    put32(req[4..8], crtc);
+    put32(req[8..12], config_ts);
+    try writeAll(conn, &req);
+    const reply = try readReplyExtra(gpa, conn, stash);
+    defer gpa.free(reply.extra);
+    if (reply.header[1] != 0) return error.CrtcUnavailable;
+    const mode = get32(reply.header[16..20]);
+    const width: u32 = get16(reply.header[12..14]);
+    const height: u32 = get16(reply.header[14..16]);
+    if (mode == 0 or width == 0 or height == 0) return error.CrtcDisabled;
+    const x: i32 = @as(i16, @bitCast(get16(reply.header[8..10])));
+    const y: i32 = @as(i16, @bitCast(get16(reply.header[10..12])));
+    var width_mm: u32 = 0;
+    const n_outputs = get16(reply.header[24..26]);
+    if (n_outputs != 0 and reply.extra.len >= 4) {
+        const output = get32(reply.extra[0..4]);
+        width_mm = randrOutputWidthMm(gpa, conn, output, config_ts, stash) catch 0;
+    }
+    return .{
+        .x = x,
+        .y = y,
+        .width = width,
+        .height = height,
+        .width_mm = width_mm,
+    };
+}
+
+fn randrOutputWidthMm(
+    gpa: std.mem.Allocator,
+    conn: *XConn,
+    output: u32,
+    config_ts: u32,
+    stash: ?*std.ArrayList([32]u8),
+) !u32 {
+    var req: [12]u8 = @splat(0);
+    req[0] = conn.randr_opcode;
+    req[1] = 9; // GetOutputInfo
+    put16(req[2..4], 3);
+    put32(req[4..8], output);
+    put32(req[8..12], config_ts);
+    try writeAll(conn, &req);
+    const reply = try readReplyExtra(gpa, conn, stash);
+    defer gpa.free(reply.extra);
+    if (reply.header[1] != 0) return error.OutputUnavailable;
+    return get32(reply.header[12..16]);
 }
 
 fn localHostname(buf: []u8) []const u8 {
@@ -2779,6 +3065,8 @@ test "Keymap.translate uses group bits 13-14 without reading the next key" {
     try std.testing.expectEqual(Key{ .char = 0x0151 }, keysymToKey(0x01f5));
     try std.testing.expectEqual(Key{ .char = 0x03b1 }, keysymToKey(0x07e1));
     try std.testing.expectEqual(Key{ .char = 0x03a9 }, keysymToKey(0x07d8));
+    try std.testing.expectEqual(Key{ .char = 0x05d0 }, keysymToKey(0x0ce0));
+    try std.testing.expectEqual(Key{ .char = 0x05ea }, keysymToKey(0x0cfa));
 
     var pair = [_]u32{ 'a', 'A', 'b', 'B' };
     const km2 = Keymap{ .syms = &pair, .per = 2, .min = 8 };
@@ -2793,4 +3081,29 @@ test "RANDR ScreenChangeNotify size fields sit at spec offsets 24 and 28" {
     const dims = randrScreenChangeSize(event);
     try std.testing.expectEqual(@as(u16, 3840), dims.width_px);
     try std.testing.expectEqual(@as(u16, 600), dims.width_mm);
+}
+
+test "VisibilityNotify fully-obscured state is 2" {
+    try std.testing.expect(!visibilityIsFullyObscured(0));
+    try std.testing.expect(!visibilityIsFullyObscured(1));
+    try std.testing.expect(visibilityIsFullyObscured(2));
+}
+
+test "cached RANDR CRTC hit-test uses inclusive origin and exclusive max" {
+    const left = RandrCrtc{ .x = 0, .y = 0, .width = 1920, .height = 1080, .width_mm = 340 };
+    const right = RandrCrtc{ .x = 1920, .y = 0, .width = 2560, .height = 1440, .width_mm = 300 };
+    const crtcs = [_]RandrCrtc{ left, right };
+    try std.testing.expect(crtcContains(left, 10, 10));
+    try std.testing.expect(!crtcContains(left, 1920, 10));
+    try std.testing.expectEqual(@as(u32, 2560), crtcContaining(&crtcs, 2000, 20).?.width);
+    try std.testing.expect(crtcContaining(&crtcs, -1, 0) == null);
+}
+
+test "MULTIPLE atom-pair payload is an even list of 32-bit atoms" {
+    var pairs: [8]u8 = undefined;
+    put32(pairs[0..4], 100);
+    put32(pairs[4..8], 200);
+    try std.testing.expectEqual(@as(usize, 0), pairs.len % 8);
+    try std.testing.expectEqual(@as(u32, 100), get32(pairs[0..4]));
+    try std.testing.expectEqual(@as(u32, 200), get32(pairs[4..8]));
 }

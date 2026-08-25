@@ -275,7 +275,9 @@ the shared interaction contract, tracks entered `wl_output` integer scale
 plus `wp_fractional_scale_v1` / `wp_viewporter` and
 `wl_surface.preferred_buffer_scale` when advertised, advertises xdg-shell
 min/max size, tracks maximized/fullscreen/tiled/suspended configure states,
-requests server-side decorations when advertised, copies through
+requests server-side decorations when advertised (retrying SSD once if
+the compositor configures client-side mode), coalesces `present()`
+commits behind `wl_surface.frame`, copies through
 `wl_data_device` and `zwp_primary_selection_v1` (including
 `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
 decode including receive-only `text/plain;charset=utf-16`, and CR/LF
@@ -286,11 +288,12 @@ a `wp_cursor_shape_v1` or scaled shm pointer, and sets
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
-`RESOURCE_MANAGER` property changes, RANDR `ScreenChangeNotify`, and screen
+`RESOURCE_MANAGER` property changes, RANDR `ScreenChangeNotify`, cached
+per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, `UTF16_STRING`, and `TIMESTAMP` (preferring the owner's
+`text/uri-list`, `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
 TARGETS list), accepts XDND text/`file:`
 drops as typed keys, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE`, honors keyboard group bits and

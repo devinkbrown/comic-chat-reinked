@@ -14,7 +14,7 @@
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
 //! group-2 character of a non-US or dual-layout keymap actually correct.
 //! Named Central European letters, X11 Latin-2 keysyms (`0x01a0`–`0x01ff`),
-//! and Greek letters resolve to characters without an IME. A
+//! Greek letters, and Hebrew letters resolve to characters without an IME. A
 //! bounded dead-key / Multi_key composer plus optional XCompose locale
 //! tables (`~/.XCompose`,
 //! `XCOMPOSEFILE`, `%L`) cover European accents (see `Compose`). A
@@ -710,6 +710,73 @@ const named_greek_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Greek_omega", 0x03c9 },
 });
 
+const named_hebrew_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "hebrew_aleph", 0x05d0 },
+    .{ "hebrew_bet", 0x05d1 },
+    .{ "hebrew_beth", 0x05d1 },
+    .{ "hebrew_gimel", 0x05d2 },
+    .{ "hebrew_gimmel", 0x05d2 },
+    .{ "hebrew_dalet", 0x05d3 },
+    .{ "hebrew_daleth", 0x05d3 },
+    .{ "hebrew_he", 0x05d4 },
+    .{ "hebrew_waw", 0x05d5 },
+    .{ "hebrew_zain", 0x05d6 },
+    .{ "hebrew_zayin", 0x05d6 },
+    .{ "hebrew_chet", 0x05d7 },
+    .{ "hebrew_het", 0x05d7 },
+    .{ "hebrew_tet", 0x05d8 },
+    .{ "hebrew_teth", 0x05d8 },
+    .{ "hebrew_yod", 0x05d9 },
+    .{ "hebrew_finalkaph", 0x05da },
+    .{ "hebrew_kaph", 0x05db },
+    .{ "hebrew_lamed", 0x05dc },
+    .{ "hebrew_finalmem", 0x05dd },
+    .{ "hebrew_mem", 0x05de },
+    .{ "hebrew_finalnun", 0x05df },
+    .{ "hebrew_nun", 0x05e0 },
+    .{ "hebrew_samech", 0x05e1 },
+    .{ "hebrew_samekh", 0x05e1 },
+    .{ "hebrew_ayin", 0x05e2 },
+    .{ "hebrew_finalpe", 0x05e3 },
+    .{ "hebrew_pe", 0x05e4 },
+    .{ "hebrew_finalzade", 0x05e5 },
+    .{ "hebrew_zade", 0x05e6 },
+    .{ "hebrew_qoph", 0x05e7 },
+    .{ "hebrew_kuf", 0x05e7 },
+    .{ "hebrew_qof", 0x05e7 },
+    .{ "hebrew_resh", 0x05e8 },
+    .{ "hebrew_shin", 0x05e9 },
+    .{ "hebrew_taw", 0x05ea },
+    .{ "hebrew_taf", 0x05ea },
+    .{ "Hebrew_aleph", 0x05d0 },
+    .{ "Hebrew_bet", 0x05d1 },
+    .{ "Hebrew_gimel", 0x05d2 },
+    .{ "Hebrew_dalet", 0x05d3 },
+    .{ "Hebrew_he", 0x05d4 },
+    .{ "Hebrew_waw", 0x05d5 },
+    .{ "Hebrew_zain", 0x05d6 },
+    .{ "Hebrew_chet", 0x05d7 },
+    .{ "Hebrew_tet", 0x05d8 },
+    .{ "Hebrew_yod", 0x05d9 },
+    .{ "Hebrew_finalkaph", 0x05da },
+    .{ "Hebrew_kaph", 0x05db },
+    .{ "Hebrew_lamed", 0x05dc },
+    .{ "Hebrew_finalmem", 0x05dd },
+    .{ "Hebrew_mem", 0x05de },
+    .{ "Hebrew_finalnun", 0x05df },
+    .{ "Hebrew_nun", 0x05e0 },
+    .{ "Hebrew_samech", 0x05e1 },
+    .{ "Hebrew_ayin", 0x05e2 },
+    .{ "Hebrew_finalpe", 0x05e3 },
+    .{ "Hebrew_pe", 0x05e4 },
+    .{ "Hebrew_finalzade", 0x05e5 },
+    .{ "Hebrew_zade", 0x05e6 },
+    .{ "Hebrew_qoph", 0x05e7 },
+    .{ "Hebrew_resh", 0x05e8 },
+    .{ "Hebrew_shin", 0x05e9 },
+    .{ "Hebrew_taw", 0x05ea },
+});
+
 /// ISO-8859-2 codepoints for X11 Latin-2 keysyms `0x01a0`–`0x01ff`.
 const latin2_01a0 = [_]u21{
     0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
@@ -737,6 +804,7 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     if (named_cyrillic_keysyms.get(name)) |character| return character;
     if (named_latin_ext_keysyms.get(name)) |character| return character;
     if (named_greek_keysyms.get(name)) |character| return character;
+    if (named_hebrew_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
         if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return null;
@@ -770,6 +838,13 @@ pub fn charForX11Greek(sym: u32) ?u21 {
     if (sym == 0x07f2) return 0x03c3;
     if (sym == 0x07f3) return 0x03c2;
     if (sym >= 0x07f4 and sym <= 0x07f9) return @intCast(0x03c4 + (sym - 0x07f4));
+    return null;
+}
+
+/// Legacy X11 Hebrew keysyms. `0x0ce0`–`0x0cfa` map onto U+05D0–U+05EA.
+pub fn charForX11Hebrew(sym: u32) ?u21 {
+    if (sym == 0x0cdf) return 0x2017;
+    if (sym >= 0x0ce0 and sym <= 0x0cfa) return @intCast(0x05d0 + (sym - 0x0ce0));
     return null;
 }
 
@@ -1356,6 +1431,12 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(@as(u21, 0x03a3), charForKeysym("Greek_SIGMA").?);
     try std.testing.expectEqual(@as(u21, 0x03c2), charForX11Greek(0x07f3).?);
     try std.testing.expectEqual(@as(u21, 0x03a9), charForX11Greek(0x07d8).?);
+    try std.testing.expectEqual(@as(u21, 0x05d0), charForKeysym("hebrew_aleph").?);
+    try std.testing.expectEqual(@as(u21, 0x05ea), charForKeysym("hebrew_taw").?);
+    try std.testing.expectEqual(@as(u21, 0x05d0), charForX11Hebrew(0x0ce0).?);
+    try std.testing.expectEqual(@as(u21, 0x05da), charForX11Hebrew(0x0cea).?);
+    try std.testing.expectEqual(@as(u21, 0x05ea), charForX11Hebrew(0x0cfa).?);
+    try std.testing.expectEqual(@as(u21, 0x2017), charForX11Hebrew(0x0cdf).?);
     try std.testing.expectEqual(NamedKey.backspace, namedKeyForKeysym("BackSpace").?);
     try std.testing.expectEqual(NamedKey.page_up, namedKeyForKeysym("Prior").?);
     try std.testing.expectEqual(@as(?NamedKey, null), namedKeyForKeysym("nonexistent_keysym_name"));

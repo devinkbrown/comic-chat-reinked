@@ -94,9 +94,12 @@ hash.
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
   strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
   stashes events that arrive during GetProperty. Clipboard text normalizes
-  CR/LF to LF. Central European Latin-2, Greek, and named keysyms type
-  without an IME. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
-  property changes, listens for RANDR `ScreenChangeNotify`, falls back to
+  CR/LF to LF. Central European Latin-2, Greek, Hebrew, and named keysyms type
+  without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
+  requests. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
+  property changes, listens for RANDR `ScreenChangeNotify`, caches
+  per-output millimeters so a window move can refresh integer scale,
+  skips Expose while `VisibilityFullyObscured`, falls back to
   screen millimeter size, and reinstalls the scaled cursor plus physical
   WM size hints. Wayland binds `wl_compositor` at v6 when advertised,
   honors `preferred_buffer_scale`, and can derive integer scale from
@@ -104,7 +107,9 @@ hash.
   arms client-side repeat for a held non-modifier key. Both backends track maximized/fullscreen
   window state; X11 also tracks `_NET_WM_STATE_HIDDEN` and ICCCM
   `WM_STATE` / `WM_CHANGE_STATE`, and Wayland records tiled/suspended xdg
-  states. When advertised, Wayland requests server-side decorations. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
+  states. When advertised, Wayland requests server-side decorations and
+  re-requests SSD once if the compositor configures client-side mode.
+  `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
   `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
   `xdg_toplevel_icon_v1` when advertised. See `xkb.zig` and
