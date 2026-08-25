@@ -123,7 +123,9 @@ hash.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
   `xdg_toplevel_icon_v1` when advertised. Wayland consumes
   `XDG_ACTIVATION_TOKEN` via `xdg_activation_v1`; X11 sets `_NET_STARTUP_ID`
-  from that token or `DESKTOP_STARTUP_ID`. See `xkb.zig` and
+  from that token or `DESKTOP_STARTUP_ID` and sends the startup-notification
+  remove ClientMessage after MapWindow. EnterNotify reinstalls the scaled
+  cursor. See `xkb.zig` and
   `compose_file.zig` for the exact parsing scope. Do not add an AT-SPI bus
   or a Wayland→X11 fallback.
 

@@ -34,6 +34,28 @@ pub fn readEnviron(gpa: std.mem.Allocator) ![]u8 {
 
 /// Desktop startup token used to take focus after a launcher/file-manager open.
 /// `XDG_ACTIVATION_TOKEN` wins; `DESKTOP_STARTUP_ID` is the older X11 name.
+/// NUL-terminated `remove: ID=<token>` body for X11 `_NET_STARTUP_INFO`.
+/// Spaces and backslashes in the token are escaped with a leading `\`.
+pub fn startupRemoveMessage(token: []const u8, buf: []u8) ?[]const u8 {
+    const prefix = "remove: ID=";
+    if (prefix.len >= buf.len) return null;
+    @memcpy(buf[0..prefix.len], prefix);
+    var n: usize = prefix.len;
+    for (token) |c| {
+        if ((c == ' ' or c == '\\') and n + 1 >= buf.len) return null;
+        if (c == ' ' or c == '\\') {
+            buf[n] = '\\';
+            n += 1;
+        }
+        if (n + 1 >= buf.len) return null;
+        buf[n] = c;
+        n += 1;
+    }
+    if (n >= buf.len) return null;
+    buf[n] = 0;
+    return buf[0 .. n + 1];
+}
+
 pub fn startupToken(env: []const u8) ?[]const u8 {
     if (environValue(env, "XDG_ACTIVATION_TOKEN")) |token| {
         if (token.len != 0) return token;
@@ -823,6 +845,13 @@ test "startupToken prefers XDG_ACTIVATION_TOKEN then DESKTOP_STARTUP_ID" {
     );
     try std.testing.expectEqualStrings("start/0", startupToken("DESKTOP_STARTUP_ID=start/0\x00").?);
     try std.testing.expect(startupToken("DISPLAY=:0\x00XDG_ACTIVATION_TOKEN=\x00") == null);
+}
+
+test "startupRemoveMessage encodes a NUL-terminated remove ID" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("remove: ID=tok-1\x00", startupRemoveMessage("tok-1", &buf).?);
+    try std.testing.expectEqualStrings("remove: ID=foo\\ bar\x00", startupRemoveMessage("foo bar", &buf).?);
+    try std.testing.expect(startupRemoveMessage("tok-1", buf[0..8]) == null);
 }
 
 test "integer scale comes from toolkit env, then rounded DPI" {

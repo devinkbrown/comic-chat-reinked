@@ -306,7 +306,8 @@ MappingNotify without dropping queued events, resets compose on FocusOut,
 installs a scaled core pointer and `_NET_WM_ICON`, raises urgency on
 `notify` until FocusIn, hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
 present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
-`_NET_WM_USER_TIME`, `_NET_STARTUP_ID`, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
+`_NET_WM_USER_TIME`, `_NET_STARTUP_ID` plus a startup-notification remove
+after map, EnterNotify cursor restore, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
 replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,

@@ -29,7 +29,9 @@
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
 //!     `WM_STATE` / `WM_CHANGE_STATE` iconic tracking, a scaled
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
-//!     FocusIn), EWMH ping/type/icon name/user time/startup id/allowed actions,
+//!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
+//!     `_NET_STARTUP_INFO` remove after MapWindow, EnterNotify cursor restore,
+//!     allowed actions,
 //!     WM_TAKE_FOCUS, WM_LOCALE_NAME, physical WM size hints, and
 //!     resize/close events, suitable for a poll(2)-driven client event loop.
 
@@ -48,6 +50,7 @@ const input_output = 1;
 const event_key_press: u32 = 1 << 0;
 const event_button_press: u32 = 1 << 2;
 const event_button_release: u32 = 1 << 3;
+const event_enter_window: u32 = 1 << 4;
 const event_pointer_motion: u32 = 1 << 6;
 const event_exposure: u32 = 1 << 15;
 const event_visibility_change: u32 = 1 << 16;
@@ -111,6 +114,8 @@ const XConn = struct {
     net_wm_icon_name: u32 = 0,
     net_wm_pid: u32 = 0,
     net_startup_id: u32 = 0,
+    net_startup_info: u32 = 0,
+    net_startup_info_begin: u32 = 0,
     net_wm_ping: u32 = 0,
     net_wm_user_time: u32 = 0,
     net_wm_window_type: u32 = 0,
@@ -470,6 +475,7 @@ pub const Window = struct {
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
         try mapWindow(&self.conn, self.window);
+        sendStartupRemove(&self.conn, self.window, env) catch {};
         self.refreshRandrCrtcs();
         if (self.refreshOutputScale()) |_| {}
         return self;
@@ -637,6 +643,11 @@ pub const Window = struct {
                     .button = button,
                     .clicks = clicks,
                 } };
+            },
+            7 => { // EnterNotify
+                self.noteUserTime(get32(event[4..8]));
+                if (self.cursor_id != 0) defineCursor(&self.conn, self.window, self.cursor_id) catch {};
+                return .other;
             },
             9 => { // FocusIn
                 self.clearAttention();
@@ -1662,7 +1673,7 @@ fn createWindow(conn: *XConn, window: u32, w: u16, h: u16) !void {
         conn.screen.white_pixel,
         conn.screen.black_pixel,
         event_key_press | event_button_press | event_button_release |
-            event_pointer_motion | event_exposure | event_visibility_change |
+            event_enter_window | event_pointer_motion | event_exposure | event_visibility_change |
             event_structure | event_focus_change | event_property_change,
     };
     const value_mask = cw_back_pixel | cw_border_pixel | cw_event_mask;
@@ -1740,6 +1751,38 @@ fn setNetStartupId(conn: *XConn, window: u32, env: []const u8) !void {
     if (token.len > 256) return;
     const typ = if (conn.utf8_string != 0) conn.utf8_string else atom_string;
     try changePropertyBytes(conn, window, conn.net_startup_id, typ, token);
+}
+
+fn sendStartupRemove(conn: *XConn, window: u32, env: []const u8) !void {
+    const token = services.startupToken(env) orelse return;
+    if (conn.net_startup_info_begin == 0 or conn.net_startup_info == 0) return;
+    var buf: [320]u8 = undefined;
+    const message = services.startupRemoveMessage(token, &buf) orelse return;
+    var off: usize = 0;
+    var first = true;
+    while (off < message.len) {
+        var chunk: [20]u8 = @splat(0);
+        const take = @min(20, message.len - off);
+        @memcpy(chunk[0..take], message[off .. off + take]);
+        try sendStartupInfoChunk(conn, window, if (first) conn.net_startup_info_begin else conn.net_startup_info, chunk);
+        first = false;
+        off += take;
+    }
+}
+
+fn sendStartupInfoChunk(conn: *XConn, window: u32, typ: u32, data: [20]u8) !void {
+    var req: [44]u8 = @splat(0);
+    req[0] = 25;
+    req[1] = 1;
+    put16(req[2..4], 11);
+    put32(req[4..8], conn.screen.root);
+    put32(req[8..12], (1 << 19) | (1 << 20));
+    req[12] = 33;
+    req[13] = 8;
+    put32(req[16..20], window);
+    put32(req[20..24], typ);
+    @memcpy(req[24..44], &data);
+    try writeAll(conn, &req);
 }
 
 fn setWmHints(conn: *XConn, window: u32) !void {
@@ -2084,6 +2127,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_icon_name = try internAtom(conn, "_NET_WM_ICON_NAME");
     conn.net_wm_pid = try internAtom(conn, "_NET_WM_PID");
     conn.net_startup_id = try internAtom(conn, "_NET_STARTUP_ID");
+    conn.net_startup_info = try internAtom(conn, "_NET_STARTUP_INFO");
+    conn.net_startup_info_begin = try internAtom(conn, "_NET_STARTUP_INFO_BEGIN");
     conn.net_wm_ping = try internAtom(conn, "_NET_WM_PING");
     conn.net_wm_user_time = try internAtom(conn, "_NET_WM_USER_TIME");
     conn.net_wm_window_type = try internAtom(conn, "_NET_WM_WINDOW_TYPE");
