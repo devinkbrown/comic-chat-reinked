@@ -2247,16 +2247,16 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(1, "Save PDF");
         },
         .connection_features => {
-            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Disconnected");
-            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Not signed in" else "Unavailable");
+            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Offline");
+            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Not signed in" else "Offline");
             try view.setDialogValueAt(2, if (state.ircx_data) "Enabled" else "Not enabled");
             if (client) |connected| {
                 var capabilities: std.ArrayList(u8) = .empty;
                 defer capabilities.deinit(view.gpa);
                 try connected.appendEnabledCapabilities(&capabilities, view.gpa);
-                try view.setDialogValueAt(3, if (capabilities.items.len == 0) "No capabilities enabled" else capabilities.items);
+                try view.setDialogValueAt(3, if (capabilities.items.len == 0) "None yet" else capabilities.items);
             } else {
-                try view.setDialogValueAt(3, "Not negotiated");
+                try view.setDialogValueAt(3, "Waiting on the wire");
             }
         },
         .rule_sets => {
@@ -2712,7 +2712,7 @@ fn applyDialogAction(
                 return;
             };
             const operation = value;
-            const event = std.mem.trim(u8, view.dialogValueAt(1), " \t");
+            const event = cc.client.dialogs.eventNameToken(std.mem.trim(u8, view.dialogValueAt(1), " \t"));
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
                 view.setDialogNotice("The optional event filter must be one word.");
@@ -2722,7 +2722,7 @@ fn applyDialogAction(
                 try client.eventList(event);
             } else {
                 if (event.len == 0 or std.mem.indexOfAny(u8, event, " \r\n\x00") != null) {
-                    view.setDialogNotice("Enter one event name.");
+                    view.setDialogNotice("Choose one event.");
                     return;
                 }
                 try client.eventChange(std.ascii.eqlIgnoreCase(operation, "Add"), event, mask);
@@ -4353,7 +4353,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             },
             .ircx_events => {
                 try view.setDialogValueAt(0, "List");
-                try view.setDialogValueAt(1, "CHANNEL");
+                try view.setDialogValueAt(1, "Room");
             },
             .file_transfer => {
                 try view.setDialogValueAt(0, "Receive offer");

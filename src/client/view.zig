@@ -206,6 +206,8 @@ pub const View = struct {
             .members => switch (key) {
                 .up => self.shell.moveMemberSelection(member_count, -1),
                 .down => self.shell.moveMemberSelection(member_count, 1),
+                .page_up => self.shell.moveMemberSelection(member_count, -5),
+                .page_down => self.shell.moveMemberSelection(member_count, 5),
                 .home => if (member_count > 0) self.shell.selectMember(0),
                 .end => if (member_count > 0) self.shell.selectMember(member_count - 1),
                 else => return false,
@@ -896,6 +898,8 @@ pub const View = struct {
                 } else if (dialogs.fieldAcceptsText(id, self.dialog_field) and editor.text().len < 512) {
                     try editor.insert(ch);
                     self.dialog_notice = "";
+                } else if (ch == ' ' and dialogs.fields(id)[self.dialog_field].kind == .choice) {
+                    self.cycleDialogChoice(id, self.dialog_field);
                 }
             },
             .backspace => if (dialogs.fieldAcceptsText(id, self.dialog_field) and self.dialog_action_focus == null and !self.dialog_browse_focus) {
@@ -2044,7 +2048,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Create room",
             3 => "Room properties",
             4 => "Set away message",
-            5 => "Message of the day",
+            5 => "Bulletin",
             6 => "Named properties",
             7 => "Room access",
             8 => "Operator events",
@@ -2068,7 +2072,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             3 => "Rules",
             4 => "Rule sets",
             5 => "Online notifications",
-            6 => "Online notification users",
+            6 => "Online members",
             else => "About Comic Chat",
         },
         else => "Settings",
@@ -3226,7 +3230,7 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         },
         .connection_features => switch (index) {
             0 => "WIRE",
-            1 => "AUTH",
+            1 => "SIGN",
             2 => "ROOM",
             else => "",
         },
@@ -3275,7 +3279,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
     }
     return switch (id) {
         .setup, .servers => "Verified TLS on 6697 is the Sunday default",
-        .connection_features => if (std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "",
+        .connection_features => if (std.mem.eql(u8, first_value, "Offline") or std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "",
         .room_list => "Search rooms after the wire is live",
         .user_list => "Pick a CAST member after the wire is live",
         .channel, .channel_create => "Join after the wire is live",
@@ -3283,6 +3287,10 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .invite => "Invite after the wire is live",
         .kick, .ban, .room_access, .ircx_properties, .ircx_events => "Moderation after the wire is live",
         .file_transfer => "Offer or accept a file after the wire is live",
+        .call_link => "Send a meeting link after the wire is live",
+        .member_profile => "Request a profile after the wire is live",
+        .notifications, .notification_users => "Watch who comes online after the wire is live",
+        .sound => "Play a sound after the wire is live",
         .personal => "Shown on your CAST card",
         .nickname => "Visible on the Sunday page",
         .away => "Posted while you are away",
@@ -4345,9 +4353,11 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
     try std.testing.expectEqualStrings("Search rooms after the wire is live", dialogHelper(.room_list, ""));
     try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
+    try std.testing.expectEqualStrings("Bulletin", menuItemLabel(4, 5));
     try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
     try std.testing.expectEqualStrings("Operator events", menuItemLabel(4, 8));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
+    try std.testing.expectEqualStrings("Online members", menuItemLabel(6, 6));
     try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 6, true));
     try std.testing.expectEqualStrings("Wire", toolbarHint(0));
@@ -4531,4 +4541,17 @@ test "dialog Home and End jump to the first and last choice" {
     try std.testing.expectEqualStrings("Deny", view.dialogValueAt(1));
     _ = try view.handleDialogKey(.home, .{});
     try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.{ .char = ' ' }, .{});
+    try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
+}
+
+test "member keyboard pages through the CAST" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .members;
+    view.shell.selected_member = 0;
+    try std.testing.expect(view.handleFocusedKey(.page_down, 12));
+    try std.testing.expectEqual(@as(?usize, 5), view.shell.selected_member);
+    try std.testing.expect(view.handleFocusedKey(.page_up, 12));
+    try std.testing.expectEqual(@as(?usize, 0), view.shell.selected_member);
 }
