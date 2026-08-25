@@ -1311,7 +1311,7 @@ const ChatState = struct {
         self.status = std.fmt.bufPrint(
             &self.status_storage,
             "Connection failed ({s}) - click for settings",
-            .{@errorName(err)},
+            .{connectionFailureDetail(err)},
         ) catch "Connection failed - click for settings";
     }
 
@@ -1564,6 +1564,34 @@ fn applyNetworkEvent(event: NetworkEvent, state: *ChatState) bool {
             break :changed true;
         },
     };
+}
+
+fn connectionFailureDetail(err: anyerror) []const u8 {
+    const name = @errorName(err);
+    if (std.mem.indexOf(u8, name, "Tls") != null or std.mem.indexOf(u8, name, "Certificate") != null) return "TLS";
+    if (std.mem.indexOf(u8, name, "Refused") != null) return "refused";
+    if (std.mem.indexOf(u8, name, "TimedOut") != null or std.mem.indexOf(u8, name, "Timeout") != null) return "timeout";
+    if (std.mem.indexOf(u8, name, "Reset") != null) return "reset";
+    if (std.mem.indexOf(u8, name, "Unreachable") != null or std.mem.indexOf(u8, name, "UnknownHost") != null or std.mem.indexOf(u8, name, "Name") != null) return "unreachable";
+    return "wire";
+}
+
+fn shouldPersistViewLayout(action: cc.client.view.Action) bool {
+    return switch (action) {
+        .persist_layout => true,
+        .toolbar => |index| index == 5 or index == 6 or index == 8,
+        else => false,
+    };
+}
+
+fn persistViewLayout(io: std.Io, view: *cc.client.view.View, preferences: *cc.client.preferences.Store, path: []const u8) !void {
+    preferences.setUiLayout(
+        view.shell.content_mode == .text,
+        view.shell.comic_columns,
+        view.shell.show_members,
+        view.shell.member_view == .list,
+    );
+    try preferences.saveFile(io, path);
 }
 
 fn resetChatConnectionState(state: *ChatState) void {
@@ -1904,6 +1932,7 @@ fn handleWindowEvent(
                     else => true,
                 };
                 if (previous_dialog != view.active_dialog) try prefillOpenedDialog(view, transcript, editor.text(), &network.runtime.preferences, state, network.clientPtr());
+                if (shouldPersistViewLayout(action)) try persistViewLayout(io, view, &network.runtime.preferences, network.runtime.preferences_path);
                 break :key_result .{ .keep_running = keep_running, .redraw = true };
             }
             if (view.handleMenuKey(key)) |action| {
@@ -1949,6 +1978,7 @@ fn handleWindowEvent(
                     },
                     else => true,
                 };
+                if (shouldPersistViewLayout(action)) try persistViewLayout(io, view, &network.runtime.preferences, network.runtime.preferences_path);
                 break :key_result .{ .keep_running = keep_running, .redraw = true };
             }
             if (view.handleTranscriptKey(key, transcript.lines.items.len, key_input.modifiers.shift))
@@ -2061,6 +2091,7 @@ fn handleWindowEvent(
                 },
                 else => true,
             };
+            if (shouldPersistViewLayout(action)) try persistViewLayout(io, view, &network.runtime.preferences, network.runtime.preferences_path);
             break :pointer_result .{ .keep_running = keep_running, .redraw = true };
         },
         .other => .{},
@@ -2134,6 +2165,11 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(6, if (view.shell.member_view == .icons) "Icons" else "List");
             try view.setDialogValueAt(7, if (view.status_detailed) "Detailed" else "Compact");
         },
+        .comics_view => {
+            try view.setDialogValueAt(0, if (view.shell.content_mode == .comic) "Comic" else "Text");
+            var comics_panels: [16]u8 = undefined;
+            try view.setDialogValueAt(1, try std.fmt.bufPrint(&comics_panels, "{d} panels", .{view.shell.comic_columns}));
+        },
         .character => {
             for (transcript.roster.items) |member| if (member.is_self and !member.departed) {
                 for (cc.client.dialogs.choiceOptions(.character, 0)) |option| if (std.ascii.eqlIgnoreCase(option, member.avatar)) {
@@ -2203,6 +2239,8 @@ fn prefillOpenedDialog(
                 defer capabilities.deinit(view.gpa);
                 try connected.appendEnabledCapabilities(&capabilities, view.gpa);
                 try view.setDialogValueAt(3, if (capabilities.items.len == 0) "No capabilities enabled" else capabilities.items);
+            } else {
+                try view.setDialogValueAt(3, "Not negotiated");
             }
         },
         .rule_sets => {
@@ -2522,6 +2560,7 @@ fn applyDialogAction(
         .comics_view => {
             view.setContentMode(if (std.ascii.eqlIgnoreCase(view.dialogValueAt(0), "Text")) .text else .comic);
             view.shell.setComicColumns(comicColumnsFromDialog(view.dialogValueAt(1)));
+            try persistViewLayout(io, view, preferences, network.runtime.preferences_path);
         },
         .character => {
             const selected = cc.comic.session.bundledAvatarByName(value) orelse return;
@@ -3340,7 +3379,10 @@ test "connection failures remain actionable" {
     var state: ChatState = .{ .joined = true, .join_requested = true };
     try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state));
     try std.testing.expect(!state.joined);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") != null);
+    try std.testing.expectEqualStrings("refused", connectionFailureDetail(error.ConnectionRefused));
+    try std.testing.expectEqualStrings("TLS", connectionFailureDetail(error.TlsHandshakeFailed));
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "refused") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "Connection failed") != null);
     try std.testing.expect(std.mem.indexOf(u8, state.status, "click for settings") != null);
 }
 

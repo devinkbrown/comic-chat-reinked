@@ -70,6 +70,7 @@ pub const Action = union(enum) {
     send,
     quit,
     connection,
+    persist_layout,
     dialog_accept: dialogs.Id,
     dialog_cancel: dialogs.Id,
     dialog_browse: dialogs.Id,
@@ -1010,11 +1011,11 @@ pub const View = struct {
             },
             .comic_columns_decrease => columns: {
                 self.shell.decreaseComicColumns();
-                break :columns .none;
+                break :columns .persist_layout;
             },
             .comic_columns_increase => columns: {
                 self.shell.increaseComicColumns();
-                break :columns .none;
+                break :columns .persist_layout;
             },
             .transcript => focus: {
                 if (self.selectTranscriptAt(layout.transcript, pointer.x, pointer.y, total_lines)) self.shell.focus = .transcript;
@@ -1768,6 +1769,7 @@ pub const View = struct {
         if (menu == 3 and item >= 5) return .{ .composer_format = item - 5 };
         if (menu == 4 and item == 10) return .child_window;
         self.invokeMenuItem(menu, item);
+        if (menu == 2 and item <= 4) return .persist_layout;
         return .{ .menu = menu };
     }
 };
@@ -1886,8 +1888,26 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             5, 6, 7 => "Type",
             else => "Look",
         },
-        4 => "Room",
-        5 => "Cast",
+        4 => switch (item) {
+            0 => "List",
+            1 => "Join",
+            2 => "New",
+            3 => "Prop",
+            4 => "Away",
+            5 => "MOTD",
+            6, 7, 8 => "IRCX",
+            9 => "Fav",
+            else => "Window",
+        },
+        5 => switch (item) {
+            0 => "List",
+            1 => "Card",
+            2 => "Say",
+            3 => "Room",
+            4, 5 => "Mod",
+            6 => "File",
+            else => "Call",
+        },
         6 => switch (item) {
             0, 1 => "Wire",
             7 => "About",
@@ -2845,13 +2865,22 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
     };
 }
 
-fn dialogDefaultHelper(id: dialogs.Id) []const u8 {
+fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
+    if (first_value.len == 0) {
+        const empty = switch (id) {
+            .recent_files => "No recent conversations yet",
+            .favorite_rooms => "No favorite rooms yet",
+            .connection_features => "Features appear after the wire is live",
+            .motd => "MOTD arrives after the wire is live",
+            else => "",
+        };
+        if (empty.len != 0) return empty;
+    }
     return switch (id) {
         .setup, .servers => "Verified TLS on 6697 is the Sunday default",
-        .connection_features => "Features appear after the wire is live",
+        .connection_features => if (std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "",
         .room_list => "LISTX after the wire is live",
         .user_list => "Pick a CAST member after the wire is live",
-        .motd => "MOTD arrives after the wire is live",
         else => "",
     };
 }
@@ -2985,7 +3014,8 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
     }
 
     ui.drawDialogActionBar(c, rect, dialog_layout.primary.y - 8);
-    const helper = if (notice.len != 0) notice else dialogDefaultHelper(spec.id);
+    const first_value = if (editors.len != 0) editors[0].text() else "";
+    const helper = if (notice.len != 0) notice else dialogHelper(spec.id, first_value);
     if (helper.len != 0) {
         const tone: ui.NoticeTone = if (std.mem.indexOf(u8, helper, "failed") != null or std.mem.indexOf(u8, helper, "Connect before") != null or std.mem.indexOf(u8, helper, "must") != null)
             .failure
@@ -3503,7 +3533,7 @@ test "room tabs reserve the comic density control and keep the active room reach
     try std.testing.expectEqual(Action{ .room_tab = 1 }, first_visible);
     const increase = geometry.comicColumnIncrease(layout);
     const stepper = view.handlePointer(.{ .kind = .down, .x = increase.x + 4, .y = increase.y + 4, .button = .primary }, 0, 0);
-    try std.testing.expectEqual(Action.none, stepper);
+    try std.testing.expectEqual(Action.persist_layout, stepper);
     try std.testing.expectEqual(@as(u8, 5), view.shell.comic_columns);
 }
 
@@ -3844,6 +3874,17 @@ test "room and member menus stay closed until the wire is live" {
     view.active_menu = 4;
     _ = view.handlePointer(.{ .kind = .down, .x = room.x + 10, .y = room.y + 8, .button = .primary }, 0, 0);
     try std.testing.expectEqual(dialogs.Id.room_list, view.active_dialog.?);
+}
+
+test "view menu layout commands ask the host to persist settings" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.active_menu = 2;
+    view.hovered_menu_item = 1;
+    try std.testing.expectEqual(Action.persist_layout, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(shell_mod.ContentMode.text, view.shell.content_mode);
+    try std.testing.expectEqualStrings("Join", menuItemHint(4, 1, true));
+    try std.testing.expectEqualStrings("Wire", menuItemHint(4, 1, false));
 }
 
 test "empty page, CAST, composer, and status copy follow the wire" {
