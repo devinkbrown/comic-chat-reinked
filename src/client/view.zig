@@ -2044,6 +2044,8 @@ pub const View = struct {
                 7 => self.openDialog(.room_access),
                 8 => self.openDialog(.ircx_events),
                 9 => self.openDialog(.favorite_rooms),
+                11 => self.openDialog(.invitation),
+                12 => self.openDialog(.channel_password),
                 else => {},
             },
             5 => switch (item) {
@@ -2058,12 +2060,14 @@ pub const View = struct {
             },
             6 => switch (item) {
                 0 => self.openDialog(.setup),
-                1 => self.openDialog(.connection_features),
-                2 => self.openDialog(.automation),
-                3 => self.openDialog(.rules),
-                4 => self.openDialog(.rule_sets),
-                5 => self.openDialog(.notifications),
-                6 => self.openDialog(.notification_users),
+                1 => self.openDialog(.servers),
+                2 => self.openDialog(.password),
+                3 => self.openDialog(.connection_features),
+                4 => self.openDialog(.automation),
+                5 => self.openDialog(.rules),
+                6 => self.openDialog(.rule_sets),
+                7 => self.openDialog(.notifications),
+                8 => self.openDialog(.notification_users),
                 else => self.openDialog(.about),
             },
             else => {},
@@ -2099,9 +2103,9 @@ fn menuItemCount(menu: u8) u8 {
         0 => 7,
         3 => 8,
         2 => 6,
-        4 => 11,
+        4 => 13,
         5 => 8,
-        6 => 8,
+        6 => 10,
         1 => 4,
         else => 1,
     };
@@ -2153,7 +2157,9 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             7 => "Room access",
             8 => "Room events",
             9 => "Favorite rooms",
-            else => "Open room separately",
+            10 => "Open room separately",
+            11 => "Room invitation",
+            else => "Room password",
         },
         5 => switch (item) {
             0 => "CAST list",
@@ -2167,12 +2173,14 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
         },
         6 => switch (item) {
             0 => "Wire setup",
-            1 => "Wire features",
-            2 => "Automation",
-            3 => "Rules",
-            4 => "Rule sets",
-            5 => "Online notifications",
-            6 => "Online CAST",
+            1 => "Wire list",
+            2 => "Sign in",
+            3 => "Wire features",
+            4 => "Automation",
+            5 => "Rules",
+            6 => "Rule sets",
+            7 => "Online notifications",
+            8 => "Online CAST",
             else => "About Comic Chat",
         },
         else => "Settings",
@@ -2208,6 +2216,8 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             5 => "Bulletin",
             6, 7, 8 => "Room",
             9 => "Favorite",
+            11 => "Invite",
+            12 => "Key",
             else => "Room",
         },
         5 => switch (item) {
@@ -2220,8 +2230,8 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             else => "Call",
         },
         6 => switch (item) {
-            0, 1 => "Wire",
-            7 => "About",
+            0, 1, 2, 3 => "Wire",
+            9 => "About",
             else => "Auto",
         },
         else => "",
@@ -2312,9 +2322,9 @@ fn menuStartsGroup(menu: u8, item: u8) bool {
         1 => item == 3,
         2 => item == 2 or item == 5,
         3 => item == 2 or item == 5,
-        4 => item == 3 or item == 6 or item == 9 or item == 10,
+        4 => item == 3 or item == 6 or item == 9 or item == 10 or item == 11,
         5 => item == 2 or item == 4 or item == 6,
-        6 => item == 2 or item == 5 or item == 7,
+        6 => item == 4 or item == 7 or item == 9,
         else => false,
     };
 }
@@ -3447,7 +3457,8 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         if (empty.len != 0) return empty;
     }
     return switch (id) {
-        .setup, .servers => "Verified TLS on 6697 is the Sunday default",
+        .setup => "Verified TLS on 6697 is the Sunday default",
+        .servers => "Live Onyx nodes use implicit TLS 6697",
         .connection_features => if (std.mem.eql(u8, first_value, "Offline") or std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "What this wire is offering",
         .room_list => "Search by name or size, then join",
         .user_list => "Choose a CAST member from the list",
@@ -3509,7 +3520,8 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .settings => "Ink, Sunday page density, and the CAST",
         .character => "Choose who stands on the page",
         .background => "The paper behind every panel",
-        .setup, .servers => "Server, port, and verified TLS",
+        .setup => "Host, port, and verified TLS",
+        .servers => "Live Onyx wires on implicit TLS 6697",
         .connection_features => "What this wire is offering",
         .password => "Secure account sign-in",
         .sound => "Choose a sound and message",
@@ -4086,11 +4098,11 @@ test "menu keyboard navigation wraps skips disabled commands and activates setti
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.left).?);
     try std.testing.expectEqual(@as(?u8, 6), view.active_menu);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.end).?);
-    try std.testing.expectEqual(@as(?u8, 7), view.hovered_menu_item);
+    try std.testing.expectEqual(@as(?u8, 9), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_up).?);
     try std.testing.expectEqual(@as(?u8, 0), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_down).?);
-    try std.testing.expectEqual(@as(?u8, 7), view.hovered_menu_item);
+    try std.testing.expectEqual(@as(?u8, 9), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.escape).?);
     try std.testing.expect(view.active_menu == null);
 
@@ -4669,7 +4681,9 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Send a meeting link to CAST", dialogHelper(.call_link, ""));
     try std.testing.expectEqualStrings("CALL", settingsKicker(.call_link, 0));
     try std.testing.expectEqualStrings("Wire setup", menuItemLabel(6, 0));
-    try std.testing.expectEqualStrings("Wire features", menuItemLabel(6, 1));
+    try std.testing.expectEqualStrings("Wire list", menuItemLabel(6, 1));
+    try std.testing.expectEqualStrings("Sign in", menuItemLabel(6, 2));
+    try std.testing.expectEqualStrings("Wire features", menuItemLabel(6, 3));
     try std.testing.expectEqualStrings("Wire setup", toolbarLabel(0));
     try std.testing.expectEqualStrings("Away message", menuItemLabel(4, 4));
     try std.testing.expectEqualStrings("Away message", toolbarLabel(10));
@@ -4686,7 +4700,10 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
-    try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 6));
+    try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 8));
+    try std.testing.expectEqualStrings("Room invitation", menuItemLabel(4, 11));
+    try std.testing.expectEqualStrings("Room password", menuItemLabel(4, 12));
+    try std.testing.expectEqualStrings("Live Onyx nodes use implicit TLS 6697", dialogHelper(.servers, ""));
     try std.testing.expectEqualStrings("Ignore CAST", toolbarLabel(12));
     try std.testing.expectEqualStrings("Email CAST", toolbarLabel(14));
     try std.testing.expectEqualStrings("CAST", menu_labels[5]);
@@ -4705,6 +4722,36 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("OWN", memberRoleChip(.owner));
     try std.testing.expectEqualStrings("Account name and password for this wire", dialogHelper(.password, ""));
     try std.testing.expectEqualStrings("How often this rule may fire", dialogHelper(.advanced_event_params, ""));
+}
+
+test "invitation password and wire list route from existing menus" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .navigation;
+    view.wire_live = true;
+
+    view.active_menu = 4;
+    view.hovered_menu_item = 11;
+    try std.testing.expectEqual(Action{ .menu = 4 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.invitation, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 4;
+    view.hovered_menu_item = 12;
+    try std.testing.expectEqual(Action{ .menu = 4 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.channel_password, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 6;
+    view.hovered_menu_item = 1;
+    try std.testing.expectEqual(Action{ .menu = 6 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.servers, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 6;
+    view.hovered_menu_item = 2;
+    try std.testing.expectEqual(Action{ .menu = 6 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.password, view.active_dialog.?);
 }
 
 test "composer Page Up and Page Down page the transcript" {

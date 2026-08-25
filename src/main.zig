@@ -2246,6 +2246,11 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(0, "comicchat-print.pdf");
             try view.setDialogValueAt(1, "Save PDF");
         },
+        .servers => {
+            try view.setDialogValueAt(0, onyxWirePreset(if (client) |connected| connected.host else ""));
+            try view.setDialogValueAt(1, "6697");
+            try view.setDialogValueAt(2, "Verified TLS");
+        },
         .connection_features => {
             try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext (unsafe)" else "Offline");
             try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Waiting to sign in" else "Offline");
@@ -2480,7 +2485,7 @@ fn applyDialogAction(
     if (id == .setup or id == .servers) {
         const request = parseConnectionDialog(value, view.dialogValueAt(1), view.dialogValueAt(2)) catch |err| {
             view.setDialogNotice(switch (err) {
-                error.InvalidHost => "Enter a valid server name without spaces.",
+                error.InvalidHost => "Enter a valid host name without spaces.",
                 error.InvalidPort => "Port must be between 1 and 65535.",
             });
             return;
@@ -2547,6 +2552,29 @@ fn applyDialogAction(
             const index = workspace.ensure(value) catch return;
             _ = workspace.activate(index);
             if (maybe_client) |client| try client.joinWithKey(value, view.dialogValueAt(1));
+        },
+        .invitation => {
+            const client = maybe_client orelse {
+                view.setDialogNotice("Connect before accepting an invitation.");
+                return;
+            };
+            const index = workspace.ensure(value) catch {
+                view.setDialogNotice("Enter a valid room beginning with # or &.");
+                return;
+            };
+            _ = workspace.activate(index);
+            try client.join(value);
+        },
+        .channel_password => {
+            const client = maybe_client orelse {
+                view.setDialogNotice("Connect before unlocking a room.");
+                return;
+            };
+            try client.joinWithKey(room.name, value);
+        },
+        .password => {
+            view.setDialogNotice("Account passwords stay in the password file.");
+            return;
         },
         .channel_create => {
             const creation_modes = std.mem.trim(u8, view.dialogValueAt(2), " \t");
@@ -3367,6 +3395,11 @@ const ConnectionDialogRequest = struct {
     security: cc.net.client.Security,
 };
 
+fn onyxWirePreset(host: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(host, "ircx.us")) return "ircx.us";
+    return "eshmaki.me";
+}
+
 fn parseConnectionDialog(host_text: []const u8, port_text: []const u8, security_text: []const u8) error{ InvalidHost, InvalidPort }!ConnectionDialogRequest {
     const host = std.mem.trim(u8, host_text, " \t");
     if (host.len == 0 or host.len > 253 or std.mem.indexOfAny(u8, host, " \t\r\n\x00") != null) return error.InvalidHost;
@@ -3389,6 +3422,13 @@ test "connection dialog validates a usable endpoint" {
     try std.testing.expectError(error.InvalidHost, parseConnectionDialog("bad host", "6697", "Verified TLS"));
     try std.testing.expectError(error.InvalidPort, parseConnectionDialog("eshmaki.me", "0", "Verified TLS"));
     try std.testing.expectError(error.InvalidPort, parseConnectionDialog("eshmaki.me", "nope", "Verified TLS"));
+}
+
+test "wire list preset prefers live Onyx nodes" {
+    try std.testing.expectEqualStrings("eshmaki.me", onyxWirePreset(""));
+    try std.testing.expectEqualStrings("eshmaki.me", onyxWirePreset("example.test"));
+    try std.testing.expectEqualStrings("eshmaki.me", onyxWirePreset("eshmaki.me"));
+    try std.testing.expectEqualStrings("ircx.us", onyxWirePreset("IRCX.US"));
 }
 
 test "connection failures remain actionable" {
@@ -4359,6 +4399,12 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
                 try view.setDialogValueAt(0, "Show");
                 try view.setDialogValueAt(1, "CAST");
             },
+            .servers => {
+                try view.setDialogValueAt(0, "eshmaki.me");
+                try view.setDialogValueAt(1, "6697");
+                try view.setDialogValueAt(2, "Verified TLS");
+            },
+            .invitation => try view.setDialogValueAt(0, "#root"),
             .connection_features => {
                 try view.setDialogValueAt(0, "Offline");
                 try view.setDialogValueAt(1, "Offline");

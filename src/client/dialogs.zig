@@ -172,7 +172,8 @@ pub fn prompt(id: Id) ?[]const u8 {
 
 pub fn fields(id: Id) []const Field {
     return switch (id) {
-        .setup, .servers => &.{ .{ .label = "Server", .hint = "Host name or address" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "TLS", .hint = "Verified TLS", .kind = .choice } },
+        .setup => &.{ .{ .label = "Host", .hint = "Host name or address" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "TLS", .hint = "Verified TLS", .kind = .choice } },
+        .servers => &.{ .{ .label = "Wire", .hint = "Live Onyx node", .kind = .choice }, .{ .label = "Port", .hint = "6697" }, .{ .label = "TLS", .hint = "Implicit TLS", .kind = .choice } },
         .settings => &.{
             .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
             .{ .label = "Accent", .hint = "Vermillion, violet, or forest", .kind = .choice },
@@ -255,7 +256,8 @@ pub fn fieldAcceptsText(id: Id, index: usize) bool {
 
 pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
     return switch (id) {
-        .setup, .servers => if (index == 2) &.{ "Verified TLS", "Plaintext (unsafe)" } else &.{},
+        .setup => if (index == 2) &.{ "Verified TLS", "Plaintext (unsafe)" } else &.{},
+        .servers => if (index == 0) &.{ "eshmaki.me", "ircx.us" } else if (index == 2) &.{ "Verified TLS", "Plaintext (unsafe)" } else &.{},
         .settings => switch (index) {
             0 => &.{ "Light studio", "Dark studio" },
             1 => &.{ "Vermillion", "Violet", "Forest" },
@@ -335,7 +337,7 @@ pub fn primaryLabel(id: Id) []const u8 {
     return switch (id) {
         .setup => "Open wire",
         .settings => "Save settings",
-        .servers => "Save wire",
+        .servers => "Open wire",
         .personal => "Save card",
         .character => "Choose character",
         .background => "Choose backdrop",
@@ -436,7 +438,7 @@ test "registry covers all forty Microsoft dialog templates plus portable dialogs
 test "application settings are distinct from connection setup" {
     try std.testing.expectEqual(Group.application, get(.settings).group);
     try std.testing.expectEqualStrings("Color theme", fields(.settings)[0].label);
-    try std.testing.expectEqualStrings("Server", fields(.setup)[0].label);
+    try std.testing.expectEqualStrings("Host", fields(.setup)[0].label);
     try std.testing.expectEqualStrings("Light studio", choiceOptions(.settings, 0)[0]);
     try std.testing.expectEqualStrings("Vermillion", choiceOptions(.settings, 1)[0]);
     try std.testing.expectEqualStrings("Verified TLS", choiceOptions(.setup, 2)[0]);
@@ -494,7 +496,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Invite CAST", primaryLabel(.invite));
     try std.testing.expectEqualStrings("Request CAST", primaryLabel(.member_profile));
     try std.testing.expectEqualStrings("Wire list", get(.servers).title);
-    try std.testing.expectEqualStrings("Save wire", primaryLabel(.servers));
+    try std.testing.expectEqualStrings("Open wire", primaryLabel(.servers));
     try std.testing.expectEqualStrings("Accept invitation", primaryLabel(.invitation));
     try std.testing.expectEqualStrings("Open conversation", primaryLabel(.recent_files));
     try std.testing.expectEqualStrings("Save favorites", primaryLabel(.favorite_rooms));
@@ -573,6 +575,13 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Room", choiceOptions(.ircx_events, 1)[0]);
     try std.testing.expectEqualStrings("Link", choiceOptions(.ircx_events, 1)[4]);
     try std.testing.expectEqualStrings("Summary", fields(.channel_properties)[4].label);
+    try std.testing.expectEqualStrings("Wire", fields(.servers)[0].label);
+    try std.testing.expectEqualStrings("Live Onyx node", fields(.servers)[0].hint);
+    try std.testing.expectEqualStrings("Implicit TLS", fields(.servers)[2].hint);
+    try std.testing.expectEqualStrings("eshmaki.me", choiceOptions(.servers, 0)[0]);
+    try std.testing.expectEqualStrings("ircx.us", choiceOptions(.servers, 0)[1]);
+    try std.testing.expectEqualStrings("Verified TLS", choiceOptions(.servers, 2)[0]);
+    try std.testing.expectEqualStrings("Host", fields(.setup)[0].label);
 }
 
 test "room access Sunday labels map back to ACCESS wire tokens" {
