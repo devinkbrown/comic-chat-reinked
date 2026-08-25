@@ -1320,9 +1320,9 @@ const ChatState = struct {
     fn setConnectionFailure(self: *ChatState, err: anyerror) void {
         self.status = std.fmt.bufPrint(
             &self.status_storage,
-            "Connection failed ({s}) - click for settings",
+            "Wire failed ({s}) - open Wire setup",
             .{connectionFailureDetail(err)},
-        ) catch "Connection failed - click for settings";
+        ) catch "Wire failed - open Wire setup";
     }
 
     fn rememberDccOffer(self: *ChatState, gpa: std.mem.Allocator, sender: []const u8, offer: cc.proto.dcc.SendOffer) !void {
@@ -3398,8 +3398,8 @@ test "connection failures remain actionable" {
     try std.testing.expectEqualStrings("refused", connectionFailureDetail(error.ConnectionRefused));
     try std.testing.expectEqualStrings("TLS", connectionFailureDetail(error.TlsHandshakeFailed));
     try std.testing.expect(std.mem.indexOf(u8, state.status, "refused") != null);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "Connection failed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "click for settings") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "Wire failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "open Wire setup") != null);
 }
 
 test "comic view choices remain bounded and roster selection ignores departed users" {
@@ -4301,7 +4301,7 @@ fn runToPng(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
 /// visual regression surface for the modern UI library.
 fn preview_status(surface: []const u8) []const u8 {
     if (std.mem.eql(u8, surface, "offline")) return "offline";
-    if (std.mem.eql(u8, surface, "failed")) return "Connection failed - click for settings";
+    if (std.mem.eql(u8, surface, "failed")) return "Wire failed - open Wire setup";
     return "reconnecting";
 }
 

@@ -267,7 +267,7 @@ pub const View = struct {
                 .home => self.focused_toolbar = firstEnabledToolbar(self.wire_live),
                 .end => self.focused_toolbar = lastEnabledToolbar(self.wire_live),
                 .enter => return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]),
-                .char => |code| if (code == ' ') return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]) else return null,
+                .char => |code| if (code == ' ') return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]) else return .none,
                 .escape => {
                     self.shell.focus = .navigation;
                     return .none;
@@ -280,7 +280,7 @@ pub const View = struct {
                 .home => self.focused_say_action = firstEnabledSayAction(self.wire_live),
                 .end => self.focused_say_action = lastEnabledSayAction(self.wire_live),
                 .enter => return self.activateSayAction(self.focused_say_action),
-                .char => |code| if (code == ' ') return self.activateSayAction(self.focused_say_action) else return null,
+                .char => |code| if (code == ' ') return self.activateSayAction(self.focused_say_action) else return .none,
                 .escape => {
                     self.shell.focus = .composer;
                     return .none;
@@ -289,7 +289,7 @@ pub const View = struct {
             },
             .status => switch (key) {
                 .enter => return self.activateFocusedStatus(),
-                .char => |code| if (code == ' ') return self.activateFocusedStatus() else return null,
+                .char => |code| if (code == ' ') return self.activateFocusedStatus() else return .none,
                 .left, .up => {
                     if (self.status_panel_open) self.focused_status_action = .connection;
                 },
@@ -322,12 +322,12 @@ pub const View = struct {
             },
             .members => switch (key) {
                 .enter => return self.activateFocusedMember(),
-                .char => |code| if (code == ' ') return self.activateFocusedMember() else return null,
+                .char => |code| if (code == ' ') return self.activateFocusedMember() else return .none,
                 else => return null,
             },
             .emotion => switch (key) {
                 .enter => return .send_expression,
-                .char => |code| if (code == ' ') return .send_expression else return null,
+                .char => |code| if (code == ' ') return .send_expression else return .none,
                 else => return null,
             },
             else => return null,
@@ -431,7 +431,7 @@ pub const View = struct {
                     self.active_menu = self.hovered_menu orelse 0;
                     self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
                     return .none;
-                } else return null,
+                } else return .none,
                 .left, .right => {
                     const comic_mode = self.shell.content_mode == .comic;
                     const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
@@ -3872,6 +3872,25 @@ test "context menu keyboard skips disabled moderation controls" {
     try std.testing.expect(view.context_menu == null);
 }
 
+test "focused chrome leftover keys do not leak into the composer" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .toolbar;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'a' }).?);
+    try std.testing.expectEqual(shell_mod.Focus.toolbar, view.shell.focus);
+    view.shell.focus = .say_actions;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 's' }).?);
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'w' }).?);
+    view.shell.focus = .members;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'c' }).?);
+    view.shell.focus = .emotion;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'e' }).?);
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.{ .char = 'x' }).?);
+    try std.testing.expect(view.active_menu == null);
+}
+
 test "open context menu consumes leftover keys and blocks Alt accelerators" {
     var view = try View.init(std.testing.allocator, 960, 720);
     defer view.deinit();
@@ -4583,6 +4602,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Off", statusTabLabel("offline"));
     try std.testing.expectEqualStrings("Wait", statusTabLabel("reconnecting"));
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed - open Wire setup", statusBarLabel("Wire failed - open Wire setup"));
+    try std.testing.expectEqualStrings("Fail", statusTabLabel("Wire failed (refused) - open Wire setup"));
     try std.testing.expectEqualStrings("Copy selected lines", menuItemLabel(1, 0));
     try std.testing.expectEqualStrings("Delete selected lines", menuItemLabel(1, 2));
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));

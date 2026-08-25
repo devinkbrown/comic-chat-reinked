@@ -177,7 +177,7 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
             .{ .label = "Accent", .hint = "Vermillion, violet, or forest", .kind = .choice },
             .{ .label = "Contrast", .hint = "Ink weight on chrome", .kind = .choice },
-            .{ .label = "Conversation view", .hint = "Sunday page or conversation", .kind = .choice },
+            .{ .label = "Page view", .hint = "Sunday page or conversation", .kind = .choice },
             .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
             .{ .label = "CAST pane", .hint = "CAST rail visibility", .kind = .choice },
             .{ .label = "CAST layout", .hint = "Portraits or compact list", .kind = .choice },
@@ -191,7 +191,7 @@ pub fn fields(id: Id) []const Field {
         },
         .background => &.{ .{ .label = "Backdrop name", .kind = .choice }, .{ .label = "Preview", .hint = "Bundled background", .kind = .preview } },
         .nickname => &.{.{ .label = "Sign-in name", .hint = "Visible on the Sunday page" }},
-        .password => &.{ .{ .label = "Account", .hint = "Server account name" }, .{ .label = "Password", .hint = "Account password", .kind = .password } },
+        .password => &.{ .{ .label = "Account", .hint = "Wire account name" }, .{ .label = "Password", .hint = "Account password", .kind = .password } },
         .channel => &.{ .{ .label = "Room name", .hint = "#room" }, .{ .label = "Optional password", .hint = "If the room is locked", .kind = .password } },
         .channel_create => &.{
             .{ .label = "Room name", .hint = "#room" },
@@ -207,11 +207,11 @@ pub fn fields(id: Id) []const Field {
         .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban pattern", .hint = "Optional" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
         .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
-        .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Select an online CAST member" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
+        .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Choose an online CAST member" }, .{ .label = "CAST action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound file", .kind = .choice }, .{ .label = "Accompanying message", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
-        .choose_color => &.{ .{ .label = "Ink value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current theme color", .kind = .preview } },
+        .choose_color => &.{ .{ .label = "Ink value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current ink", .kind = .preview } },
         .comics_view => &.{ .{ .label = "Page mode", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
         .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving CAST" }, .{ .label = "Repeat limit", .hint = "8" }, .{ .label = "Repeat window seconds", .hint = "10" } },
         .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
@@ -221,17 +221,17 @@ pub fn fields(id: Id) []const Field {
         .create_set => &.{.{ .label = "Rule set name" }},
         .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat limit", .hint = "0 means unlimited" }, .{ .label = "Repeat window seconds", .hint = "0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Enabled", .kind = .choice }, .{ .label = "Case-sensitive match", .kind = .choice } },
-        .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional server" }, .{ .label = "Delivery", .kind = .choice } },
+        .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional wire" }, .{ .label = "Delivery", .kind = .choice } },
         .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
         .save_conversation => &.{.{ .label = "Conversation file", .hint = "Save as .ccc" }},
         .export_image => &.{.{ .label = "Image file", .hint = "Export as .png" }},
         .open_locator => &.{.{ .label = "Locator file", .hint = "Path to a .ccr file" }},
-        .recent_files => &.{ .{ .label = "Recent conversation", .hint = "Most recent path; edit to choose another" }, .{ .label = "Action", .kind = .choice } },
-        .favorite_rooms => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Action", .kind = .choice } },
-        .print_preview => &.{ .{ .label = "PDF file", .hint = "Save printable preview as .pdf" }, .{ .label = "Action", .kind = .choice } },
+        .recent_files => &.{ .{ .label = "Recent conversation", .hint = "Most recent path; edit to choose another" }, .{ .label = "Open or remove", .kind = .choice } },
+        .favorite_rooms => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Join or save", .kind = .choice } },
+        .print_preview => &.{ .{ .label = "PDF file", .hint = "Save printable preview as .pdf" }, .{ .label = "Save how", .kind = .choice } },
         .connection_features => &.{ .{ .label = "Transport", .kind = .readonly }, .{ .label = "Sign-in", .kind = .readonly }, .{ .label = "Room extras", .kind = .readonly }, .{ .label = "Enabled features", .kind = .readonly } },
-        .motd => &.{.{ .label = "Bulletin", .hint = "Server supplied", .kind = .readonly }},
+        .motd => &.{.{ .label = "Bulletin", .hint = "From the wire", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Invitation note", .hint = "Optional" } },
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Action", .kind = .choice } },
@@ -351,9 +351,9 @@ pub fn primaryLabel(id: Id) []const u8 {
         .invite => "Invite CAST",
         .whisper => "Whisper",
         .file_transfer => "Start transfer",
-        .open_conversation => "Open",
-        .save_conversation => "Save",
-        .export_image => "Export",
+        .open_conversation => "Open conversation",
+        .save_conversation => "Save conversation",
+        .export_image => "Export Sunday page",
         .open_locator => "Open locator",
         .recent_files => "Open conversation",
         .favorite_rooms => "Save favorites",
@@ -372,7 +372,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .channel_password => "Unlock room",
         .invitation => "Accept invitation",
         .channel_properties => "Save room",
-        .sound => "Send",
+        .sound => "Send sound",
     };
 }
 
@@ -461,7 +461,19 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Sign-in name", get(.nickname).title);
     try std.testing.expectEqualStrings("Sign-in name", fields(.nickname)[0].label);
     try std.testing.expectEqualStrings("Choose CAST", primaryLabel(.user_list));
-    try std.testing.expectEqualStrings("Send", primaryLabel(.sound));
+    try std.testing.expectEqualStrings("Send sound", primaryLabel(.sound));
+    try std.testing.expectEqualStrings("Open conversation", primaryLabel(.open_conversation));
+    try std.testing.expectEqualStrings("Save conversation", primaryLabel(.save_conversation));
+    try std.testing.expectEqualStrings("Export Sunday page", primaryLabel(.export_image));
+    try std.testing.expectEqualStrings("Page view", fields(.settings)[3].label);
+    try std.testing.expectEqualStrings("Open or remove", fields(.recent_files)[1].label);
+    try std.testing.expectEqualStrings("Join or save", fields(.favorite_rooms)[1].label);
+    try std.testing.expectEqualStrings("Save how", fields(.print_preview)[1].label);
+    try std.testing.expectEqualStrings("CAST action", fields(.notification_users)[2].label);
+    try std.testing.expectEqualStrings("Current ink", fields(.choose_color)[1].hint);
+    try std.testing.expectEqualStrings("Wire account name", fields(.password)[0].hint);
+    try std.testing.expectEqualStrings("From the wire", fields(.motd)[0].hint);
+    try std.testing.expectEqualStrings("Optional wire", fields(.notifications)[3].hint);
     try std.testing.expectEqualStrings("Join room", primaryLabel(.channel));
     try std.testing.expectEqualStrings("Save card", primaryLabel(.personal));
     try std.testing.expectEqualStrings("CAST card", get(.personal).title);
@@ -530,7 +542,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Enabled features", fields(.connection_features)[3].label);
     try std.testing.expectEqualStrings("Away message", get(.away).title);
     try std.testing.expectEqualStrings("Online CAST", get(.notification_users).title);
-    try std.testing.expectEqualStrings("Select an online CAST member", fields(.notification_users)[1].hint);
+    try std.testing.expectEqualStrings("Choose an online CAST member", fields(.notification_users)[1].hint);
     try std.testing.expectEqualStrings("Rename open set", get(.rename_loaded_set).title);
     try std.testing.expectEqualStrings("Page mode", fields(.comics_view)[0].label);
     try std.testing.expectEqualStrings("Sunday page or conversation", fields(.settings)[3].hint);
