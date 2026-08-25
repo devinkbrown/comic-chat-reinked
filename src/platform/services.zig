@@ -7,7 +7,7 @@
 //! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
 //! printing. `xdg-open` can carry an outgoing activation / startup token.
 //! Incoming desktop file-list MIME, receive-only RTF, receive-only
-//! COMPOUND_TEXT (including ISO-8859-2/5/7/9/15), ISO-8859 charset MIME, Markdown,
+//! COMPOUND_TEXT (including ISO-8859-2/3/4/5/6/7/8/9/15), ISO-8859 charset MIME, Markdown,
 //! and invalid-UTF-8 Latin-1 fallback are parsed here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
 //! internal application fallback.
@@ -511,8 +511,8 @@ pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
 }
 
-/// Receive-only `text/plain;charset=...` (ISO-8859-1/2/5/7/9/15). Other charsets
-/// fall back to `clipboardBytesToUtf8`.
+/// Receive-only `text/plain;charset=...` (ISO-8859-1/2/3/4/5/6/7/8/9/15 and
+/// Windows-1252). Other charsets fall back to `clipboardBytesToUtf8`.
 pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: []const u8) ![]u8 {
     if (isUtf8Charset(charset) or isAsciiCharset(charset)) {
         return clipboardBytesToUtf8(gpa, bytes);
@@ -523,6 +523,11 @@ pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: 
     if (isIso88599Charset(charset)) return iso88599ToUtf8(gpa, bytes);
     if (isIso88595Charset(charset)) return iso88595ToUtf8(gpa, bytes);
     if (isIso88597Charset(charset)) return iso88597ToUtf8(gpa, bytes);
+    if (isIso88593Charset(charset)) return iso88593ToUtf8(gpa, bytes);
+    if (isIso88594Charset(charset)) return iso88594ToUtf8(gpa, bytes);
+    if (isIso88596Charset(charset)) return iso88596ToUtf8(gpa, bytes);
+    if (isIso88598Charset(charset)) return iso88598ToUtf8(gpa, bytes);
+    if (isWindows1252Charset(charset)) return windows1252ToUtf8(gpa, bytes);
     return clipboardBytesToUtf8(gpa, bytes);
 }
 
@@ -547,7 +552,10 @@ pub fn isLatinPlainMime(mime: []const u8) bool {
     const charset = mimeCharset(mime) orelse return false;
     return isIso88591Charset(charset) or isIso885915Charset(charset) or
         isIso88592Charset(charset) or isIso88599Charset(charset) or
-        isIso88595Charset(charset) or isIso88597Charset(charset);
+        isIso88595Charset(charset) or isIso88597Charset(charset) or
+        isIso88593Charset(charset) or isIso88594Charset(charset) or
+        isIso88596Charset(charset) or isIso88598Charset(charset) or
+        isWindows1252Charset(charset);
 }
 
 pub fn decodePlainMime(gpa: std.mem.Allocator, mime: []const u8, bytes: []const u8) ![]u8 {
@@ -602,6 +610,39 @@ fn isIso88597Charset(charset: []const u8) bool {
     return std.ascii.eqlIgnoreCase(charset, "iso-8859-7") or
         std.ascii.eqlIgnoreCase(charset, "iso8859-7") or
         std.ascii.eqlIgnoreCase(charset, "greek");
+}
+
+fn isIso88593Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-3") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-3") or
+        std.ascii.eqlIgnoreCase(charset, "latin3") or
+        std.ascii.eqlIgnoreCase(charset, "latin-3");
+}
+
+fn isIso88594Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-4") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-4") or
+        std.ascii.eqlIgnoreCase(charset, "latin4") or
+        std.ascii.eqlIgnoreCase(charset, "latin-4");
+}
+
+fn isIso88596Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-6") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-6") or
+        std.ascii.eqlIgnoreCase(charset, "arabic");
+}
+
+fn isIso88598Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-8") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-8") or
+        std.ascii.eqlIgnoreCase(charset, "hebrew");
+}
+
+fn isWindows1252Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1252") or
+        std.ascii.eqlIgnoreCase(charset, "windows1252") or
+        std.ascii.eqlIgnoreCase(charset, "cp1252") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1252");
 }
 
 /// Receive-only ICCCM COMPOUND_TEXT. Default charset is ISO-8859-1. `ESC % G`
@@ -659,6 +700,22 @@ pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
                 try appendCodepoint(&out, gpa, iso88597Codepoint(bytes[i]));
                 i += 1;
             },
+            .latin3 => {
+                try appendCodepoint(&out, gpa, iso88593Codepoint(bytes[i]));
+                i += 1;
+            },
+            .latin4 => {
+                try appendCodepoint(&out, gpa, iso88594Codepoint(bytes[i]));
+                i += 1;
+            },
+            .arabic => {
+                try appendCodepoint(&out, gpa, iso88596Codepoint(bytes[i]));
+                i += 1;
+            },
+            .hebrew => {
+                try appendCodepoint(&out, gpa, iso88598Codepoint(bytes[i]));
+                i += 1;
+            },
             .utf8 => {
                 const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
                 if (i + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[i .. i + n])) {
@@ -674,7 +731,7 @@ pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
 }
 
-const CompoundCharset = enum { latin1, latin2, latin9, latin5, cyrillic, greek, utf8, ascii };
+const CompoundCharset = enum { latin1, latin2, latin3, latin4, latin9, latin5, cyrillic, greek, arabic, hebrew, utf8, ascii };
 
 const CompoundEscape = struct {
     consumed: usize,
@@ -702,10 +759,14 @@ fn parseCompoundEscape(text: []const u8) CompoundEscape {
             .consumed = 3,
             .cset = switch (text[2]) {
                 'B' => .latin2,
+                'C' => .latin3,
+                'D' => .latin4,
                 'b' => .latin9,
                 'M' => .latin5,
                 'L' => .cyrillic,
                 'F' => .greek,
+                'G' => .arabic,
+                'H' => .hebrew,
                 else => .latin1,
             },
             .skip = false,
@@ -759,6 +820,41 @@ fn iso88597ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (bytes) |c| try appendCodepoint(&out, gpa, iso88597Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88593ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88593Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88594ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88594Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88596ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88596Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88598ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88598Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1252ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1252Codepoint(c));
     return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
 }
 
@@ -829,6 +925,81 @@ fn iso88597Codepoint(c: u8) u21 {
     return iso88597_a0[c - 0xa0];
 }
 
+fn iso88593Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso88593_a0[c - 0xa0];
+}
+
+fn iso88594Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso88594_a0[c - 0xa0];
+}
+
+fn iso88596Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xa0 => 0x00a0,
+        0xa4 => 0x00a4,
+        0xac => 0x060c,
+        0xad => 0x00ad,
+        0xbb => 0x061b,
+        0xbf => 0x061f,
+        0xc1...0xda => 0x0621 + @as(u21, c - 0xc1),
+        0xe0...0xf2 => 0x0640 + @as(u21, c - 0xe0),
+        0x00...0x9f => c,
+        else => 0xfffd,
+    };
+}
+
+fn iso88598Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xa0 => 0x00a0,
+        0xa2...0xa9 => c,
+        0xaa => 0x00d7,
+        0xab...0xb9 => c,
+        0xba => 0x00f7,
+        0xbb...0xbe => c,
+        0xdf => 0x2017,
+        0xe0...0xfa => 0x05d0 + @as(u21, c - 0xe0),
+        0xfd => 0x200e,
+        0xfe => 0x200f,
+        0x00...0x9f => c,
+        else => 0xfffd,
+    };
+}
+
+fn windows1252Codepoint(c: u8) u21 {
+    return switch (c) {
+        0x80 => 0x20ac,
+        0x82 => 0x201a,
+        0x83 => 0x0192,
+        0x84 => 0x201e,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x02c6,
+        0x89 => 0x2030,
+        0x8a => 0x0160,
+        0x8b => 0x2039,
+        0x8c => 0x0152,
+        0x8e => 0x017d,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201c,
+        0x94 => 0x201d,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x98 => 0x02dc,
+        0x99 => 0x2122,
+        0x9a => 0x0161,
+        0x9b => 0x203a,
+        0x9c => 0x0153,
+        0x9e => 0x017e,
+        0x9f => 0x0178,
+        else => c,
+    };
+}
+
 const iso88592_a0 = [_]u21{
     0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
     0x00a8, 0x0160, 0x015e, 0x0164, 0x0179, 0x00ad, 0x017d, 0x017b,
@@ -857,6 +1028,36 @@ const iso88597_a0 = [_]u21{
     0x03b8, 0x03b9, 0x03ba, 0x03bb, 0x03bc, 0x03bd, 0x03be, 0x03bf,
     0x03c0, 0x03c1, 0x03c2, 0x03c3, 0x03c4, 0x03c5, 0x03c6, 0x03c7,
     0x03c8, 0x03c9, 0x03ca, 0x03cb, 0x03cc, 0x03cd, 0x03ce, 0xfffd,
+};
+
+const iso88593_a0 = [_]u21{
+    0x00a0, 0x0126, 0x02d8, 0x00a3, 0x00a4, 0xfffd, 0x0124, 0x00a7,
+    0x00a8, 0x0130, 0x015e, 0x011e, 0x0134, 0x00ad, 0xfffd, 0x017b,
+    0x00b0, 0x0127, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x0125, 0x00b7,
+    0x00b8, 0x0131, 0x015f, 0x011f, 0x0135, 0x00bd, 0xfffd, 0x017c,
+    0x00c0, 0x00c1, 0x00c2, 0xfffd, 0x00c4, 0x010a, 0x0108, 0x00c7,
+    0x00c8, 0x00c9, 0x00ca, 0x00cb, 0x00cc, 0x00cd, 0x00ce, 0x00cf,
+    0xfffd, 0x00d1, 0x00d2, 0x00d3, 0x00d4, 0x0120, 0x00d6, 0x00d7,
+    0x011c, 0x00d9, 0x00da, 0x00db, 0x00dc, 0x016c, 0x015c, 0x00df,
+    0x00e0, 0x00e1, 0x00e2, 0xfffd, 0x00e4, 0x010b, 0x0109, 0x00e7,
+    0x00e8, 0x00e9, 0x00ea, 0x00eb, 0x00ec, 0x00ed, 0x00ee, 0x00ef,
+    0xfffd, 0x00f1, 0x00f2, 0x00f3, 0x00f4, 0x0121, 0x00f6, 0x00f7,
+    0x011d, 0x00f9, 0x00fa, 0x00fb, 0x00fc, 0x016d, 0x015d, 0x02d9,
+};
+
+const iso88594_a0 = [_]u21{
+    0x00a0, 0x0104, 0x0138, 0x0156, 0x00a4, 0x0128, 0x013b, 0x00a7,
+    0x00a8, 0x0160, 0x0112, 0x0122, 0x0166, 0x00ad, 0x017d, 0x00af,
+    0x00b0, 0x0105, 0x02db, 0x0157, 0x00b4, 0x0129, 0x013c, 0x02c7,
+    0x00b8, 0x0161, 0x0113, 0x0123, 0x0167, 0x014a, 0x017e, 0x014b,
+    0x0100, 0x00c1, 0x00c2, 0x00c3, 0x00c4, 0x00c5, 0x00c6, 0x012e,
+    0x010c, 0x00c9, 0x0118, 0x00cb, 0x0116, 0x00cd, 0x00ce, 0x012a,
+    0x0110, 0x0145, 0x014c, 0x0136, 0x00d4, 0x00d5, 0x00d6, 0x00d7,
+    0x00d8, 0x0172, 0x00da, 0x00db, 0x00dc, 0x0168, 0x016a, 0x00df,
+    0x0101, 0x00e1, 0x00e2, 0x00e3, 0x00e4, 0x00e5, 0x00e6, 0x012f,
+    0x010d, 0x00e9, 0x0119, 0x00eb, 0x0117, 0x00ed, 0x00ee, 0x012b,
+    0x0111, 0x0146, 0x014d, 0x0137, 0x00f4, 0x00f5, 0x00f6, 0x00f7,
+    0x00f8, 0x0173, 0x00fa, 0x00fb, 0x00fc, 0x0169, 0x016b, 0x02d9,
 };
 
 /// Decode `UTF16_STRING` / UTF-16 clipboard bytes. Honors a BOM when present,
@@ -1736,6 +1937,28 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     try std.testing.expect(isLatinPlainMime("text/plain;charset=ISO-8859-5"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=cyrillic"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=greek"));
+    const euro1252 = try decodePlainByCharset(gpa, "\x80", "windows-1252");
+    defer gpa.free(euro1252);
+    try std.testing.expectEqualStrings("€", euro1252);
+    const euro_cp = try decodePlainByCharset(gpa, "\x80", "cp1252");
+    defer gpa.free(euro_cp);
+    try std.testing.expectEqualStrings("€", euro_cp);
+    const hbar = try decodePlainByCharset(gpa, "\xa1", "ISO-8859-3");
+    defer gpa.free(hbar);
+    try std.testing.expectEqualStrings("Ħ", hbar);
+    const ogonek4 = try decodePlainByCharset(gpa, "\xa1", "iso-8859-4");
+    defer gpa.free(ogonek4);
+    try std.testing.expectEqualStrings("Ą", ogonek4);
+    const hamza = try decodePlainByCharset(gpa, "\xc1", "ISO-8859-6");
+    defer gpa.free(hamza);
+    try std.testing.expectEqualStrings("ء", hamza);
+    const alef = try decodePlainByCharset(gpa, "\xe0", "ISO-8859-8");
+    defer gpa.free(alef);
+    try std.testing.expectEqualStrings("א", alef);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=windows-1252"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=latin3"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=arabic"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=hebrew"));
 }
 
 test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n sets" {
@@ -1767,6 +1990,18 @@ test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n se
     const greek = try compoundTextToUtf8(gpa, "\x1b-F" ++ "\xc1");
     defer gpa.free(greek);
     try std.testing.expectEqualStrings("Α", greek);
+    const latin3 = try compoundTextToUtf8(gpa, "\x1b-C" ++ "\xa1");
+    defer gpa.free(latin3);
+    try std.testing.expectEqualStrings("Ħ", latin3);
+    const latin4 = try compoundTextToUtf8(gpa, "\x1b-D" ++ "\xa1");
+    defer gpa.free(latin4);
+    try std.testing.expectEqualStrings("Ą", latin4);
+    const arabic = try compoundTextToUtf8(gpa, "\x1b-G" ++ "\xc1");
+    defer gpa.free(arabic);
+    try std.testing.expectEqualStrings("ء", arabic);
+    const hebrew = try compoundTextToUtf8(gpa, "\x1b-H" ++ "\xe0");
+    defer gpa.free(hebrew);
+    try std.testing.expectEqualStrings("א", hebrew);
 }
 
 test "notify-send uses a normal urgency hint" {

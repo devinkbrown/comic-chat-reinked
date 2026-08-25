@@ -41,7 +41,7 @@
 //! Pointer leave and incoming DnD motion emit pointer moves so hover
 //! tracks the seat. NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
 //! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
-//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/5/7/9/15 `text/plain` charset MIME,
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/15 and Windows-1252 `text/plain` charset MIME,
 //! Markdown, and extra KDE5/Mozilla-priv/KDE suggested-filename file MIME are accepted.
 //! `present()` skips
 //! commits while the toplevel is suspended; leaving suspended or gaining
@@ -253,6 +253,16 @@ const latin_mime_types = [_][]const u8{
     "text/plain;charset=iso-8859-5",
     "text/plain;charset=ISO-8859-7",
     "text/plain;charset=iso-8859-7",
+    "text/plain;charset=ISO-8859-3",
+    "text/plain;charset=iso-8859-3",
+    "text/plain;charset=ISO-8859-4",
+    "text/plain;charset=iso-8859-4",
+    "text/plain;charset=ISO-8859-6",
+    "text/plain;charset=iso-8859-6",
+    "text/plain;charset=ISO-8859-8",
+    "text/plain;charset=iso-8859-8",
+    "text/plain;charset=windows-1252",
+    "text/plain;charset=cp1252",
 };
 
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
@@ -3681,6 +3691,9 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-9"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-5"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-7"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-3"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1252"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-8"));
     try std.testing.expect(isPlainTextMime("text/markdown"));
     try std.testing.expect(isPlainTextMime("text/x-markdown"));
     try std.testing.expect(!isPlainTextMime("image/png"));
