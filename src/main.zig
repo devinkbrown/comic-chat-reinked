@@ -2771,15 +2771,9 @@ fn applyDialogAction(
                 view.setDialogNotice("Enter modes as one token, for example +nt.");
                 return;
             }
-            if (limit.len != 0) {
-                for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
-                    return;
-                };
-                if ((std.fmt.parseUnsigned(u32, limit, 10) catch 0) == 0) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
-                    return;
-                }
+            if (limit.len != 0 and !isPositiveCount(limit)) {
+                view.setDialogNotice("Maximum users must be a positive number.");
+                return;
             }
             const index = workspace.ensure(value) catch |err| {
                 view.setDialogNotice(roomEnsureFailureNotice(err));
@@ -2852,7 +2846,13 @@ fn applyDialogAction(
             const modes = std.mem.trim(u8, view.dialogValueAt(1), " \t");
             if (modes.len != 0) try client.setMode(room.name, modes, "");
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
-            if (limit.len != 0) try client.setMode(room.name, "+l", limit);
+            if (limit.len != 0) {
+                if (!isPositiveCount(limit)) {
+                    view.setDialogNotice("Maximum users must be a positive number.");
+                    return;
+                }
+                try client.setMode(room.name, "+l", limit);
+            }
             if (key.len != 0) {
                 try client.setMode(room.name, "+k", key);
                 try room.setJoinKey(gpa, key);
@@ -3219,6 +3219,10 @@ fn applyDialogAction(
                 return;
             }
             const accompanying_message = view.dialogValueAt(1);
+            if (hasWireControl(accompanying_message)) {
+                view.setDialogNotice("The accompanying message must stay on one line.");
+                return;
+            }
             const is_private = view.shell.say_mode == .whisper;
             const target = if (is_private) target: {
                 const member_index = view.shell.selected_member orelse {
@@ -5620,6 +5624,12 @@ fn hasWireControl(value: []const u8) bool {
     return std.mem.indexOfAny(u8, value, "\r\n\x00\x01") != null;
 }
 
+fn isPositiveCount(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return (std.fmt.parseUnsigned(u32, text, 10) catch 0) != 0;
+}
+
 test "portable transfer and call inputs reject unsafe values" {
     var safe_name: [64]u8 = undefined;
     try std.testing.expectEqualStrings("payload.exe", safeIncomingFilename("../../payload.exe", &safe_name));
@@ -5629,6 +5639,11 @@ test "portable transfer and call inputs reject unsafe values" {
     try std.testing.expect(validMeetingLink("https://meet.example.test/room"));
     try std.testing.expect(!validMeetingLink("http://meet.example.test/room"));
     try std.testing.expect(!validMeetingLink("https://example.test/bad link"));
+    try std.testing.expect(isPositiveCount("10"));
+    try std.testing.expect(!isPositiveCount("0"));
+    try std.testing.expect(!isPositiveCount(""));
+    try std.testing.expect(!isPositiveCount("abc"));
+    try std.testing.expect(!isPositiveCount("10x"));
 }
 
 test "pending UDI is discarded and bounded" {
