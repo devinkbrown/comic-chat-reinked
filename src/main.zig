@@ -3656,7 +3656,7 @@ fn processWorkspaceMessages(
             std.ascii.eqlIgnoreCase(msg.command, "WARN") or
             std.ascii.eqlIgnoreCase(msg.command, "NOTE"))
         {
-            if (workspace.activeRoom()) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
+            if (workspaceTranscriptRoom(workspace, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
             if (std.ascii.eqlIgnoreCase(msg.command, "FAIL")) state.status = "command failed";
             redraw = true;
         } else if (isJoinDeniedNumeric(msg.command)) {
@@ -3664,7 +3664,7 @@ fn processWorkspaceMessages(
         } else if (isNickFailureNumeric(msg.command)) {
             redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
         } else if (std.mem.eql(u8, msg.command, "464") or std.mem.eql(u8, msg.command, "465")) {
-            redraw = (try applyAuthFailure(workspace, state, &msg)) or redraw;
+            redraw = (try applyAuthFailure(workspace, state, &msg, channel)) or redraw;
             return error.IrcServerError;
         } else if (std.mem.eql(u8, msg.command, "305") or std.mem.eql(u8, msg.command, "306")) {
             const away = std.mem.eql(u8, msg.command, "306");
@@ -3682,7 +3682,7 @@ fn processWorkspaceMessages(
         }
         if (isVisibleServerWorkflowReply(msg.command)) {
             if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
-            if (workspace.activeRoom()) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
+            if (workspaceTranscriptRoom(workspace, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
             redraw = true;
             continue;
         }
@@ -3696,6 +3696,9 @@ fn processWorkspaceMessages(
             if (client.hasRestorationTargets()) {
                 for (workspace.rooms.items) |*room| room.joined = false;
             } else if (workspace.rooms.items.len == 0) {
+                // Open the startup room before MOTD/LUSERS so those numerics
+                // have a transcript. JOIN confirmation still marks it joined.
+                _ = try workspace.ensure(channel);
                 try client.join(channel);
             } else for (workspace.rooms.items) |*room| {
                 room.joined = false;
@@ -3748,9 +3751,9 @@ fn processWorkspaceMessages(
             const kind = msg.param(1) orelse continue;
             const wire = msg.param(2) orelse continue;
             if (!std.mem.eql(u8, kind, "CCUDI1")) continue;
-            const room_index = workspace.find(target) orelse if (std.ascii.eqlIgnoreCase(target, nick)) workspace.active orelse continue else continue;
+            const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, false, nick, target, state.ircx_data, preferences, state)) {
+            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, false, nick, workspace.rooms.items[room_index].name, state.ircx_data, preferences, state)) {
                 redraw = true;
                 continue;
             }
@@ -3856,6 +3859,12 @@ fn workspaceRoomForIncoming(
         return workspace.ensure(resolved) catch null;
     if (std.ascii.eqlIgnoreCase(resolved, self_nick)) return workspace.active;
     return workspace.find(resolved) orelse workspace.active;
+}
+
+fn workspaceTranscriptRoom(workspace: *cc.client.workspace.Workspace, channel: []const u8) ?*cc.client.workspace.Room {
+    if (workspace.activeRoom()) |room| return room;
+    const index = workspace.ensure(channel) catch return null;
+    return &workspace.rooms.items[index];
 }
 
 fn appendServerWorkflowReply(transcript: *cc.comic.session.Transcript, msg: *const cc.net.message.Message) !void {
@@ -4016,9 +4025,10 @@ fn applyAuthFailure(
     workspace: *cc.client.workspace.Workspace,
     state: *ChatState,
     msg: *const cc.net.message.Message,
+    channel: []const u8,
 ) !bool {
     state.status = if (std.mem.eql(u8, msg.command, "464")) "password rejected" else "banned";
-    if (workspace.activeRoom()) |active| try appendServerWorkflowReply(&active.transcript, msg);
+    if (workspaceTranscriptRoom(workspace, channel)) |active| try appendServerWorkflowReply(&active.transcript, msg);
     return true;
 }
 
@@ -5116,11 +5126,17 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     });
     try std.testing.expect(state.pending_dcc != null);
     const password = cc.net.message.parse(":server 464 me :Password incorrect");
-    try std.testing.expect(try applyAuthFailure(&workspace, &state, &password));
+    try std.testing.expect(try applyAuthFailure(&workspace, &state, &password, "#root"));
     try std.testing.expectEqualStrings("password rejected", state.status);
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expect(state.pending_dcc == null);
     try std.testing.expect(!workspace.rooms.items[0].joined);
+
+    var empty = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer empty.deinit();
+    try std.testing.expect(empty.activeRoom() == null);
+    try std.testing.expect(workspaceTranscriptRoom(&empty, "#root") != null);
+    try std.testing.expectEqualStrings("#root", empty.rooms.items[0].name);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {
