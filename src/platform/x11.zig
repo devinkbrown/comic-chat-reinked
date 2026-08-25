@@ -41,7 +41,8 @@
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
 //!     FocusIn/leaving-hidden expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
 //!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes), a scaled
-//!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 (reinstalled on scale change), urgency on `notify` (cleared on
+//!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 plus ICCCM `WM_HINTS`
+//!     icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
 //!     for `xdg-open`, EnterNotify cursor restore and pointer move
@@ -454,6 +455,8 @@ pub const Window = struct {
     wm_max_vert: bool,
     wm_fullscreen: bool,
     cursor_id: u32,
+    icon_pixmap: u32,
+    icon_mask: u32,
     wm_urgent: bool,
     wm_hidden: bool,
     wm_net_hidden: bool,
@@ -524,6 +527,8 @@ pub const Window = struct {
             .wm_max_vert = false,
             .wm_fullscreen = false,
             .cursor_id = 0,
+            .icon_pixmap = 0,
+            .icon_mask = 0,
             .wm_urgent = false,
             .wm_hidden = false,
             .wm_net_hidden = false,
@@ -571,7 +576,6 @@ pub const Window = struct {
         try setWmClass(&self.conn, self.window, "comicchat", "Reinked");
         try setNetWmPid(&self.conn, self.window);
         try setNetStartupId(&self.conn, self.window, env);
-        try setWmHints(&self.conn, self.window);
         try setNetWmWindowType(&self.conn, self.window);
         try setAllowedActions(&self.conn, self.window);
         try setWmLocaleName(&self.conn, self.window, env);
@@ -581,6 +585,8 @@ pub const Window = struct {
         try setNetWmState(&self.conn, self.window, &.{});
         try selectRootPropertyNotify(&self.conn);
         try setNetWmIcon(self.gpa, &self.conn, self.window);
+        self.replaceWmIconPixmaps();
+        try writeWmHints(&self.conn, self.window, false, self.icon_pixmap, self.icon_mask);
         self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, self.scale, env, &self.pending_events) catch 0;
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
@@ -595,11 +601,13 @@ pub const Window = struct {
         self.handoverClipboard();
         if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         self.keymap.deinit(self.gpa);
+        if (self.icon_pixmap != 0) freePixmap(&self.conn, self.icon_pixmap) catch {};
+        if (self.icon_mask != 0) freePixmap(&self.conn, self.icon_mask) catch {};
+        if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
         self.conn.stream.close(self.conn.io);
         self.threaded.deinit();
         self.pending_chars.deinit(self.gpa);
         self.pending_events.deinit(self.gpa);
-        if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
         self.unloadCompose();
         self.gpa.destroy(self);
     }
@@ -1697,6 +1705,7 @@ pub const Window = struct {
         if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
         self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, new_scale, env, &self.pending_events) catch 0;
         setNetWmIcon(self.gpa, &self.conn, self.window) catch {};
+        self.replaceWmIconPixmaps();
         setSizeHints(&self.conn, self.window, self.pixel_width, self.pixel_height, new_scale) catch {};
         const w = physicalToLogical(self.pixel_width, new_scale);
         const h = physicalToLogical(self.pixel_height, new_scale);
@@ -1915,15 +1924,24 @@ pub const Window = struct {
 
     fn demandAttention(self: *Window) void {
         self.wm_urgent = true;
-        writeWmHints(&self.conn, self.window, true) catch {};
+        writeWmHints(&self.conn, self.window, true, self.icon_pixmap, self.icon_mask) catch {};
         sendNetWmStateClient(&self.conn, self.window, 1, self.conn.net_wm_state_attention) catch {};
     }
 
     fn clearAttention(self: *Window) void {
         if (!self.wm_urgent) return;
         self.wm_urgent = false;
-        writeWmHints(&self.conn, self.window, false) catch {};
+        writeWmHints(&self.conn, self.window, false, self.icon_pixmap, self.icon_mask) catch {};
         sendNetWmStateClient(&self.conn, self.window, 0, self.conn.net_wm_state_attention) catch {};
+    }
+
+    fn replaceWmIconPixmaps(self: *Window) void {
+        const next = installWmIconPixmaps(self.gpa, &self.conn, self.scale) catch return;
+        if (self.icon_pixmap != 0) freePixmap(&self.conn, self.icon_pixmap) catch {};
+        if (self.icon_mask != 0) freePixmap(&self.conn, self.icon_mask) catch {};
+        self.icon_pixmap = next.pixmap;
+        self.icon_mask = next.mask;
+        writeWmHints(&self.conn, self.window, self.wm_urgent, self.icon_pixmap, self.icon_mask) catch {};
     }
 
     fn readNetWmState(self: *Window) void {
@@ -2230,16 +2248,24 @@ fn sendStartupInfoChunk(conn: *XConn, window: u32, typ: u32, data: [20]u8) !void
     try writeAll(conn, &req);
 }
 
-fn setWmHints(conn: *XConn, window: u32) !void {
-    try writeWmHints(conn, window, false);
+fn wmIconPixelSize(scale: u32) u32 {
+    return if (scale >= 2) 64 else 32;
 }
 
-fn writeWmHints(conn: *XConn, window: u32, urgent: bool) !void {
+fn wmHintsFlags(urgent: bool, has_icon: bool) u32 {
+    var flags: u32 = 1 | 2; // InputHint | StateHint
+    if (has_icon) flags |= (1 << 2) | (1 << 5); // IconPixmapHint | IconMaskHint
+    if (urgent) flags |= 1 << 8; // UrgencyHint
+    return flags;
+}
+
+fn writeWmHints(conn: *XConn, window: u32, urgent: bool, icon_pixmap: u32, icon_mask: u32) !void {
     var hints: [9]u32 = @splat(0);
-    hints[0] = 1 | 2; // InputHint | StateHint
-    if (urgent) hints[0] |= 1 << 8; // UrgencyHint
+    hints[0] = wmHintsFlags(urgent, icon_pixmap != 0 and icon_mask != 0);
     hints[1] = 1; // input
     hints[2] = 1; // NormalState
+    hints[3] = icon_pixmap;
+    hints[7] = icon_mask;
     try changeProperty32(conn, window, atom_wm_hints, atom_wm_hints, &hints);
 }
 
@@ -2696,6 +2722,35 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.wm_change_state = try internAtom(conn, "WM_CHANGE_STATE");
     conn.multiple = try internAtom(conn, "MULTIPLE");
     conn.atom_pair = try internAtom(conn, "ATOM_PAIR");
+}
+
+fn installWmIconPixmaps(gpa: std.mem.Allocator, conn: *XConn, scale: u32) !struct { pixmap: u32, mask: u32 } {
+    const size = wmIconPixelSize(scale);
+    const count = try std.math.mul(usize, @as(usize, size), @as(usize, size));
+    const pixels = try gpa.alloc(u32, count);
+    defer gpa.free(pixels);
+    services.fillWindowMark(pixels, size);
+    const stride = services.bitmapStride(size);
+    const plane_len = stride * @as(usize, size);
+    const source_bits = try gpa.alloc(u8, plane_len);
+    defer gpa.free(source_bits);
+    const mask_bits = try gpa.alloc(u8, plane_len);
+    defer gpa.free(mask_bits);
+    services.encodeBitmapPlane(source_bits, pixels, size, size, true);
+    services.encodeBitmapPlane(mask_bits, pixels, size, size, false);
+
+    const pixmap = try conn.allocId();
+    errdefer freePixmap(conn, pixmap) catch {};
+    const mask = try conn.allocId();
+    errdefer freePixmap(conn, mask) catch {};
+    const gc = try conn.allocId();
+    try createPixmap(conn, pixmap, 1, @intCast(size), @intCast(size));
+    try createPixmap(conn, mask, 1, @intCast(size), @intCast(size));
+    try createMonoGc(conn, gc, pixmap);
+    try putBitmap(conn, pixmap, gc, source_bits, size, size);
+    try putBitmap(conn, mask, gc, mask_bits, size, size);
+    freeGc(conn, gc) catch {};
+    return .{ .pixmap = pixmap, .mask = mask };
 }
 
 fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
@@ -3763,6 +3818,12 @@ test "ICCCM WM_STATE treats only NormalState as visible" {
     try std.testing.expect(combinedWmHidden(false, false, true, false));
     try std.testing.expect(combinedWmHidden(false, false, false, true));
     try std.testing.expect(combinedWmHidden(true, false, false, false));
+    try std.testing.expectEqual(@as(u32, 32), wmIconPixelSize(1));
+    try std.testing.expectEqual(@as(u32, 64), wmIconPixelSize(2));
+    try std.testing.expectEqual(@as(u32, 1 | 2), wmHintsFlags(false, false));
+    try std.testing.expectEqual(@as(u32, 1 | 2 | (1 << 2) | (1 << 5)), wmHintsFlags(false, true));
+    try std.testing.expectEqual(@as(u32, 1 | 2 | (1 << 8)), wmHintsFlags(true, false));
+    try std.testing.expectEqual(@as(u32, 1 | 2 | (1 << 2) | (1 << 5) | (1 << 8)), wmHintsFlags(true, true));
 }
 
 test "clipboard text targets include ICCCM and GTK MIME atoms" {

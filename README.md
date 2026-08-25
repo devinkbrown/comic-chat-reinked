@@ -316,7 +316,7 @@ middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste doe
 ICCCM `WM_STATE` / `WM_CHANGE_STATE` (skipping `present()` while NET hidden, ICCCM iconic, unmapped, shaded, or
 fully obscured; MapNotify, FocusIn, and leaving hidden expose), honors keyboard group bits, Mod3 Mode_switch, and
 MappingNotify without dropping queued events, resets compose on FocusOut,
-installs a scaled core pointer and `_NET_WM_ICON` at 16/32/64/128 (reinstalled on scale change), raises urgency on
+installs a scaled core pointer, `_NET_WM_ICON` at 16/32/64/128, and an ICCCM `WM_HINTS` icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), raises urgency on
 `notify` until FocusIn (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
 present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
 `_NET_WM_USER_TIME`, `_NET_STARTUP_ID` plus a startup-notification remove

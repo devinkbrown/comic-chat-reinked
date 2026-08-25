@@ -155,7 +155,7 @@ hash.
   activated exposes). X11 FocusIn and leaving hidden expose.
   When advertised, Wayland requests server-side decorations and
   re-requests SSD once if the compositor configures client-side mode.
-  `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON` at 16/32/64/128 (reinstalled on scale change), and
+  `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor, `_NET_WM_ICON` at 16/32/64/128, and an ICCCM `WM_HINTS` icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), and
   `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
   `xdg_toplevel_icon_v1` (32@1 plus 64@2, reinstalled on integer scale change) when advertised. Wayland consumes
