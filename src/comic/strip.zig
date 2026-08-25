@@ -2087,3 +2087,175 @@ test "Color apartment and cafe drop the next-panel sheet sliver" {
         try std.testing.expect(sky_count < 80);
     }
 }
+
+const LeftoverFaceKind = enum { yellow_or_cool, peach_or_cool, yellow, cool, peach_or_yellow, green, cool_or_brown };
+
+fn leftoverFacePixel(pixel: u32, kind: LeftoverFaceKind) bool {
+    const red: i32 = @as(u8, @truncate(pixel >> 16));
+    const green: i32 = @as(u8, @truncate(pixel >> 8));
+    const blue: i32 = @as(u8, @truncate(pixel));
+    if (red >= 245 and green >= 245 and blue >= 245) return false;
+    const yellow = red > 180 and green > 160 and blue < 90 and red > blue + 40;
+    const cool = blue > red + 15 and blue + 10 > green;
+    const peach = red > 160 and green > 110 and blue > 80 and red > blue + 20;
+    const green_ink = green > red + 15 and green > blue + 10;
+    const brown = red > 40 and green > 20 and blue > 10 and red > green + 10 and green > blue and red < 160;
+    return switch (kind) {
+        .yellow_or_cool => yellow or cool,
+        .peach_or_cool => peach or cool,
+        .yellow => yellow,
+        .cool => cool,
+        .peach_or_yellow => peach or yellow,
+        .green => green_ink,
+        .cool_or_brown => cool or brown,
+    };
+}
+
+fn leftoverStoryFaceHits(image: Image, kind: LeftoverFaceKind) !void {
+    const stride = panel_width + device_interstice;
+    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    var checked: usize = 0;
+    var col: u32 = 1;
+    while (col < cols) : (col += 1) {
+        const x0 = col * stride;
+        if (x0 + panel_width > image.width) continue;
+        var face: usize = 0;
+        var y: u32 = panel_height / 4;
+        while (y < (panel_height * 6) / 10) : (y += 1) {
+            var x: u32 = 0;
+            while (x < panel_width) : (x += 1) {
+                if (leftoverFacePixel(image.pixels[y * image.width + x0 + x], kind)) face += 1;
+            }
+        }
+        if (face < 20) continue;
+        try std.testing.expect(face > 40);
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
+}
+
+test "leftover Color dests keep pose-authored face color under a tall balloon" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh color", .kind = .yellow_or_cool },
+        .{ .speaker = "mike color", .kind = .peach_or_cool },
+        .{ .speaker = "sage color", .kind = .yellow },
+        .{ .speaker = "maynard color", .kind = .cool },
+        .{ .speaker = "cro color", .kind = .peach_or_yellow },
+        .{ .speaker = "scotty color", .kind = .green },
+        .{ .speaker = "lynnea color", .kind = .cool_or_brown },
+    };
+    const tall = "Great. The comic view feels much clearer now and the standing Color figures keep their faces visible even when the balloon needs several more lines of text than a short dest would allow without sliding.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "leftover Color continuation keeps dest face color in the panel" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh color", .kind = .yellow_or_cool },
+        .{ .speaker = "maynard color", .kind = .cool },
+        .{ .speaker = "cro color", .kind = .peach_or_yellow },
+        .{ .speaker = "mike color", .kind = .peach_or_cool },
+    };
+    for (cases) |case| {
+        const lines = [_]Line{
+            .{ .speaker = case.speaker, .text = "Great. The comic view feels much clearer now." },
+            .{ .speaker = case.speaker, .text = "A repeated speaker starts a fresh panel that must still show the dest face." },
+        };
+        var image = try renderWithOptions(gpa, &lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "leftover Color dests on unused rooms fill the bezel without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-rainy-street.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/color-space-corridor.bgb"),
+    };
+    for (rooms) |room| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = "hugh color", .text = "Hello from leftover dest." }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        const stride = panel_width + device_interstice;
+        const cols = if (stride == 0) 1 else image.width / stride + 1;
+        var checked: usize = 0;
+        var col: u32 = 1;
+        while (col < cols) : (col += 1) {
+            const x0 = col * stride;
+            if (x0 + panel_width > image.width) continue;
+            var interior: usize = 0;
+            var interior_paper: usize = 0;
+            var y_scan: u32 = 8;
+            while (y_scan + 8 < panel_height) : (y_scan += 1) {
+                var x_scan: u32 = 8;
+                while (x_scan + 8 < panel_width) : (x_scan += 1) {
+                    const pixel = image.pixels[y_scan * image.width + x0 + x_scan];
+                    const red: u8 = @truncate(pixel >> 16);
+                    const green: u8 = @truncate(pixel >> 8);
+                    const blue: u8 = @truncate(pixel);
+                    interior += 1;
+                    if (red >= 248 and green >= 248 and blue >= 248) interior_paper += 1;
+                }
+            }
+            if (interior_paper * 10 >= interior * 9) continue;
+            var paper: usize = 0;
+            var inset: u32 = 1;
+            while (inset <= 3) : (inset += 1) {
+                var x: u32 = 8;
+                while (x + 8 < panel_width) : (x += 1) {
+                    const bottom = image.pixels[(panel_height - 1 - inset) * image.width + x0 + x];
+                    const red: u8 = @truncate(bottom >> 16);
+                    const green: u8 = @truncate(bottom >> 8);
+                    const blue: u8 = @truncate(bottom);
+                    if (red >= 248 and green >= 248 and blue >= 248) paper += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 0), paper);
+            checked += 1;
+        }
+        try std.testing.expect(checked >= 1);
+    }
+}
+
+test "leftover Color laugh and sad dests keep pose-authored face color" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, text: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh color", .text = "ha ha that is hilarious leftover laugh", .kind = .yellow_or_cool },
+        .{ .speaker = "maynard color", .text = "oh no that is so sad leftover", .kind = .cool },
+        .{ .speaker = "cro color", .text = "wow leftover wave hello there", .kind = .peach_or_yellow },
+        .{ .speaker = "sage color", .text = "ha ha leftover laugh", .kind = .yellow },
+        .{ .speaker = "scotty color", .text = "oh no leftover sad", .kind = .green },
+    };
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = case.text }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}

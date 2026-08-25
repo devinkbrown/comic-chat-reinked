@@ -1191,8 +1191,20 @@ test "authored simple face.x is unchanged and generated cards keep paper pad" {
     const blobs = [_][]const u8{
         @embedFile("../assets/generated/anna-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/anna-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
     };
-    for (blobs) |avb_data| {
+    for (blobs, 0..) |avb_data, index| {
         var generated = try assembleDetailedForText(gpa, avb_data, "ordinary text");
         defer generated.deinit(gpa);
         const ink = paperInkBounds(generated.image).?;
@@ -1203,9 +1215,11 @@ test "authored simple face.x is unchanged and generated cards keep paper pad" {
         try std.testing.expect(generated.face_x <= @as(i32, @intCast(ink.x + ink.w)));
         try std.testing.expect(generated.face_x * 4 > @as(i32, @intCast(generated.image.width)));
         try std.testing.expect(generated.face_x * 4 < @as(i32, @intCast(generated.image.width)) * 3);
-        try std.testing.expect(generated.image.width < 140);
+        try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(generated.image));
+        try std.testing.expect(generated.image.height + 20 > generated.image.width);
         try std.testing.expect(generated.image.height <= 280);
         try std.testing.expect(generated.image.height >= 220);
+        if (index < 2) try std.testing.expect(generated.image.width < 140);
     }
 }
 
@@ -1720,6 +1734,54 @@ test "Sage Color keeps pose-authored yellow without a blue wash" {
     }
     try std.testing.expect(yellow > 400);
     try std.testing.expect(yellow > blue * 4);
+}
+
+test "Sage HD Mike HD Scotty HD Lynnea HD keep leftover local color" {
+    const gpa = std.testing.allocator;
+    const packs = [_][]const u8{
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
+    };
+    for (packs, 0..) |avb_data, index| {
+        var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, 9, 0);
+        defer card.deinit(gpa);
+        var yellow: usize = 0;
+        var cool: usize = 0;
+        var peach: usize = 0;
+        var green_n: usize = 0;
+        var brown: usize = 0;
+        for (card.pixels) |pixel| {
+            const red: i32 = @as(u8, @truncate(pixel >> 16));
+            const green: i32 = @as(u8, @truncate(pixel >> 8));
+            const blue: i32 = @as(u8, @truncate(pixel));
+            if (red >= 245 and green >= 245 and blue >= 245) continue;
+            if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+            if (blue > red + 15 and blue + 10 > green) cool += 1;
+            if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+            if (green > red + 15 and green > blue + 10) green_n += 1;
+            if (red > 40 and green > 20 and blue > 10 and red > green + 10 and green > blue and red < 160) brown += 1;
+        }
+        switch (index) {
+            0 => {
+                try std.testing.expect(yellow > 400);
+                try std.testing.expect(yellow > cool * 4);
+            },
+            1 => {
+                try std.testing.expect(peach > 80);
+                try std.testing.expect(cool > 400);
+            },
+            2 => {
+                try std.testing.expect(green_n > 400);
+                try std.testing.expect(green_n > peach * 4);
+            },
+            else => {
+                try std.testing.expect(cool + brown > 400);
+                try std.testing.expect(cool + brown > peach * 4);
+            },
+        }
+    }
 }
 
 test "simple SetIndices uses gesture ordinal while OTHERMAPPED uses expression" {
