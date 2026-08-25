@@ -43,7 +43,7 @@
 //!     keys (`file://` localhost / `127.0.0.1` / `[::1]` / local nodename
 //!     are local paths), `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
 //!     FocusIn/leaving-hidden/gaining `_NET_WM_STATE_FOCUSED` expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
-//!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes and QueryPointer seeds hover when the pointer is already inside), a scaled
+//!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; becoming hidden/unmapped/shaded clears hover so MapNotify / leaving-hidden QueryPointer can seed it), a scaled
 //!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 plus ICCCM `WM_HINTS`
 //!     icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), urgency on `notify` (cleared on
 //!     FocusIn and gaining `_NET_WM_STATE_FOCUSED`), EWMH ping/type/icon name/user time (`_NET_WM_USER_TIME` plus
@@ -916,7 +916,6 @@ pub const Window = struct {
             },
             8 => { // LeaveNotify
                 if (x11NotifyModeIsGrab(event[30])) return .other;
-                self.pointer_inside = false;
                 return self.pointerLeave();
             },
             9 => { // FocusIn
@@ -932,8 +931,10 @@ pub const Window = struct {
             },
             18 => { // UnmapNotify
                 if (!self.structureEventIsOurs(event)) return .other;
+                const was_hidden = self.wm_hidden;
                 self.wm_unmapped = true;
                 self.syncHidden();
+                if (self.applyHiddenPointer(was_hidden)) |ev| return ev;
                 return .other;
             },
             19 => { // MapNotify
@@ -1016,11 +1017,13 @@ pub const Window = struct {
                     const was_focused = self.wm_focused;
                     self.readNetWmState();
                     if (!was_focused and self.wm_focused) self.clearAttention();
+                    if (self.applyHiddenPointer(was_hidden)) |ev| return ev;
                     if (netStateExpose(was_hidden, self.wm_hidden, was_focused, self.wm_focused)) return .expose;
                 }
                 if (window == self.window and atom == self.conn.wm_state) {
                     const was_hidden = self.wm_hidden;
                     self.readWmState();
+                    if (self.applyHiddenPointer(was_hidden)) |ev| return ev;
                     if (was_hidden and !self.wm_hidden) return .expose;
                 }
                 self.continueIncr(event);
@@ -1060,10 +1063,12 @@ pub const Window = struct {
                     const was_focused = self.wm_focused;
                     self.applyNetWmStateMessage(event);
                     if (!was_focused and self.wm_focused) self.clearAttention();
+                    if (self.applyHiddenPointer(was_hidden)) |ev| return ev;
                     if (netStateExpose(was_hidden, self.wm_hidden, was_focused, self.wm_focused)) return .expose;
                 } else if (typ == self.conn.wm_change_state) {
                     const was_hidden = self.wm_hidden;
                     self.applyWmChangeState(event);
+                    if (self.applyHiddenPointer(was_hidden)) |ev| return ev;
                     if (was_hidden and !self.wm_hidden) return .expose;
                 }
                 return .other;
@@ -1959,7 +1964,19 @@ pub const Window = struct {
         };
     }
 
+    fn applyHiddenPointer(self: *Window, was_hidden: bool) ?Event {
+        return switch (hiddenPointerAction(was_hidden, self.wm_hidden, self.pointer_inside)) {
+            .leave => self.pointerLeave(),
+            .seed => {
+                self.seedMappedPointer();
+                return null;
+            },
+            .none => null,
+        };
+    }
+
     fn pointerLeave(self: *Window) Event {
+        self.pointer_inside = false;
         const held = shared_event.firstHeldPointerButton(self.held_primary, self.held_middle, self.held_secondary);
         self.held_primary = false;
         self.held_middle = false;
@@ -3882,6 +3899,14 @@ fn combinedWmHidden(net_hidden: bool, icccm_hidden: bool, unmapped: bool, shaded
     return net_hidden or icccm_hidden or unmapped or shaded;
 }
 
+const HiddenPointerAction = enum { none, leave, seed };
+
+fn hiddenPointerAction(was_hidden: bool, hidden: bool, pointer_inside: bool) HiddenPointerAction {
+    if (!was_hidden and hidden and pointer_inside) return .leave;
+    if (was_hidden and !hidden and !pointer_inside) return .seed;
+    return .none;
+}
+
 fn queryPointerWinPoint(reply: *const [32]u8) struct { same_screen: bool, x: i32, y: i32, state: u16 } {
     return .{
         .same_screen = reply[1] != 0,
@@ -4330,6 +4355,12 @@ test "ICCCM WM_STATE treats only NormalState as visible" {
     try std.testing.expect(combinedWmHidden(false, true, false, false));
     try std.testing.expect(combinedWmHidden(false, false, true, false));
     try std.testing.expect(combinedWmHidden(false, false, false, true));
+    try std.testing.expectEqual(HiddenPointerAction.leave, hiddenPointerAction(false, true, true));
+    try std.testing.expectEqual(HiddenPointerAction.none, hiddenPointerAction(false, true, false));
+    try std.testing.expectEqual(HiddenPointerAction.seed, hiddenPointerAction(true, false, false));
+    try std.testing.expectEqual(HiddenPointerAction.none, hiddenPointerAction(true, false, true));
+    try std.testing.expectEqual(HiddenPointerAction.none, hiddenPointerAction(false, false, true));
+    try std.testing.expectEqual(HiddenPointerAction.none, hiddenPointerAction(true, true, true));
     try std.testing.expect(combinedWmHidden(true, false, false, false));
     try std.testing.expectEqual(@as(u32, 32), wmIconPixelSize(1));
     try std.testing.expectEqual(@as(u32, 64), wmIconPixelSize(2));
