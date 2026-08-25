@@ -245,18 +245,13 @@ fn localePathFor(locale: []const u8) ?[]const u8 {
 }
 
 fn readFileCapped(gpa: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
-    var file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.AccessDenied, error.NotDir, error.BadPathName => return error.FileNotFound,
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    return std.Io.Dir.cwd().readFileAlloc(threaded.io(), path, gpa, .limited(limit)) catch |err| switch (err) {
+        error.FileNotFound, error.AccessDenied => return error.FileNotFound,
+        error.StreamTooLong => return error.ComposeFileTooLarge,
         else => return err,
     };
-    defer file.close();
-    const stat = file.stat() catch return error.FileNotFound;
-    if (stat.size > limit) return error.ComposeFileTooLarge;
-    const n: usize = @intCast(stat.size);
-    const buf = try gpa.alloc(u8, n);
-    errdefer gpa.free(buf);
-    const read_n = try file.readAll(buf);
-    return buf[0..read_n];
 }
 
 fn parseAngle(text: []const u8, i: *usize) ?[]const u8 {
