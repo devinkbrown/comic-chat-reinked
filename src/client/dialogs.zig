@@ -84,7 +84,7 @@ pub const specs = [_]Spec{
     .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Settings", .group = .application, .source_w = 360, .source_h = 300 },
     .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "CAST card", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose character", .group = .connection, .source_w = 360, .source_h = 260 },
-    .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Background", .group = .connection, .source_w = 252, .source_h = 218 },
+    .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Backdrop", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Sign-in name", .group = .connection, .source_w = 188, .source_h = 71 },
     .{ .id = .channel, .resource = "IDD_CHANNEL", .title = "Join room", .group = .rooms, .source_w = 144, .source_h = 110 },
@@ -117,11 +117,11 @@ pub const specs = [_]Spec{
     .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule settings", .group = .automation, .source_w = 186, .source_h = 95 },
     .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Online CAST", .group = .automation, .source_w = 262, .source_h = 111 },
     .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Server list", .group = .connection, .source_w = 252, .source_h = 218 },
-    .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Password", .group = .connection, .source_w = 198, .source_h = 127 },
+    .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Sign in", .group = .connection, .source_w = 198, .source_h = 127 },
     .{ .id = .create_set, .resource = "IDD_CREATESET", .title = "Create rule set", .group = .automation, .source_w = 226, .source_h = 79 },
     .{ .id = .open_conversation, .resource = "PORTABLE_OPEN_CONVERSATION", .title = "Open conversation", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .save_conversation, .resource = "PORTABLE_SAVE_CONVERSATION", .title = "Save conversation", .group = .files, .source_w = 300, .source_h = 108 },
-    .{ .id = .export_image, .resource = "PORTABLE_EXPORT_IMAGE", .title = "Export comic image", .group = .files, .source_w = 300, .source_h = 108 },
+    .{ .id = .export_image, .resource = "PORTABLE_EXPORT_IMAGE", .title = "Export Sunday page", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .ircx_properties, .resource = "PORTABLE_IRCX_PROPERTIES", .title = "Named properties", .group = .rooms, .source_w = 300, .source_h = 210 },
     .{ .id = .room_access, .resource = "PORTABLE_ROOM_ACCESS", .title = "Room access", .group = .rooms, .source_w = 300, .source_h = 236 },
     .{ .id = .ircx_events, .resource = "PORTABLE_IRCX_EVENTS", .title = "Room events", .group = .rooms, .source_w = 300, .source_h = 184 },
@@ -159,7 +159,7 @@ pub fn prompt(id: Id) ?[]const u8 {
         .advanced_event_params => "Rule limits",
         .file_transfer => "File path",
         .open_conversation, .recent_files => "Conversation file",
-        .open_locator => "Chat locator file",
+        .open_locator => "Locator file",
         .save_conversation => "Conversation file",
         .export_image => "PNG file",
         .print_preview => "PDF file",
@@ -445,6 +445,10 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Whisper", get(.whisper).title);
     try std.testing.expectEqualStrings("Connection setup", get(.setup).title);
     try std.testing.expectEqualStrings("Sign in", primaryLabel(.password));
+    try std.testing.expectEqualStrings("Sign in", get(.password).title);
+    try std.testing.expectEqualStrings("Backdrop", get(.background).title);
+    try std.testing.expectEqualStrings("Export Sunday page", get(.export_image).title);
+    try std.testing.expectEqualStrings("Locator file", prompt(.open_locator).?);
     try std.testing.expectEqualStrings("Set sign-in name", primaryLabel(.nickname));
     try std.testing.expectEqualStrings("Sign-in name", get(.nickname).title);
     try std.testing.expectEqualStrings("Sign-in name", fields(.nickname)[0].label);

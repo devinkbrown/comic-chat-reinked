@@ -2247,8 +2247,8 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(1, "Save PDF");
         },
         .connection_features => {
-            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Offline");
-            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Not signed in" else "Offline");
+            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext (unsafe)" else "Offline");
+            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Waiting to sign in" else "Offline");
             try view.setDialogValueAt(2, if (state.ircx_data) "Ready" else "Waiting");
             if (client) |connected| {
                 var capabilities: std.ArrayList(u8) = .empty;
@@ -3045,7 +3045,7 @@ fn applyDialogAction(
         },
         .open_locator => {
             const document = std.Io.Dir.cwd().readFileAlloc(io, value, gpa, .limited(cc.client.files.max_document_bytes)) catch {
-                view.setDialogNotice("Could not open that chat locator.");
+                view.setDialogNotice("Could not open that locator.");
                 return;
             };
             defer gpa.free(document);

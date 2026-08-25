@@ -302,6 +302,14 @@ pub const View = struct {
                 .end => {
                     if (self.status_panel_open) self.focused_status_action = .settings;
                 },
+                .escape => {
+                    if (self.status_panel_open) {
+                        self.closeStatusPanel();
+                        return .none;
+                    }
+                    self.shell.focus = .navigation;
+                    return .none;
+                },
                 else => return null,
             },
             .members => switch (key) {
@@ -436,6 +444,10 @@ pub const View = struct {
                     if (self.room_tab_first + viewport.capacity < self.room_tab_count)
                         return .{ .room_tab = self.room_tab_first + viewport.capacity };
                     return null;
+                },
+                .escape => {
+                    self.shell.focus = .composer;
+                    return .none;
                 },
                 else => return null,
             }
@@ -1593,8 +1605,8 @@ pub const View = struct {
         const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
         var snapshot: accessibility.Snapshot = .{ .status = status };
         snapshot.append(.{ .id = "comic-chat", .role = .window, .bounds = .{ .x = 0, .y = 0, .w = @intCast(self.canvas.width), .h = @intCast(self.canvas.height) }, .label = "Comic Chat" });
-        snapshot.append(.{ .id = "menu", .role = .menu_bar, .bounds = layout.menu, .label = "Application menu", .focused = self.shell.focus == .navigation });
-        snapshot.append(.{ .id = "toolbar", .role = .toolbar, .bounds = layout.toolbar, .label = "Application tools", .focused = self.shell.focus == .toolbar });
+        snapshot.append(.{ .id = "menu", .role = .menu_bar, .bounds = layout.menu, .label = "Sunday menu", .focused = self.shell.focus == .navigation });
+        snapshot.append(.{ .id = "toolbar", .role = .toolbar, .bounds = layout.toolbar, .label = "Sunday tools", .focused = self.shell.focus == .toolbar });
         const toolbar_layout = ui.ToolbarLayout.init(layout.toolbar);
         for (ui.ToolbarLayout.command_ids, 0..) |command, index| if (toolbar_layout.buttonRect(index)) |bounds| snapshot.append(.{
             .id = toolbarSemanticId(index),
@@ -1643,7 +1655,7 @@ pub const View = struct {
         });
         snapshot.append(.{ .id = "status-tab", .role = .button, .bounds = .{ .x = layout.tabs.x, .y = layout.tabs.y, .w = 108, .h = layout.tabs.h }, .label = statusTabLabel(status), .selected = self.status_panel_open, .focused = self.shell.focus == .status });
         snapshot.append(.{ .id = "status", .role = .button, .bounds = layout.status, .label = statusBarLabel(status), .focused = self.shell.focus == .status });
-        if (self.status_panel_open) snapshot.append(.{ .id = "status-panel", .role = .dialog, .bounds = statusPanelRect(self.canvas.width, self.canvas.height, self.status_detailed), .label = "Connection and activity status", .focused = true });
+        if (self.status_panel_open) snapshot.append(.{ .id = "status-panel", .role = .dialog, .bounds = statusPanelRect(self.canvas.width, self.canvas.height, self.status_detailed), .label = "Wire and activity status", .focused = true });
         if (self.active_menu) |menu| {
             const popup = ui.PopupLayout.menu(self.canvas.width, menuStart(menu), geometry.menu_height, menuPopupRect(self.canvas.width, menu).w, menuItemCount(menu));
             snapshot.append(.{ .id = "active-menu", .role = .menu, .bounds = popup.rect, .label = menu_labels[menu], .focused = true });
@@ -2088,7 +2100,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             1 => "Open locator",
             2 => "Recent conversations",
             3 => "Save conversation",
-            4 => "Export comic image",
+            4 => "Export Sunday page",
             5 => "Print and PDF preview",
             else => "Exit",
         },
@@ -2104,12 +2116,12 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Show CAST",
             3 => "CAST icons",
             4 => "CAST list",
-            else => "Comic view options",
+            else => "Page layout",
         },
         3 => switch (item) {
             0 => "Text font",
             1 => "Text color",
-            2 => "Background",
+            2 => "Backdrop",
             3 => "Character",
             4 => "CAST card",
             5 => "Bold selection",
@@ -2445,7 +2457,7 @@ const ToolGlyph = ui.ToolGlyph;
 fn toolbarLabel(index: u8) []const u8 {
     return switch (index) {
         0 => "Connection setup",
-        1 => "Disconnect",
+        1 => "Leave the wire",
         2 => "Join room",
         3 => "Leave room",
         4 => "Create room",
@@ -2459,8 +2471,8 @@ fn toolbarLabel(index: u8) []const u8 {
         12 => "Ignore CAST",
         13 => "Send a whisper",
         14 => "Email CAST",
-        15 => "Open home page",
-        16 => "Start meeting",
+        15 => "Open homepage",
+        16 => "Send call link",
         17 => "Choose text font",
         18 => "Choose text color",
         19 => "Bold",
@@ -3413,7 +3425,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .open_conversation => "Open a saved conversation",
         .save_conversation => "Save this conversation",
         .export_image => "Export the Sunday page as an image",
-        .open_locator => "Open a saved chat locator",
+        .open_locator => "Open a saved locator",
         .print_preview => "Save a printable Sunday page",
         .channel_password => "Needed if the room is locked",
         .choose_color => "Ink color for typed text",
@@ -4499,6 +4511,12 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("CAST card", menuItemLabel(3, 4));
     try std.testing.expectEqualStrings("Open locator", menuItemLabel(0, 1));
     try std.testing.expectEqualStrings("CAST card", toolbarLabel(11));
+    try std.testing.expectEqualStrings("Leave the wire", toolbarLabel(1));
+    try std.testing.expectEqualStrings("Send call link", toolbarLabel(16));
+    try std.testing.expectEqualStrings("Export Sunday page", menuItemLabel(0, 4));
+    try std.testing.expectEqualStrings("Page layout", menuItemLabel(2, 5));
+    try std.testing.expectEqualStrings("Backdrop", menuItemLabel(3, 2));
+    try std.testing.expectEqualStrings("Open a saved locator", dialogHelper(.open_locator, ""));
     try std.testing.expectEqualStrings("CAST profile", menuItemLabel(5, 1));
     try std.testing.expectEqualStrings("Watch room, CAST, server, or wire events after the wire is live", dialogHelper(.ircx_events, ""));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
@@ -4768,6 +4786,13 @@ test "composer Escape returns to the menu bar and transcript Escape clears selec
     view.shell.focus = .say_actions;
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.escape).?);
     try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .status;
+    view.status_panel_open = false;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
 }
 
 test "member keyboard pages through the CAST" {
