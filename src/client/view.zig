@@ -4615,7 +4615,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Room details", menuItemLabel(4, 3));
     try std.testing.expectEqualStrings("Open room separately", menuItemLabel(4, 10));
     try std.testing.expectEqualStrings("Look", menu_labels[3]);
-    try std.testing.expectEqualStrings("Sunday tool", toolbarLabel(23));
+    try std.testing.expectEqualStrings("Insert symbol", toolbarLabel(23));
+    try std.testing.expectEqualStrings("Sunday tool", toolbarLabel(24));
     try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
