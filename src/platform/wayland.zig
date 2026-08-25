@@ -21,12 +21,14 @@
 //! path. text-input-v3 also gets a multiline content hint and a bounded
 //! cursor rectangle so IME candidate windows sit on the composer strip.
 //! Fractional buffer scale uses `wp_fractional_scale_v1` +
-//! `wp_viewporter` when advertised, otherwise the entered `wl_output`
-//! integer scale; the fallback shm cursor is refreshed when that scale
-//! changes. Clipboard uses `wl_data_device` and
-//! `zwp_primary_selection_v1` when present, including
+//! `wp_viewporter` when advertised, otherwise `wl_surface.preferred_buffer_scale`
+//! (compositor v6) or the entered `wl_output` integer scale; the fallback
+//! shm cursor is refreshed when that scale changes. Keyboard enter restores
+//! held Shift/Ctrl/Alt/Super from the keys array. Clipboard uses
+//! `wl_data_device` and `zwp_primary_selection_v1` when present, including
 //! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
-//! UTF-16 BOM decode. Text and `file:` drops arrive as typed keys (no new
+//! UTF-16 decode (including `text/plain;charset=utf-16` / `UTF16_STRING`
+//! on receive only). Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
 //! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
@@ -149,6 +151,13 @@ const text_mime_types = [_][]const u8{
     "TEXT",
     "STRING",
     "UTF8_STRING",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes` because
+/// the source payload is UTF-8.
+const utf16_mime_types = [_][]const u8{
+    "text/plain;charset=utf-16",
+    "UTF16_STRING",
 };
 
 pub const Key = shared_event.Key;
@@ -434,6 +443,7 @@ pub const Window = struct {
     entered_outputs: [max_outputs]u32 = @splat(0),
     entered_count: u8 = 0,
     output_scale: u32 = 1,
+    preferred_buffer_scale: u32 = 0,
     viewporter_id: u32 = 0,
     viewport_id: u32 = 0,
     fractional_manager_id: u32 = 0,
@@ -557,7 +567,7 @@ pub const Window = struct {
         if (globals.xdg_wm_base.name == 0) return error.MissingXdgWmBase;
 
         self.compositor_id = try self.conn.allocId();
-        self.compositor_version = @min(globals.compositor.version, 4);
+        self.compositor_version = @min(globals.compositor.version, 6);
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.compositor, "wl_compositor", self.compositor_version, self.compositor_id);
 
         self.shm_id = try self.conn.allocId();
@@ -1265,6 +1275,7 @@ pub const Window = struct {
                 self.last_serial = get32(body[0..4]);
                 const keys_len: usize = @intCast(get32(body[8..12]));
                 if (12 + pad4(keys_len) != body.len) return error.InvalidWaylandMessage;
+                self.applyHeldKeys(body[12 .. 12 + keys_len]);
                 return null;
             },
             2 => { // leave
@@ -1461,6 +1472,7 @@ pub const Window = struct {
     }
 
     fn currentOutputScale(self: *const Window) u32 {
+        if (self.preferred_buffer_scale != 0) return self.preferred_buffer_scale;
         var scale: u32 = 1;
         var i: usize = 0;
         while (i < self.entered_count) : (i += 1) {
@@ -1473,6 +1485,18 @@ pub const Window = struct {
             while (j < self.output_count) : (j += 1) scale = @max(scale, self.output_scales[j]);
         }
         return scale;
+    }
+
+    fn applyHeldKeys(self: *Window, keys: []const u8) void {
+        const mods = heldModsFromKeyArray(keys);
+        self.shift_left = mods.shift;
+        self.shift_right = false;
+        self.control_left = mods.control;
+        self.control_right = false;
+        self.alt_left = mods.alt;
+        self.alt_right = false;
+        self.super_left = mods.super;
+        self.super_right = false;
     }
 
     fn surfaceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
@@ -1493,6 +1517,10 @@ pub const Window = struct {
                     self.entered_outputs[index] = self.entered_outputs[self.entered_count];
                     self.entered_outputs[self.entered_count] = 0;
                 }
+            },
+            2 => { // preferred_buffer_scale(factor), compositor v6
+                if (body.len != 4) return null;
+                self.preferred_buffer_scale = get32(body);
             },
             else => return null,
         }
@@ -1568,6 +1596,20 @@ pub const Window = struct {
                         }
                     }
                     return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (utf16_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = services.clipboardUtf16BytesToUtf8(gpa, text) catch {
+                        return decodeClipboardBytes(gpa, text);
+                    };
+                    gpa.free(text);
+                    return decoded;
                 }
                 if (last_empty) |prev| gpa.free(prev);
                 last_empty = text;
@@ -2224,6 +2266,9 @@ fn knownTextMime(mime: []const u8) ?[]const u8 {
     for (text_mime_types) |known| {
         if (std.mem.eql(u8, mime, known)) return known;
     }
+    for (utf16_mime_types) |known| {
+        if (std.mem.eql(u8, mime, known)) return known;
+    }
     return null;
 }
 
@@ -2232,9 +2277,32 @@ fn textMimeRank(mime: []const u8) u8 {
     if (std.mem.eql(u8, mime, "text/plain;charset=utf8")) return 5;
     if (std.mem.eql(u8, mime, "text/plain")) return 4;
     if (std.mem.eql(u8, mime, "UTF8_STRING")) return 3;
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
     if (std.mem.eql(u8, mime, "text/uri-list")) return 2;
     if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
     return 0;
+}
+
+const HeldMods = struct {
+    shift: bool = false,
+    control: bool = false,
+    alt: bool = false,
+    super: bool = false,
+};
+
+fn heldModsFromKeyArray(keys: []const u8) HeldMods {
+    var mods: HeldMods = .{};
+    var off: usize = 0;
+    while (off + 4 <= keys.len) : (off += 4) {
+        switch (get32(keys[off..][0..4])) {
+            42, 54 => mods.shift = true,
+            29, 97 => mods.control = true,
+            56, 100 => mods.alt = true,
+            125, 126 => mods.super = true,
+            else => {},
+        }
+    }
+    return mods;
 }
 
 fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
@@ -2825,6 +2893,8 @@ test "Wayland output scale follows the entered surface, then the max bound outpu
     window.entered_outputs[1] = 11;
     window.entered_count = 2;
     try std.testing.expectEqual(@as(u32, 2), window.currentOutputScale());
+    window.preferred_buffer_scale = 3;
+    try std.testing.expectEqual(@as(u32, 3), window.currentOutputScale());
 }
 
 test "Wayland discrete axis wins over continuous axis in the same frame" {
@@ -2925,8 +2995,23 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/uri-list"));
     try std.testing.expect(isPlainTextMime("TEXT"));
     try std.testing.expect(isPlainTextMime("UTF8_STRING"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf-16"));
+    try std.testing.expect(isPlainTextMime("UTF16_STRING"));
     try std.testing.expect(!isPlainTextMime("image/png"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
+    try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));
+}
+
+test "keyboard-enter key array restores held modifiers" {
+    var keys: [8]u8 = undefined;
+    put32(keys[0..4], 42);
+    put32(keys[4..8], 29);
+    const mods = heldModsFromKeyArray(&keys);
+    try std.testing.expect(mods.shift);
+    try std.testing.expect(mods.control);
+    try std.testing.expect(!mods.alt);
+    try std.testing.expect(!mods.super);
+    try std.testing.expect(!heldModsFromKeyArray(&.{}).shift);
 }
 
 test "IME cursor rectangle sits on the bottom composer strip" {

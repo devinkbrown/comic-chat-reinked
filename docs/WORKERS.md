@@ -85,17 +85,21 @@ hash.
   advertised, with a multiline hint and a bounded composer-strip cursor
   rectangle. X11 claims focus via `WM_TAKE_FOCUS` / FocusIn, resets compose
   on FocusOut, honors group bits 13–14, and refreshes GetKeyboardMapping on
-  MappingNotify without dropping queued events. It does not speak XIM. Text
-  and `file:` drops use XDND / `wl_data_device` and are injected as existing
-  key events (no new Event variant); Wayland sends `data_offer.set_actions`
-  copy when accepting a drop. Clipboard MIME includes
-  `text/plain;charset=utf8`, `text/uri-list`, and X11 `UTF16_STRING`, with
-  UTF-8 BOM strip and UTF-16 decode. X11 re-reads `Xft.dpi` when the root
-  `RESOURCE_MANAGER` property changes and reinstalls the scaled cursor plus
-  physical WM size hints. Both backends track maximized/fullscreen window
-  state; X11 also tracks `_NET_WM_STATE_HIDDEN`, and Wayland records
-  tiled/suspended xdg states. When advertised, Wayland requests server-side
-  decorations. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
+  MappingNotify without dropping queued events. Wayland restores held
+  Shift/Ctrl/Alt/Super from the keyboard-enter keys array. It does not
+  speak XIM. Text and `file:` drops use XDND / `wl_data_device` and are
+  injected as existing key events (no new Event variant); Wayland sends
+  `data_offer.set_actions` copy when accepting a drop. Clipboard MIME
+  includes `text/plain;charset=utf8`, `text/uri-list`, and
+  `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
+  strip and UTF-16 decode. X11 re-reads `Xft.dpi` when the root
+  `RESOURCE_MANAGER` property changes, falls back to screen millimeter
+  size, and reinstalls the scaled cursor plus physical WM size hints.
+  Wayland binds `wl_compositor` at v6 when advertised and honors
+  `preferred_buffer_scale`. Both backends track maximized/fullscreen
+  window state; X11 also tracks `_NET_WM_STATE_HIDDEN` and ICCCM
+  `WM_STATE` / `WM_CHANGE_STATE`, and Wayland records tiled/suspended xdg
+  states. When advertised, Wayland requests server-side decorations. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
   `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
   `xdg_toplevel_icon_v1` when advertised. See `xkb.zig` and

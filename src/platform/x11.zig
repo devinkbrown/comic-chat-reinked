@@ -19,7 +19,8 @@
 //!     including `text/plain;charset=utf8`, `text/uri-list`, and
 //!     `UTF16_STRING`, TIMESTAMP, clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
-//!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden tracking, a scaled
+//!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
+//!     `WM_STATE` / `WM_CHANGE_STATE` iconic tracking, a scaled
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/allowed actions,
 //!     WM_TAKE_FOCUS, WM_LOCALE_NAME, physical WM size hints, and
@@ -132,6 +133,8 @@ const XConn = struct {
     net_wm_state_attention: u32 = 0,
     net_wm_state_hidden: u32 = 0,
     utf16_string: u32 = 0,
+    wm_state: u32 = 0,
+    wm_change_state: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -149,6 +152,8 @@ const Screen = struct {
     root_depth: u8,
     white_pixel: u32,
     black_pixel: u32,
+    width_px: u16 = 0,
+    width_mm: u16 = 0,
 };
 
 const Display = struct {
@@ -581,6 +586,7 @@ pub const Window = struct {
             },
             19 => { // MapNotify
                 self.wm_hidden = false;
+                self.readWmState();
                 return .other;
             },
             34 => { // MappingNotify
@@ -612,6 +618,9 @@ pub const Window = struct {
                 }
                 if (window == self.window and atom == self.conn.net_wm_state) {
                     self.readNetWmState();
+                }
+                if (window == self.window and atom == self.conn.wm_state) {
+                    self.readWmState();
                 }
                 self.continueIncr(event);
                 return .other;
@@ -646,6 +655,8 @@ pub const Window = struct {
                     if (self.takeXdndDrop(event)) |ev| return ev;
                 } else if (typ == self.conn.net_wm_state) {
                     self.applyNetWmStateMessage(event);
+                } else if (typ == self.conn.wm_change_state) {
+                    self.applyWmChangeState(event);
                 }
                 return .other;
             },
@@ -879,8 +890,10 @@ pub const Window = struct {
                 try acc.appendSlice(gpa, chunk.bytes);
                 continue;
             }
-            _ = self.handleProtocolEvent(raw);
             if (kind == 0) return error.X11ServerError;
+            if (!self.handleProtocolEvent(raw) and self.pending_events.items.len < 32) {
+                self.pending_events.append(self.gpa, raw) catch {};
+            }
         }
         return error.ClipboardTimeout;
     }
@@ -1262,6 +1275,18 @@ pub const Window = struct {
         }
     }
 
+    fn readWmState(self: *Window) void {
+        if (self.conn.wm_state == 0) return;
+        const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.wm_state) catch return;
+        defer self.gpa.free(bytes);
+        if (bytes.len < 4) return;
+        self.wm_hidden = wmStateIsHidden(get32(bytes[0..4]));
+    }
+
+    fn applyWmChangeState(self: *Window, event: [32]u8) void {
+        self.wm_hidden = wmStateIsHidden(get32(event[12..16]));
+    }
+
     fn refreshKeymap(self: *Window) void {
         const next = fetchKeymapStashing(self.gpa, &self.conn, &self.pending_events) catch return;
         self.keymap.deinit(self.gpa);
@@ -1385,6 +1410,8 @@ fn parseSetup(body: []const u8) !Setup {
     const black = get32(body[off + 12 .. off + 16]);
     const root_visual = get32(body[off + 32 .. off + 36]);
     const root_depth = body[off + 38];
+    const width_px = get16(body[off + 20 .. off + 22]);
+    const width_mm = get16(body[off + 24 .. off + 26]);
 
     return .{
         .screen = .{
@@ -1395,6 +1422,8 @@ fn parseSetup(body: []const u8) !Setup {
             .root_depth = root_depth,
             .white_pixel = white,
             .black_pixel = black,
+            .width_px = width_px,
+            .width_mm = width_mm,
         },
         .max_request_units = max_request,
         .min_keycode = min_keycode,
@@ -1862,6 +1891,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_state_attention = try internAtom(conn, "_NET_WM_STATE_DEMANDS_ATTENTION");
     conn.net_wm_state_hidden = try internAtom(conn, "_NET_WM_STATE_HIDDEN");
     conn.utf16_string = try internAtom(conn, "UTF16_STRING");
+    conn.wm_state = try internAtom(conn, "WM_STATE");
+    conn.wm_change_state = try internAtom(conn, "WM_CHANGE_STATE");
 }
 
 fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
@@ -1965,6 +1996,7 @@ fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8) !u32 {
         defer gpa.free(resources);
         if (services.parseXftDpi(resources)) |dpi| return services.scaleFromDpi(dpi);
     } else |_| {}
+    if (services.scaleFromScreenMm(conn.screen.width_px, conn.screen.width_mm)) |scale| return scale;
     return 1;
 }
 
@@ -2295,6 +2327,10 @@ fn freeGc(conn: *XConn, gc: u32) !void {
     try writeAll(conn, &req);
 }
 
+fn wmStateIsHidden(state: u32) bool {
+    return state != 1; // ICCCM NormalState=1; Withdrawn=0, Iconic=3
+}
+
 fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
     if (target == 0) return false;
     return target == conn.utf8_string or target == atom_string or target == conn.text or
@@ -2521,6 +2557,8 @@ test "x11 setup parser reads spec offsets (vendor@16, screens@20, keycodes@26)" 
     put32(body[s + 12 .. s + 16], 0); // black
     put32(body[s + 32 .. s + 36], 0x21); // root visual
     body[s + 38] = 24; // root depth
+    put16(body[s + 20 .. s + 22], 3840);
+    put16(body[s + 24 .. s + 26], 600);
 
     const setup = try parseSetup(&body);
     try std.testing.expectEqual(@as(u32, 99), setup.screen.root);
@@ -2530,6 +2568,14 @@ test "x11 setup parser reads spec offsets (vendor@16, screens@20, keycodes@26)" 
     try std.testing.expectEqual(@as(u8, 8), setup.min_keycode);
     try std.testing.expectEqual(@as(u8, 255), setup.max_keycode);
     try std.testing.expectEqual(@as(u32, 0xffffff), setup.screen.white_pixel);
+    try std.testing.expectEqual(@as(u16, 3840), setup.screen.width_px);
+    try std.testing.expectEqual(@as(u16, 600), setup.screen.width_mm);
+}
+
+test "ICCCM WM_STATE treats only NormalState as visible" {
+    try std.testing.expect(!wmStateIsHidden(1));
+    try std.testing.expect(wmStateIsHidden(0));
+    try std.testing.expect(wmStateIsHidden(3));
 }
 
 test "clipboard text targets include ICCCM and GTK MIME atoms" {

@@ -115,6 +115,16 @@ pub fn scaleFromDpi(dpi: u32) u32 {
     return @min(8, @max(1, rounded));
 }
 
+/// Integer scale from an X11 screen's pixel width and reported millimeter
+/// width. Ignores missing, ~96dpi, and implausible sizes so a bogus 1mm
+/// width cannot jump the framebuffer to 8×.
+pub fn scaleFromScreenMm(width_px: u32, width_mm: u32) ?u32 {
+    if (width_px == 0 or width_mm == 0) return null;
+    const dpi = (width_px * 254) / (width_mm * 10);
+    if (dpi < 144 or dpi > 480) return null;
+    return scaleFromDpi(dpi);
+}
+
 /// First usable payload from a drop: a `file:` URI becomes a local path,
 /// otherwise the first non-empty line is returned as text.
 pub fn firstDropText(text: []const u8, buf: []u8) ?[]const u8 {
@@ -685,6 +695,9 @@ test "integer scale comes from toolkit env, then rounded DPI" {
     try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(144));
     try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(192));
     try std.testing.expectEqual(@as(u32, 1), scaleFromDpi(120));
+    try std.testing.expectEqual(@as(u32, 2), scaleFromScreenMm(3840, 600).?);
+    try std.testing.expect(scaleFromScreenMm(1920, 508) == null);
+    try std.testing.expect(scaleFromScreenMm(1920, 0) == null);
 }
 
 test "unix connect maps a missing pathname socket to ServerUnavailable" {
