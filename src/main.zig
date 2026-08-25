@@ -1133,6 +1133,16 @@ const PendingDcc = struct {
 
 const TransferStatus = enum(u8) { waiting, running, completed, cancelled, failed };
 
+fn transferStatusLabel(status: TransferStatus) []const u8 {
+    return switch (status) {
+        .waiting => "Waiting",
+        .running => "Transferring",
+        .completed => "Completed",
+        .cancelled => "Cancelled",
+        .failed => "Failed",
+    };
+}
+
 const DccWorkerContext = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -1620,7 +1630,7 @@ fn tickBackgroundFeatures(
         if (view.active_dialog == .file_transfer) {
             var amount: [96]u8 = undefined;
             try view.setDialogValueAt(3, try std.fmt.bufPrint(&amount, "{d} / {d} bytes", .{ transferred, transfer.context.expected_size orelse 0 }));
-            try view.setDialogValueAt(4, @tagName(transfer_status));
+            try view.setDialogValueAt(4, transferStatusLabel(transfer_status));
         }
         if (transfer_status != .waiting and transfer_status != .running and !transfer.terminal_announced) {
             if (transfer.thread) |thread| {
@@ -2617,7 +2627,7 @@ fn applyDialogAction(
         },
         .ircx_properties => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Channel properties need an extended-rooms connection.");
+                view.setDialogNotice("Named properties need an extended-rooms connection.");
                 return;
             }
             const client = maybe_client orelse {
@@ -2632,7 +2642,7 @@ fn applyDialogAction(
                 view.setDialogNotice("Room and property names cannot contain spaces; values must stay on one line.");
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Get common")) {
+            if (std.ascii.eqlIgnoreCase(operation, "Get common") or std.ascii.eqlIgnoreCase(operation, "Get common properties")) {
                 try client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG");
             } else if (std.ascii.eqlIgnoreCase(operation, "Get")) {
                 if (property.len == 0) {
@@ -2658,17 +2668,17 @@ fn applyDialogAction(
                 return;
             };
             const operation = value;
-            const level = view.dialogValueAt(1);
+            const level = cc.client.dialogs.accessLevelToken(view.dialogValueAt(1));
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.ascii.eqlIgnoreCase(operation, "List")) {
                 try client.accessList(room.name);
             } else if (std.ascii.eqlIgnoreCase(operation, "Delete") or std.ascii.eqlIgnoreCase(operation, "Clear")) {
                 if (mask.len == 0 and !std.ascii.eqlIgnoreCase(operation, "Clear")) {
-                    view.setDialogNotice("Enter the nickname mask to delete.");
+                    view.setDialogNotice("Enter the name pattern to delete.");
                     return;
                 }
                 if (!std.ascii.eqlIgnoreCase(operation, "Clear") and std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
-                    view.setDialogNotice("Use one nickname mask without spaces.");
+                    view.setDialogNotice("Use one name pattern without spaces.");
                     return;
                 }
                 if (std.ascii.eqlIgnoreCase(operation, "Clear"))
@@ -2677,7 +2687,7 @@ fn applyDialogAction(
                     try client.accessDelete(room.name, level, mask);
             } else {
                 if (mask.len == 0) {
-                    view.setDialogNotice("Enter a nickname mask such as nick!*@*.");
+                    view.setDialogNotice("Enter a name pattern, such as nick!*@*.");
                     return;
                 }
                 const timeout = std.mem.trim(u8, view.dialogValueAt(3), " \t");
@@ -2686,7 +2696,7 @@ fn applyDialogAction(
                     return;
                 };
                 if (std.mem.indexOfAny(u8, mask, " \r\n\x00") != null or hasWireControl(view.dialogValueAt(4))) {
-                    view.setDialogNotice("Use a single nickname mask and a one-line reason.");
+                    view.setDialogNotice("Use a single name pattern and a one-line reason.");
                     return;
                 }
                 try client.accessAdd(room.name, level, mask, view.dialogValueAt(3), view.dialogValueAt(4));
@@ -2705,7 +2715,7 @@ fn applyDialogAction(
             const event = std.mem.trim(u8, view.dialogValueAt(1), " \t");
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
-                view.setDialogNotice("The optional event mask must be one token.");
+                view.setDialogNotice("The optional event filter must be one word.");
                 return;
             }
             if (std.ascii.eqlIgnoreCase(operation, "List")) {
@@ -3271,7 +3281,7 @@ fn applyFileTransferDialog(
         return;
     }
     const host_ip = parseIpv4Number(view.dialogValueAt(3)) orelse {
-        view.setDialogNotice("Enter the reachable IPv4 address peers should connect to.");
+        view.setDialogNotice("Enter the IPv4 address the other member should connect to.");
         return;
     };
     const port = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(4), " \t"), 10) catch {
@@ -4336,7 +4346,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             },
             .room_access => {
                 try view.setDialogValueAt(0, "Add");
-                try view.setDialogValueAt(1, "HOST");
+                try view.setDialogValueAt(1, "Host");
                 try view.setDialogValueAt(2, "alex!*@*");
                 try view.setDialogValueAt(3, "60");
                 try view.setDialogValueAt(4, "Room helper");

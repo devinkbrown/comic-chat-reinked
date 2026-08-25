@@ -273,6 +273,11 @@ pub const View = struct {
                 .char => |code| if (code == ' ') return self.activateFocusedMember() else return null,
                 else => return null,
             },
+            .emotion => switch (key) {
+                .enter => return .send_expression,
+                .char => |code| if (code == ' ') return .send_expression else return null,
+                else => return null,
+            },
             else => return null,
         }
         return .none;
@@ -933,11 +938,17 @@ pub const View = struct {
                 else if (dialogs.fieldAcceptsText(id, self.dialog_field))
                     if (modifiers.shift) editor.extendRight() else editor.right();
             },
-            .home => if (dialogs.fieldAcceptsText(id, self.dialog_field) and self.dialog_action_focus == null and !self.dialog_browse_focus) {
-                if (modifiers.shift) editor.extendHome() else editor.home();
+            .home => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
+                    self.setDialogChoiceExtreme(id, self.dialog_field, false)
+                else if (dialogs.fieldAcceptsText(id, self.dialog_field))
+                    if (modifiers.shift) editor.extendHome() else editor.home();
             },
-            .end => if (dialogs.fieldAcceptsText(id, self.dialog_field) and self.dialog_action_focus == null and !self.dialog_browse_focus) {
-                if (modifiers.shift) editor.extendEnd() else editor.end();
+            .end => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
+                    self.setDialogChoiceExtreme(id, self.dialog_field, true)
+                else if (dialogs.fieldAcceptsText(id, self.dialog_field))
+                    if (modifiers.shift) editor.extendEnd() else editor.end();
             },
             .page_up => {
                 if (self.dialog_first_field > 0) self.dialog_first_field -= 1;
@@ -1328,6 +1339,26 @@ pub const View = struct {
 
     fn cycleDialogChoice(self: *View, id: dialogs.Id, index: usize) void {
         self.cycleDialogChoiceDirection(id, index, true);
+    }
+
+    fn setDialogChoiceExtreme(self: *View, id: dialogs.Id, index: usize, last: bool) void {
+        const options = dialogs.choiceOptions(id, index);
+        if (options.len == 0 or index >= self.dialog_editors.len) return;
+        const editor = &self.dialog_editors[index];
+        var choice: usize = if (last) options.len - 1 else 0;
+        if (id == .character and index == 0 and options.len % 3 == 0) {
+            const family_len = options.len / 3;
+            for (options, 0..) |option, option_index| {
+                if (std.mem.eql(u8, editor.text(), option)) {
+                    const family_start = @divTrunc(option_index, family_len) * family_len;
+                    choice = if (last) family_start + family_len - 1 else family_start;
+                    break;
+                }
+            }
+        }
+        editor.clear();
+        editor.paste(options[choice]) catch {};
+        if (id == .character) self.syncCharacterSelectionSummary();
     }
 
     fn cycleDialogChoiceDirection(self: *View, id: dialogs.Id, index: usize, forward: bool) void {
@@ -2014,7 +2045,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             3 => "Room properties",
             4 => "Set away message",
             5 => "Message of the day",
-            6 => "Channel properties",
+            6 => "Named properties",
             7 => "Room access",
             8 => "Operator events",
             9 => "Favorite rooms",
@@ -2036,7 +2067,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Automation",
             3 => "Rules",
             4 => "Rule sets",
-            5 => "Logon notifications",
+            5 => "Online notifications",
             6 => "Online notification users",
             else => "About Comic Chat",
         },
@@ -3215,6 +3246,18 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .away => if (index == 0) "NOTE" else "",
         .nickname => if (index == 0) "NAME" else "",
         .personal => if (index == 0) "CARD" else "",
+        .ircx_properties => if (index == 0) "ROOM" else "",
+        .room_access => switch (index) {
+            1 => "ROLE",
+            2 => "NAME",
+            else => "",
+        },
+        .file_transfer => switch (index) {
+            1 => "CAST",
+            2 => "FILE",
+            else => "",
+        },
+        .ban => if (index == 0) "NAME" else "",
         else => "",
     };
 }
@@ -3239,6 +3282,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .whisper => "Whisper after the wire is live",
         .invite => "Invite after the wire is live",
         .kick, .ban, .room_access, .ircx_properties, .ircx_events => "Moderation after the wire is live",
+        .file_transfer => "Offer or accept a file after the wire is live",
         .personal => "Shown on your CAST card",
         .nickname => "Visible on the Sunday page",
         .away => "Posted while you are away",
@@ -4301,7 +4345,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
     try std.testing.expectEqualStrings("Search rooms after the wire is live", dialogHelper(.room_list, ""));
     try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
-    try std.testing.expectEqualStrings("Channel properties", menuItemLabel(4, 6));
+    try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
     try std.testing.expectEqualStrings("Operator events", menuItemLabel(4, 8));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
     try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
@@ -4466,4 +4510,25 @@ test "member keyboard opens whisper after the wire is live" {
     view.wire_live = true;
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = ' ' }).?);
     try std.testing.expectEqual(dialogs.Id.whisper, view.active_dialog.?);
+}
+
+test "emotion keyboard sends the current expression" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .emotion;
+    try std.testing.expectEqual(Action.send_expression, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(Action.send_expression, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.right));
+}
+
+test "dialog Home and End jump to the first and last choice" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.room_access);
+    view.dialog_field = 1;
+    try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqualStrings("Deny", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
 }

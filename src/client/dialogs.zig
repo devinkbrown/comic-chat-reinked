@@ -113,7 +113,7 @@ pub const specs = [_]Spec{
     .{ .id = .add_to_sets, .resource = "IDD_ADDTOSETS", .title = "Add to rule sets", .group = .automation, .source_w = 252, .source_h = 161 },
     .{ .id = .rename_loaded_set, .resource = "IDD_RENAMELOADEDSET", .title = "Rename loaded set", .group = .automation, .source_w = 258, .source_h = 103 },
     .{ .id = .rename_set, .resource = "IDD_RENAMESET", .title = "Rename rule set", .group = .automation, .source_w = 226, .source_h = 79 },
-    .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Logon notifications", .group = .automation, .source_w = 252, .source_h = 218 },
+    .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Online notifications", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule settings", .group = .automation, .source_w = 186, .source_h = 95 },
     .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Notification users", .group = .automation, .source_w = 262, .source_h = 111 },
     .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Servers", .group = .connection, .source_w = 252, .source_h = 218 },
@@ -122,7 +122,7 @@ pub const specs = [_]Spec{
     .{ .id = .open_conversation, .resource = "PORTABLE_OPEN_CONVERSATION", .title = "Open conversation", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .save_conversation, .resource = "PORTABLE_SAVE_CONVERSATION", .title = "Save conversation", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .export_image, .resource = "PORTABLE_EXPORT_IMAGE", .title = "Export comic image", .group = .files, .source_w = 300, .source_h = 108 },
-    .{ .id = .ircx_properties, .resource = "PORTABLE_IRCX_PROPERTIES", .title = "Channel properties", .group = .rooms, .source_w = 300, .source_h = 210 },
+    .{ .id = .ircx_properties, .resource = "PORTABLE_IRCX_PROPERTIES", .title = "Named properties", .group = .rooms, .source_w = 300, .source_h = 210 },
     .{ .id = .room_access, .resource = "PORTABLE_ROOM_ACCESS", .title = "Room access", .group = .rooms, .source_w = 300, .source_h = 236 },
     .{ .id = .ircx_events, .resource = "PORTABLE_IRCX_EVENTS", .title = "Operator events", .group = .rooms, .source_w = 300, .source_h = 184 },
     .{ .id = .call_link, .resource = "PORTABLE_CALL_LINK", .title = "Call link", .group = .connection, .source_w = 300, .source_h = 184 },
@@ -204,8 +204,8 @@ pub fn fields(id: Id) []const Field {
         .channel_password => &.{.{ .label = "Room password" }},
         .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "Result limit", .hint = "Optional; blank means unlimited" } },
         .user_list => &.{ .{ .label = "Member nickname", .hint = "Choose a visible room member" }, .{ .label = "Filter", .hint = "Optional nickname filter" } },
-        .kick => &.{ .{ .label = "Member nickname", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban mask", .hint = "Optional" } },
-        .ban => &.{.{ .label = "Ban mask", .hint = "nick!*@*" }},
+        .kick => &.{ .{ .label = "Member nickname", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban pattern", .hint = "Optional" } },
+        .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
         .invite, .whisper => &.{.{ .label = "Member nickname", .hint = "Visible CAST member" }},
         .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "Member", .hint = "Select an online nickname" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Room", .hint = "For Join room, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
@@ -214,15 +214,15 @@ pub fn fields(id: Id) []const Field {
         .choose_color => &.{ .{ .label = "Color value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current theme color", .kind = .preview } },
         .comics_view => &.{ .{ .label = "View mode", .hint = "Comic", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
         .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving member" }, .{ .label = "Flood message count", .hint = "8" }, .{ .label = "Flood interval seconds", .hint = "10" } },
-        .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or nickname mask" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
+        .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
         .rule_sets => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Import or export file", .hint = "Optional .ccrules path" } },
         .add_to_sets => &.{ .{ .label = "Rule name" }, .{ .label = "Rule set" } },
         .rename_loaded_set, .rename_set => &.{ .{ .label = "Current rule set" }, .{ .label = "New name" } },
         .create_set => &.{.{ .label = "Rule set name" }},
         .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Maximum occurrences", .hint = "0 means unlimited" }, .{ .label = "Interval seconds", .hint = "0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Enabled", .kind = .choice }, .{ .label = "Case-sensitive match", .kind = .choice } },
-        .notifications => &.{ .{ .label = "Nickname", .hint = "Nickname or * pattern" }, .{ .label = "User mask", .hint = "*" }, .{ .label = "Host mask", .hint = "*" }, .{ .label = "Network", .hint = "Optional server" }, .{ .label = "Delivery", .kind = .choice } },
-        .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "Member", .hint = "CAST nickname" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Address / size", .hint = "IPv4 when sending" }, .{ .label = "Port / status", .hint = "Port when sending" } },
+        .notifications => &.{ .{ .label = "Nickname", .hint = "Nickname or * pattern" }, .{ .label = "User pattern", .hint = "*" }, .{ .label = "Host pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional server" }, .{ .label = "Delivery", .kind = .choice } },
+        .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "Member", .hint = "CAST nickname" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "IPv4 when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
         .save_conversation => &.{.{ .label = "Conversation file", .hint = "Save as .ccc" }},
         .export_image => &.{.{ .label = "Image file", .hint = "Export as .png" }},
@@ -235,8 +235,8 @@ pub fn fields(id: Id) []const Field {
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Invitation note", .hint = "Optional" } },
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, on-join, or other room properties" }, .{ .label = "Value", .hint = "Empty deletes when setting" }, .{ .label = "Action", .kind = .choice } },
-        .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Nickname mask", .hint = "*!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
-        .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, member, server, or connection" }, .{ .label = "Mask", .hint = "Optional" } },
+        .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
+        .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, member, server, or connection" }, .{ .label = "Filter", .hint = "Optional; one word" } },
         .call_link => &.{ .{ .label = "Member" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Compatibility", .hint = "Portable secure-link invitation", .kind = .readonly } },
         .member_profile => &.{ .{ .label = "Member" }, .{ .label = "Result", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
@@ -302,11 +302,11 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         .notifications => if (index == 4) &.{ "In-app banner", "Sound and banner", "Disabled" } else &.{},
         .file_transfer => if (index == 0) &.{ "Send file", "Receive offer" } else &.{},
         .notification_users => if (index == 2) &.{ "Refresh", "Whisper", "Invite to current room", "Join room", "Clear list" } else &.{},
-        .ircx_properties => if (index == 3) &.{ "Get", "Get common", "Set", "Delete" } else &.{},
+        .ircx_properties => if (index == 3) &.{ "Get", "Get common properties", "Set", "Delete" } else &.{},
         .room_access => if (index == 0)
             &.{ "List", "Add", "Delete", "Clear" }
         else if (index == 1)
-            &.{ "VOICE", "HOST", "OWNER", "GRANT", "DENY" }
+            &.{ "Voice", "Host", "Owner", "Grant", "Deny" }
         else
             &.{},
         .ircx_events => if (index == 0) &.{ "List", "Add", "Delete" } else &.{},
@@ -388,6 +388,17 @@ pub fn accentIndex(label: []const u8) u8 {
     return 0;
 }
 
+/// Room-access choices are Sunday labels. The ACCESS command still needs
+/// the IRCX level token on the wire.
+pub fn accessLevelToken(label: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(label, "Voice")) return "VOICE";
+    if (std.ascii.eqlIgnoreCase(label, "Host")) return "HOST";
+    if (std.ascii.eqlIgnoreCase(label, "Owner")) return "OWNER";
+    if (std.ascii.eqlIgnoreCase(label, "Grant")) return "GRANT";
+    if (std.ascii.eqlIgnoreCase(label, "Deny")) return "DENY";
+    return label;
+}
+
 test "registry covers all forty Microsoft dialog templates plus portable dialogs" {
     try std.testing.expectEqual(@as(usize, 53), specs.len);
     try std.testing.expectEqual(@as(usize, 40), microsoft_dialog_count);
@@ -418,13 +429,29 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Save profile", primaryLabel(.personal));
     try std.testing.expectEqualStrings("Set away", primaryLabel(.away));
     try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
-    try std.testing.expectEqualStrings("Channel properties", get(.ircx_properties).title);
+    try std.testing.expectEqualStrings("Named properties", get(.ircx_properties).title);
+    try std.testing.expectEqualStrings("Online notifications", get(.notifications).title);
     try std.testing.expectEqualStrings("Operator events", get(.ircx_events).title);
     try std.testing.expectEqualStrings("Room search", fields(.room_list)[0].label);
     try std.testing.expectEqualStrings("Apply properties", primaryLabel(.ircx_properties));
     try std.testing.expectEqualStrings("Extended rooms", fields(.connection_features)[2].label);
     try std.testing.expectEqualStrings("Room", fields(.ircx_properties)[0].label);
     try std.testing.expectEqualStrings("Room modes", fields(.channel_create)[2].label);
+    try std.testing.expectEqualStrings("Voice", choiceOptions(.room_access, 1)[0]);
+    try std.testing.expectEqualStrings("Get common properties", choiceOptions(.ircx_properties, 3)[1]);
+    try std.testing.expectEqualStrings("Ban pattern", fields(.ban)[0].label);
+    try std.testing.expectEqualStrings("Host / size", fields(.file_transfer)[3].label);
+    try std.testing.expectEqualStrings("Name pattern", fields(.room_access)[2].label);
+    try std.testing.expectEqualStrings("Filter", fields(.ircx_events)[2].label);
+}
+
+test "room access Sunday labels map back to ACCESS wire tokens" {
+    try std.testing.expectEqualStrings("VOICE", accessLevelToken("Voice"));
+    try std.testing.expectEqualStrings("HOST", accessLevelToken("host"));
+    try std.testing.expectEqualStrings("OWNER", accessLevelToken("OWNER"));
+    try std.testing.expectEqualStrings("GRANT", accessLevelToken("Grant"));
+    try std.testing.expectEqualStrings("DENY", accessLevelToken("Deny"));
+    try std.testing.expectEqualStrings("CUSTOM", accessLevelToken("CUSTOM"));
 }
 
 test "settings accent chrome maps vermillion and leftover cobalt to index 0" {
