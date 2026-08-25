@@ -1729,7 +1729,11 @@ test "every Color default chrome portrait stays a standing silhouette" {
         "anna color",     "armando color", "bolo color",     "cro color",     "dan color",   "denise color",
         "hugh color",     "jordan color",  "kevin color",    "kwensa color",  "lance color", "lynnea color",
         "margaret color", "maynard color", "mike color",     "rebecca color", "sage color",  "scotty color",
-        "susan color",    "tiki color",    "tongtyed color", "xeno color",
+        "susan color",    "tiki color",    "tongtyed color", "xeno color",    "anna hd",     "armando hd",
+        "bolo hd",        "cro hd",        "dan hd",         "denise hd",     "hugh hd",     "jordan hd",
+        "kevin hd",       "kwensa hd",     "lance hd",       "lynnea hd",     "margaret hd", "maynard hd",
+        "mike hd",        "rebecca hd",    "sage hd",        "scotty hd",     "susan hd",    "tiki hd",
+        "tongtyed hd",    "xeno hd",
     };
     for (names) |name| {
         const data = avatarByName(name) orelse return error.TestUnexpectedResult;
