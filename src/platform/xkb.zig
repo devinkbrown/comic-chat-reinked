@@ -1067,7 +1067,7 @@ pub fn charForX11Armenian(sym: u32) ?u21 {
         0x14a9 => 0x055e,
         0x14b2...0x14fd => blk: {
             const i = sym - 0x14b2;
-            break :blk if (i % 2 == 0) 0x0531 + i / 2 else 0x0561 + i / 2;
+            break :blk @as(u21, @intCast(if (i % 2 == 0) 0x0531 + i / 2 else 0x0561 + i / 2));
         },
         else => null,
     };
