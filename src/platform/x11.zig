@@ -19,15 +19,17 @@
 //!     with the
 //!     core cursor and physical WM size hints reinstalled), ICCCM
 //!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
-//!     including `text/plain;charset=utf8`, `text/uri-list`, and
+//!     including `text/plain;charset=utf8`, `text/uri-list`, receive-only
+//!     desktop file-list MIME, and
 //!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, Armenian/Georgian
 //!     keysyms, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
-//!     paste as typed keys, TARGETS-first XDND,
+//!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback), TARGETS-first XDND,
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
-//!     `WM_STATE` / `WM_CHANGE_STATE` iconic tracking, a scaled
+//!     `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
+//!     while hidden or fully obscured; MapNotify exposes), a scaled
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, EnterNotify cursor restore,
@@ -152,6 +154,9 @@ const XConn = struct {
     mime_text_html: u32 = 0,
     mime_text_html_utf8: u32 = 0,
     mime_text_html_utf8_alt: u32 = 0,
+    mime_gnome_copied: u32 = 0,
+    mime_moz_url: u32 = 0,
+    mime_moz_file: u32 = 0,
     wm_state: u32 = 0,
     wm_change_state: u32 = 0,
     multiple: u32 = 0,
@@ -518,6 +523,7 @@ pub const Window = struct {
     /// Upload a full logical frame. `w`/`h` are logical pixels; HiDPI scale is
     /// applied here so the client keeps 96-DPI geometry.
     pub fn present(self: *Window, pixels: []const u32, w: u32, h: u32) !void {
+        if (self.wm_hidden or self.fully_obscured) return;
         if (pixels.len != @as(usize, w) * @as(usize, h)) return error.BadFramebufferSize;
         if (self.scale <= 1) {
             try putImage(self.gpa, &self.conn, self.window, self.gc, pixels, w, h);
@@ -667,7 +673,7 @@ pub const Window = struct {
                 self.readWmState();
                 self.refreshRandrCrtcs();
                 if (self.refreshOutputScale()) |ev| return ev;
-                return .other;
+                return .expose;
             },
             15 => { // VisibilityNotify
                 const was_obscured = self.fully_obscured;
@@ -856,6 +862,9 @@ pub const Window = struct {
                 }
             } else |_| {}
         }
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_gnome_copied)) |path| return path;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_url)) |path| return path;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_file)) |path| return path;
         if (self.conn.text == 0) return null;
         if (self.convertTarget(gpa, selection, self.conn.text, self.conn.text)) |text| {
             if (text) |bytes| return try self.decodeClipboardBytes(gpa, bytes);
@@ -898,7 +907,7 @@ pub const Window = struct {
             gpa.free(bytes);
             return null;
         }
-        if (target == self.conn.mime_uri_list) {
+        if (target == self.conn.mime_uri_list or isDesktopFileAtom(&self.conn, target)) {
             if (self.takeUriListPath(gpa, bytes)) |path| return path;
         }
         if (target == self.conn.utf16_string) {
@@ -914,9 +923,18 @@ pub const Window = struct {
         return try self.decodeClipboardBytes(gpa, bytes);
     }
 
+    fn readDesktopFileTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
+        if (target == 0) return null;
+        const text = (self.convertTarget(gpa, selection, target, target) catch return null) orelse return null;
+        if (self.takeUriListPath(gpa, text)) |path| return path;
+        gpa.free(text);
+        return null;
+    }
+
     fn takeUriListPath(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ?[]u8 {
         var scratch: [1024]u8 = undefined;
-        const path = services.firstPathFromUriList(bytes, &scratch) orelse return null;
+        const path = services.firstPathFromDesktopFiles(bytes, &scratch) orelse
+            services.firstPathFromUriList(bytes, &scratch) orelse return null;
         const owned = gpa.dupe(u8, path) catch return null;
         gpa.free(bytes);
         return owned;
@@ -929,10 +947,16 @@ pub const Window = struct {
     }
 
     fn pastePrimaryAsKeys(self: *Window) ?Event {
-        const text = self.readPrimaryNative(self.gpa) catch return null;
-        const bytes = text orelse return null;
+        const bytes = self.takePrimaryBytes() orelse return null;
         defer self.gpa.free(bytes);
         return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn takePrimaryBytes(self: *Window) ?[]u8 {
+        if (self.readPrimaryNative(self.gpa)) |text| {
+            if (text) |bytes| return bytes;
+        } else |_| {}
+        return services.readPrimary(self.gpa, self.conn.io, .x11) catch null;
     }
 
     fn readPrimaryNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
@@ -2165,6 +2189,9 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_html = try internAtom(conn, "text/html");
     conn.mime_text_html_utf8 = try internAtom(conn, "text/html;charset=utf-8");
     conn.mime_text_html_utf8_alt = try internAtom(conn, "text/html;charset=utf8");
+    conn.mime_gnome_copied = try internAtom(conn, "x-special/gnome-copied-files");
+    conn.mime_moz_url = try internAtom(conn, "text/x-moz-url");
+    conn.mime_moz_file = try internAtom(conn, "application/x-moz-file");
     conn.wm_state = try internAtom(conn, "WM_STATE");
     conn.wm_change_state = try internAtom(conn, "WM_CHANGE_STATE");
     conn.multiple = try internAtom(conn, "MULTIPLE");
@@ -2805,7 +2832,7 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8) return 6;
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
-    if (atom == conn.utf16_string or atom == conn.mime_uri_list) return 3;
+    if (atom == conn.utf16_string or atom == conn.mime_uri_list or isDesktopFileAtom(conn, atom)) return 3;
     if (atom == conn.text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom)) return 1;
@@ -2814,6 +2841,10 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
 
 fn isHtmlAtom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_html or atom == conn.mime_text_html_utf8 or atom == conn.mime_text_html_utf8_alt);
+}
+
+fn isDesktopFileAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_gnome_copied or atom == conn.mime_moz_url or atom == conn.mime_moz_file);
 }
 
 fn preferredTextAtom(conn: *const XConn, atoms: []const u8) ?u32 {
@@ -2836,7 +2867,7 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
     return target == conn.utf8_string or target == atom_string or target == conn.text or
         target == conn.mime_text_plain or target == conn.mime_text_utf8 or
         target == conn.mime_text_utf8_alt or target == conn.mime_uri_list or
-        target == conn.utf16_string or isHtmlAtom(conn, target);
+        target == conn.utf16_string or isHtmlAtom(conn, target) or isDesktopFileAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3106,6 +3137,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_html = 108,
         .mime_text_html_utf8 = 109,
         .mime_text_html_utf8_alt = 110,
+        .mime_gnome_copied = 111,
+        .mime_moz_url = 112,
+        .mime_moz_file = 113,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
@@ -3116,6 +3150,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 108));
     try std.testing.expect(isClipboardTextTarget(&conn, 109));
     try std.testing.expect(isClipboardTextTarget(&conn, 110));
+    try std.testing.expect(isClipboardTextTarget(&conn, 111));
+    try std.testing.expect(isClipboardTextTarget(&conn, 112));
+    try std.testing.expect(isClipboardTextTarget(&conn, 113));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 
     var atoms: [12]u8 = undefined;
@@ -3123,6 +3160,12 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     put32(atoms[4..8], 100);
     put32(atoms[8..12], 107);
     try std.testing.expectEqual(@as(u32, 100), preferredTextAtom(&conn, &atoms).?);
+
+    var desktop: [8]u8 = undefined;
+    put32(desktop[0..4], atom_string);
+    put32(desktop[4..8], 111);
+    try std.testing.expectEqual(@as(u32, 111), preferredTextAtom(&conn, &desktop).?);
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 111));
 }
 
 test "x11 dead keysyms stay non-character until the composer combines them" {

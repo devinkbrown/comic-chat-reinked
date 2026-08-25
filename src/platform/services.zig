@@ -2,10 +2,12 @@
 //!
 //! The window backends remain direct protocol implementations and now own the
 //! primary clipboard path. These helpers are the fallback when a compositor or
-//! X server cannot complete the native transfer, plus notifications, file
-//! selection, document opening, and printing. Every call is bounded and
-//! failure is non-fatal, so minimal installations retain the internal
-//! application fallback.
+//! X server cannot complete the native transfer (including `wl-paste --primary`
+//! / `xclip -selection primary` when PRIMARY is missing), plus notifications
+//! (`notify-send --urgency=normal`), file selection, document opening, and
+//! printing. Incoming desktop file-list MIME is parsed here. Every call is
+//! bounded and failure is non-fatal, so minimal installations retain the
+//! internal application fallback.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -159,14 +161,49 @@ pub fn scaleFromScreenMm(width_px: u32, width_mm: u32) ?u32 {
     return scaleFromDpi(dpi);
 }
 
-/// First usable payload from a drop: a `file:` URI becomes a local path,
-/// otherwise the first non-empty line is returned as text.
+/// First usable payload from a drop: a `file:` URI or desktop file-list
+/// becomes a local path, otherwise the first non-empty line is text.
 pub fn firstDropText(text: []const u8, buf: []u8) ?[]const u8 {
+    if (firstPathFromDesktopFiles(text, buf)) |path| return path;
     if (firstPathFromUriList(text, buf)) |path| return path;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
+        const n = @min(line.len, buf.len);
+        if (n == 0) return null;
+        @memcpy(buf[0..n], line[0..n]);
+        return buf[0..n];
+    }
+    return null;
+}
+
+/// Receive-only desktop file-list MIME (Nautilus, Firefox). Not offered on copy.
+pub fn isDesktopFileMime(mime: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(mime, "x-special/gnome-copied-files") or
+        std.ascii.eqlIgnoreCase(mime, "text/x-moz-url") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-moz-file");
+}
+
+/// First local path from `x-special/gnome-copied-files`, `text/x-moz-url`,
+/// a bare absolute path, or a `text/uri-list` body.
+pub fn firstPathFromDesktopFiles(text: []const u8, buf: []u8) ?[]const u8 {
+    var rest = text;
+    if (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+        const head = std.mem.trim(u8, rest[0..nl], " \t\r");
+        if (std.ascii.eqlIgnoreCase(head, "copy") or
+            std.ascii.eqlIgnoreCase(head, "cut") or
+            std.ascii.eqlIgnoreCase(head, "link"))
+        {
+            rest = rest[nl + 1 ..];
+        }
+    }
+    if (firstPathFromUriList(rest, buf)) |path| return path;
+    var lines = std.mem.splitScalar(u8, rest, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (line[0] != '/') continue;
         const n = @min(line.len, buf.len);
         if (n == 0) return null;
         @memcpy(buf[0..n], line[0..n]);
@@ -692,14 +729,37 @@ fn writeClipboardArgv(io: std.Io, text: []const u8, argv: []const []const u8) !v
 }
 
 pub fn readClipboard(gpa: std.mem.Allocator, io: std.Io, desktop: Desktop) !?[]u8 {
+    return readSelection(gpa, io, desktop, .clipboard);
+}
+
+/// PRIMARY / mouse-selection paste when the native protocol is missing.
+pub fn readPrimary(gpa: std.mem.Allocator, io: std.Io, desktop: Desktop) !?[]u8 {
+    return readSelection(gpa, io, desktop, .primary);
+}
+
+const SelectionKind = enum { clipboard, primary };
+
+fn readSelection(gpa: std.mem.Allocator, io: std.Io, desktop: Desktop, kind: SelectionKind) !?[]u8 {
     const argv_groups: []const []const []const u8 = switch (desktop) {
-        .wayland => &.{
-            &.{ "wl-paste", "--no-newline", "--type", "text" },
-            &.{ "wl-paste", "--no-newline" },
+        .wayland => switch (kind) {
+            .clipboard => &.{
+                &.{ "wl-paste", "--no-newline", "--type", "text" },
+                &.{ "wl-paste", "--no-newline" },
+            },
+            .primary => &.{
+                &.{ "wl-paste", "--primary", "--no-newline", "--type", "text" },
+                &.{ "wl-paste", "--primary", "--no-newline" },
+            },
         },
-        .x11 => &.{
-            &.{ "xclip", "-selection", "clipboard", "-out" },
-            &.{ "xsel", "--clipboard", "--output" },
+        .x11 => switch (kind) {
+            .clipboard => &.{
+                &.{ "xclip", "-selection", "clipboard", "-out" },
+                &.{ "xsel", "--clipboard", "--output" },
+            },
+            .primary => &.{
+                &.{ "xclip", "-selection", "primary", "-out" },
+                &.{ "xsel", "--primary", "--output" },
+            },
         },
     };
     for (argv_groups) |argv| {
@@ -759,10 +819,12 @@ fn chooseFileKdialog(gpa: std.mem.Allocator, io: std.Io, save: bool, title: []co
     return trimOwnedResult(gpa, result.stdout);
 }
 
+const notify_urgency_flag = "--urgency=normal";
+
 pub fn notify(gpa: std.mem.Allocator, io: std.Io, title: []const u8, body: []const u8) !void {
     if (title.len > 256 or body.len > 4096) return error.NotificationTooLarge;
     var result = try std.process.run(gpa, io, .{
-        .argv = &.{ "notify-send", "--app-name=Comic Chat", title, body },
+        .argv = &.{ "notify-send", notify_urgency_flag, "--app-name=Comic Chat", title, body },
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
     });
@@ -890,6 +952,25 @@ test "uri-list drop prefers a local file path and skips comments" {
     try std.testing.expectEqualStrings("hello", firstDropText("hello\n", &buf).?);
 }
 
+test "desktop file-list MIME yields a local path and skips copy/cut headers" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(isDesktopFileMime("x-special/gnome-copied-files"));
+    try std.testing.expect(isDesktopFileMime("text/x-moz-url"));
+    try std.testing.expect(isDesktopFileMime("application/x-moz-file"));
+    try std.testing.expect(!isDesktopFileMime("text/uri-list"));
+    try std.testing.expectEqualStrings(
+        "/tmp/chat room.ccc",
+        firstPathFromDesktopFiles("copy\nfile:///tmp/chat%20room.ccc\n", &buf).?,
+    );
+    try std.testing.expectEqualStrings("/tmp/a.ccc", firstPathFromDesktopFiles("cut\n/tmp/a.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/b.ccc", firstDropText("copy\nfile:///tmp/b.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings(
+        "/tmp/photo.png",
+        firstPathFromDesktopFiles("file:///tmp/photo.png\nPhoto title\n", &buf).?,
+    );
+    try std.testing.expect(firstPathFromDesktopFiles("copy\nhttps://example.test/a\n", &buf) == null);
+}
+
 test "Xft.dpi parser accepts integer and fractional resource lines" {
     try std.testing.expectEqual(@as(u32, 192), parseXftDpi("Xft.antialias: 1\nXft.dpi: 192\n").?);
     try std.testing.expectEqual(@as(u32, 144), parseXftDpi("Xft.dpi:\t143.7\r\n").?);
@@ -942,6 +1023,10 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     const crlf = try clipboardBytesToUtf8(gpa, "a\r\nb\rc");
     defer gpa.free(crlf);
     try std.testing.expectEqualStrings("a\nb\nc", crlf);
+}
+
+test "notify-send uses a normal urgency hint" {
+    try std.testing.expectEqualStrings("--urgency=normal", notify_urgency_flag);
 }
 
 test "isHtmlMime accepts charset parameters" {

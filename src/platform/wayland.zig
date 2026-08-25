@@ -29,8 +29,12 @@
 //! `wl_data_device` and `zwp_primary_selection_v1` when present, including
 //! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
 //! UTF-16 decode (including `text/plain;charset=utf-16` / `UTF16_STRING`
-//! on receive only) and receive-only `text/html`. Middle-click pastes
-//! PRIMARY as typed keys. Text and `file:` drops arrive as typed keys (no new
+//! on receive only), receive-only `text/html`, and receive-only desktop
+//! file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
+//! `application/x-moz-file`). Middle-click pastes PRIMARY as typed keys
+//! and falls back to `wl-paste --primary` when the native primary protocol
+//! is missing. `present()` skips commits while the toplevel is suspended.
+//! Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
 //! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
@@ -181,6 +185,13 @@ const html_mime_types = [_][]const u8{
     "text/html",
     "text/html;charset=utf-8",
     "text/html;charset=utf8",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const desktop_file_mime_types = [_][]const u8{
+    "x-special/gnome-copied-files",
+    "text/x-moz-url",
+    "application/x-moz-file",
 };
 
 pub const Key = shared_event.Key;
@@ -796,6 +807,7 @@ pub const Window = struct {
     /// Commit a full 0xAARRGGBB frame through a reusable ARGB8888 wl_buffer.
     pub fn present(self: *Window, pixels: []const u32, w: u32, h: u32) !void {
         if (!self.configured) return error.SurfaceNotConfigured;
+        if (self.toplevel_suspended) return;
         if (w == 0 or h == 0 or w > std.math.maxInt(i32) or h > std.math.maxInt(i32)) {
             return error.InvalidWindowSize;
         }
@@ -1731,8 +1743,14 @@ pub const Window = struct {
     }
 
     fn pastePrimaryAsKeys(self: *Window) ?Event {
-        const text = self.readPrimaryNative(self.gpa) catch return null;
-        const bytes = text orelse return null;
+        if (self.readPrimaryNative(self.gpa)) |text| {
+            if (text) |bytes| {
+                defer self.gpa.free(bytes);
+                return self.enqueueDropText(bytes) catch null;
+            }
+        } else |_| {}
+        const fallback = services.readPrimary(self.gpa, self.conn.io, .wayland) catch return null;
+        const bytes = fallback orelse return null;
         defer self.gpa.free(bytes);
         return self.enqueueDropText(bytes) catch null;
     }
@@ -1789,17 +1807,23 @@ pub const Window = struct {
 
     fn receiveOffer(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16) ![]u8 {
         var last_empty: ?[]u8 = null;
+        for (desktop_file_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    if (self.takeDesktopFilePath(gpa, text)) |path| return path;
+                    return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
         for (text_mime_types) |mime| {
             if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
                 if (text.len != 0) {
                     if (last_empty) |prev| gpa.free(prev);
                     if (std.mem.eql(u8, mime, "text/uri-list")) {
-                        var scratch: [1024]u8 = undefined;
-                        if (services.firstPathFromUriList(text, &scratch)) |path| {
-                            const owned = gpa.dupe(u8, path) catch return text;
-                            gpa.free(text);
-                            return owned;
-                        }
+                        if (self.takeDesktopFilePath(gpa, text)) |path| return path;
                     }
                     return decodeClipboardBytes(gpa, text);
                 }
@@ -1836,6 +1860,15 @@ pub const Window = struct {
         }
         if (last_empty) |text| return decodeClipboardBytes(gpa, text);
         return error.MissingDataOffer;
+    }
+
+    fn takeDesktopFilePath(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ?[]u8 {
+        var scratch: [1024]u8 = undefined;
+        const path = services.firstPathFromDesktopFiles(bytes, &scratch) orelse
+            services.firstPathFromUriList(bytes, &scratch) orelse return null;
+        const owned = gpa.dupe(u8, path) catch return null;
+        gpa.free(bytes);
+        return owned;
     }
 
     fn offerTextMimes(self: *Window, source_id: u32, opcode: u16) !void {
@@ -2530,7 +2563,11 @@ fn knownTextMime(mime: []const u8) ?[]const u8 {
     for (html_mime_types) |known| {
         if (std.ascii.eqlIgnoreCase(mime, known)) return known;
     }
+    for (desktop_file_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
     if (services.isHtmlMime(mime)) return "text/html";
+    if (services.isDesktopFileMime(mime)) return "x-special/gnome-copied-files";
     return null;
 }
 
@@ -2540,7 +2577,7 @@ fn textMimeRank(mime: []const u8) u8 {
     if (std.mem.eql(u8, mime, "text/plain")) return 4;
     if (std.mem.eql(u8, mime, "UTF8_STRING")) return 3;
     if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
-    if (std.mem.eql(u8, mime, "text/uri-list")) return 2;
+    if (std.mem.eql(u8, mime, "text/uri-list") or services.isDesktopFileMime(mime)) return 2;
     if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
     if (services.isHtmlMime(mime)) return 1;
     return 0;
@@ -3287,9 +3324,13 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("UTF16_STRING"));
     try std.testing.expect(isPlainTextMime("text/html"));
     try std.testing.expect(isPlainTextMime("text/html;charset=utf-8"));
+    try std.testing.expect(isPlainTextMime("x-special/gnome-copied-files"));
+    try std.testing.expect(isPlainTextMime("text/x-moz-url"));
+    try std.testing.expect(isPlainTextMime("application/x-moz-file"));
     try std.testing.expect(!isPlainTextMime("image/png"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));
+    try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("x-special/gnome-copied-files"));
 }
 
 test "keyboard-enter key array restores held modifiers" {

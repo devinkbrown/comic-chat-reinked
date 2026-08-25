@@ -90,17 +90,21 @@ hash.
   from the conventional Lock modifier bit when the compositor reports it,
   and refreshes text-input on keyboard enter.
   It does not
-  speak XIM. Text and `file:` drops use XDND / `wl_data_device` and are
+  speak XIM.   Text and `file:` drops use XDND / `wl_data_device` and are
   injected as existing key events (no new Event variant); Wayland sends
   `data_offer.set_actions` copy when accepting a drop. Clipboard MIME
-  includes `text/plain;charset=utf8`, `text/uri-list`, and
+  includes `text/plain;charset=utf8`, `text/uri-list`, receive-only
+  desktop file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
+  `application/x-moz-file`), and
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
   strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
   stashes events that arrive during GetProperty. ConvertSelection uses a
   user timestamp rather than CurrentTime. XDND also prefers TARGETS and
-  uses the drop timestamp. Middle-click pastes PRIMARY as typed keys.
-  Receive-only `text/html` strips tags to plain text. Clipboard text normalizes
-  CR/LF to LF. Central European Latin-2, Latin-9, Greek, Hebrew, Arabic,
+  uses the drop timestamp. Middle-click pastes PRIMARY as typed keys, with
+  `wl-paste --primary` / `xclip`/`xsel` PRIMARY fallback when the native
+  protocol is missing. Receive-only `text/html` strips tags to plain text.
+  Clipboard text normalizes
+  CR/LF to LF. `notify-send` uses `--urgency=normal`. Central European Latin-2, Latin-9, Greek, Hebrew, Arabic,
   Armenian, Georgian, Thai,
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
@@ -112,10 +116,12 @@ hash.
   WM size hints. Wayland binds `wl_compositor` at v6 when advertised,
   honors `preferred_buffer_scale`, and can derive integer scale from
   output geometry millimeters when no scale event arrives. Keyboard enter
-  arms client-side repeat for a held non-modifier key. Both backends track maximized/fullscreen
+  arms client-side repeat for a held non-modifier key.   Both backends track maximized/fullscreen
   window state; X11 also tracks `_NET_WM_STATE_HIDDEN` and ICCCM
-  `WM_STATE` / `WM_CHANGE_STATE`, and Wayland records tiled/suspended xdg
-  states plus `wm_capabilities` / `configure_bounds` when xdg-shell is v5+.
+  `WM_STATE` / `WM_CHANGE_STATE` and skips `present()` while hidden or
+  fully obscured (MapNotify exposes), and Wayland records tiled/suspended xdg
+  states plus `wm_capabilities` / `configure_bounds` when xdg-shell is v5+
+  and skips `present()` while suspended.
   When advertised, Wayland requests server-side decorations and
   re-requests SSD once if the compositor configures client-side mode.
   `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
