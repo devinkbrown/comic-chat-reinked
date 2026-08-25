@@ -13,6 +13,8 @@ pub const max_entries: usize = 8192;
 pub const max_file_bytes: usize = 512 * 1024;
 pub const max_include_depth: u8 = 3;
 
+const ParseError = std.mem.Allocator.Error || error{ComposeTableFull};
+
 pub const Match = union(enum) {
     none,
     prefix,
@@ -62,7 +64,7 @@ pub const Table = struct {
         return if (saw_prefix) .prefix else .none;
     }
 
-    fn intern(self: *Table, name: []const u8) !u16 {
+    fn intern(self: *Table, name: []const u8) ParseError!u16 {
         if (self.names.get(name)) |id| return id;
         if (self.name_list.items.len >= std.math.maxInt(u16)) return error.ComposeTableFull;
         const arena = self.arena.allocator();
@@ -73,7 +75,7 @@ pub const Table = struct {
         return id;
     }
 
-    fn add(self: *Table, keys: []const []const u8, output: u21) !void {
+    fn add(self: *Table, keys: []const []const u8, output: u21) ParseError!void {
         if (keys.len == 0 or keys.len > max_seq_len) return;
         if (self.entries.items.len >= max_entries) return;
         var entry = Entry{ .len = @intCast(keys.len), .keys = @splat(0), .output = output };
@@ -82,14 +84,14 @@ pub const Table = struct {
     }
 };
 
-pub fn parse(gpa: std.mem.Allocator, text: []const u8) !Table {
+pub fn parse(gpa: std.mem.Allocator, text: []const u8) ParseError!Table {
     var table = Table{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
     errdefer table.deinit();
     try parseInto(&table, text, 0, null);
     return table;
 }
 
-pub fn parseWithIncludes(gpa: std.mem.Allocator, text: []const u8, env: []const u8) !Table {
+pub fn parseWithIncludes(gpa: std.mem.Allocator, text: []const u8, env: []const u8) ParseError!Table {
     var table = Table{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
     errdefer table.deinit();
     try parseInto(&table, text, 0, env);
@@ -127,7 +129,7 @@ fn loadPath(gpa: std.mem.Allocator, env: []const u8, path: []const u8) !Table {
     return parseWithIncludes(gpa, text, env);
 }
 
-fn parseInto(table: *Table, text: []const u8, depth: u8, env: ?[]const u8) !void {
+fn parseInto(table: *Table, text: []const u8, depth: u8, env: ?[]const u8) ParseError!void {
     var i: usize = 0;
     while (i < text.len) {
         skipWhitespaceAndComments(text, &i);
@@ -176,7 +178,7 @@ fn parseInto(table: *Table, text: []const u8, depth: u8, env: ?[]const u8) !void
     }
 }
 
-fn includeFile(table: *Table, spec: []const u8, depth: u8, env: []const u8) !void {
+fn includeFile(table: *Table, spec: []const u8, depth: u8, env: []const u8) ParseError!void {
     if (depth >= max_include_depth) return;
     var path_buf: [512]u8 = undefined;
     const path = expandInclude(spec, env, &path_buf) orelse return;
