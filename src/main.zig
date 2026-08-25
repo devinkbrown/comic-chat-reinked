@@ -1739,13 +1739,17 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
         state.pending_dcc = null;
     }
     state.motd.clearRetainingCapacity();
+    for (state.notification_current.items) |entry| gpa.free(entry);
+    state.notification_current.clearRetainingCapacity();
     if (workspace) |rooms| {
         rooms.markDisconnected();
         rooms.resetIsupport();
     }
-    // Silence masks, away text, last invite/key, and IRCX CLIENT keystrings
-    // survive reconnect so they can be resent or reused after 001/800.
-    // Advertised ISUPPORT maps come back on the next 005.
+    // Silence masks, away text, last invite/key, notify-previous, and IRCX
+    // CLIENT keystrings survive reconnect so they can be resent or reused
+    // after 001/800. The current online snapshot is cleared so a nick who
+    // left during the outage is not kept online. Advertised ISUPPORT maps
+    // come back on the next 005.
 }
 
 fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
@@ -3889,6 +3893,8 @@ fn processWorkspaceMessages(
         } else if (std.ascii.eqlIgnoreCase(msg.command, "MODE") or std.mem.eql(u8, msg.command, "324")) {
             redraw = (try appendModeLine(workspace, &msg)) or redraw;
             if (try applyLiveChannelKey(workspace, client, &msg)) redraw = true;
+        } else if (isJoinDeniedReply(&msg, workspace)) {
+            redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
         } else if (isCommandFailureNumeric(msg.command)) {
             redraw = (try applyCommandFailure(workspace, client, state, &msg)) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "FAIL") or
@@ -3900,8 +3906,6 @@ fn processWorkspaceMessages(
             redraw = true;
         } else if (std.mem.eql(u8, msg.command, "470")) {
             redraw = (try applyChannelForward(workspace, client, state, &msg)) or redraw;
-        } else if (isJoinDeniedNumeric(msg.command)) {
-            redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
         } else if (isNickFailureNumeric(msg.command)) {
             redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
         } else if (std.mem.eql(u8, msg.command, "464") or std.mem.eql(u8, msg.command, "465")) {
@@ -4343,8 +4347,8 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "456") or
         std.mem.eql(u8, command, "457") or
         std.mem.eql(u8, command, "458") or
-        std.mem.eql(u8, command, "480") or
         std.mem.eql(u8, command, "489") or
+        std.mem.eql(u8, command, "926") or
         std.mem.eql(u8, command, "492") or
         std.mem.eql(u8, command, "494") or
         std.mem.eql(u8, command, "716") or
@@ -4447,7 +4451,16 @@ fn isJoinDeniedNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "474") or
         std.mem.eql(u8, command, "475") or
         std.mem.eql(u8, command, "476") or
-        std.mem.eql(u8, command, "477");
+        std.mem.eql(u8, command, "477") or
+        std.mem.eql(u8, command, "480") or
+        std.mem.eql(u8, command, "520");
+}
+
+fn isJoinDeniedReply(msg: *const cc.net.message.Message, workspace: *const cc.client.workspace.Workspace) bool {
+    if (isJoinDeniedNumeric(msg.command)) return true;
+    if (!std.mem.eql(u8, msg.command, "437")) return false;
+    const target = msg.param(1) orelse return false;
+    return cc.net.irc_map.isChannelName(workspace.chantypes, target);
 }
 
 fn anyRoomJoined(workspace: *const cc.client.workspace.Workspace) bool {
@@ -5138,7 +5151,7 @@ fn messageRoom(msg: *const cc.net.message.Message, workspace: *const cc.client.w
         std.mem.eql(u8, msg.command, "332") or
         std.mem.eql(u8, msg.command, "333") or
         std.mem.eql(u8, msg.command, "324") or
-        isJoinDeniedNumeric(msg.command)) return msg.param(1);
+        isJoinDeniedReply(msg, workspace)) return msg.param(1);
     return null;
 }
 
@@ -5683,6 +5696,16 @@ test "live roster room lookup includes MODE KICK and topic numerics" {
     try std.testing.expectEqualStrings("#root", messageRoom(&statusmsg, &workspace).?);
     const plus_status = cc.net.message.parse(":alice!u@h NOTICE +#root :voices");
     try std.testing.expectEqualStrings("#root", messageRoom(&plus_status, &workspace).?);
+    const unavail = cc.net.message.parse(":server 437 me #root :Channel is temporarily unavailable");
+    try std.testing.expect(isJoinDeniedReply(&unavail, &workspace));
+    try std.testing.expectEqualStrings("#root", messageRoom(&unavail, &workspace).?);
+    const nick_unavail = cc.net.message.parse(":server 437 me taken :Nick/channel is temporarily unavailable");
+    try std.testing.expect(!isJoinDeniedReply(&nick_unavail, &workspace));
+    try std.testing.expect(isNickFailureNumeric("437"));
+    try std.testing.expect(messageRoom(&nick_unavail, &workspace) == null);
+    const oper_only = cc.net.message.parse(":server 520 me #root :Cannot join channel (+O)");
+    try std.testing.expect(isJoinDeniedReply(&oper_only, &workspace));
+    try std.testing.expectEqualStrings("#root", messageRoom(&oper_only, &workspace).?);
 }
 
 test "channel mode and invite lines land in the matching room" {
@@ -5763,6 +5786,17 @@ test "self leave and join denial clear membership without a live socket" {
     try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &full));
     try std.testing.expect(state.joined);
     try std.testing.expectEqualStrings("connected", state.status);
+
+    try client.join("#oa");
+    const oper_only = cc.net.message.parse(":server 520 me #oa :Cannot join channel (+O)");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &oper_only));
+    try std.testing.expect(!client.restoresChannel("#oa"));
+    const throttled = cc.net.message.parse(":server 480 me #root :Cannot join channel (+j)");
+    workspace.rooms.items[root].joined = true;
+    try client.join("#root");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &throttled));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!client.restoresChannel("#root"));
 }
 
 test "unknown CTCP is consumed while ACTION and SOUND stay speech" {
@@ -5927,7 +5961,10 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isCommandFailureNumeric("416"));
     try std.testing.expect(isCommandFailureNumeric("440"));
     try std.testing.expect(isCommandFailureNumeric("456"));
-    try std.testing.expect(isCommandFailureNumeric("480"));
+    try std.testing.expect(isJoinDeniedNumeric("480"));
+    try std.testing.expect(!isCommandFailureNumeric("480"));
+    try std.testing.expect(isJoinDeniedNumeric("520"));
+    try std.testing.expect(isCommandFailureNumeric("926"));
     try std.testing.expect(isCommandFailureNumeric("489"));
     try std.testing.expect(isCommandFailureNumeric("492"));
     try std.testing.expect(isCommandFailureNumeric("716"));
@@ -6138,8 +6175,10 @@ test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
     try std.testing.expect(try applyMonitorNumeric(gpa, &state, &workspace, &preferences, &offline));
     try std.testing.expect(!containsIgnoreCase(state.notification_current.items, "bob"));
     try std.testing.expect(containsIgnoreCase(state.notification_previous.items, "alice"));
+    try std.testing.expect(containsIgnoreCase(state.notification_current.items, "alice"));
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expect(!state.monitor_subscribed);
+    try std.testing.expectEqual(@as(usize, 0), state.notification_current.items.len);
     try std.testing.expect(containsIgnoreCase(state.notification_previous.items, "alice"));
 
     const owned_host = try gpa.dupe(u8, "irc.example");

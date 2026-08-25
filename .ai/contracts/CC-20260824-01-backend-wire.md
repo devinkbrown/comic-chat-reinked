@@ -101,6 +101,14 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Keep last invite and last key-channel hints across reconnect
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, and PR #11 UI
 
+## Wave 15 leftovers in scope
+
+- Treat 520 OPERONLY and 480 join-throttle as join denials (forget restoration)
+- Treat 437 UNAVAILRESOURCE as join-denied when the target is a channel, nick-failure otherwise
+- Show leftover CREATE failure 926 CHANNELEXIST
+- Clear the current notify-online snapshot on disconnect so stale presence does not survive
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, and PR #11 UI
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules
