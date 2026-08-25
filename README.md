@@ -294,12 +294,13 @@ without an IME.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
-`RESOURCE_MANAGER` property changes, RANDR `ScreenChangeNotify`, cached
+`RESOURCE_MANAGER` property changes, XSETTINGS `Gdk/WindowScalingFactor`,
+XI2 touch→pointer, RANDR `ScreenChangeNotify`, cached
 per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, receive-only desktop file-list MIME, `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
+`text/uri-list`, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
 TARGETS list and sending a user ConvertSelection timestamp), accepts XDND text/`file:`
 drops as typed keys (TARGETS-first, drop timestamp), pastes PRIMARY on
 middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback), accepts receive-only `text/html`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and

@@ -181,8 +181,10 @@ pub fn firstDropText(text: []const u8, buf: []u8) ?[]const u8 {
 /// Receive-only desktop file-list MIME (Nautilus, Firefox). Not offered on copy.
 pub fn isDesktopFileMime(mime: []const u8) bool {
     return std.ascii.eqlIgnoreCase(mime, "x-special/gnome-copied-files") or
+        std.ascii.eqlIgnoreCase(mime, "x-special/nautilus-clipboard") or
         std.ascii.eqlIgnoreCase(mime, "text/x-moz-url") or
-        std.ascii.eqlIgnoreCase(mime, "application/x-moz-file");
+        std.ascii.eqlIgnoreCase(mime, "application/x-moz-file") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-kde4-urilist");
 }
 
 /// First local path from `x-special/gnome-copied-files`, `text/x-moz-url`,
@@ -439,6 +441,87 @@ fn hexNibble(c: u8) ?u8 {
         '0'...'9' => c - '0',
         'a'...'f' => c - 'a' + 10,
         'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Integer framebuffer scale from an XSETTINGS blob (`_XSETTINGS_SETTINGS`).
+/// Prefers `Gdk/WindowScalingFactor`, then `Xft/DPI` (1024ths of a point).
+pub fn parseXsettingsScale(bytes: []const u8) ?u32 {
+    const parsed = parseXsettings(bytes) orelse return null;
+    if (parsed.gdk_scale) |scale| return scale;
+    if (parsed.xft_dpi) |dpi| return scaleFromDpi(dpi);
+    return null;
+}
+
+const XsettingsValues = struct {
+    gdk_scale: ?u32 = null,
+    xft_dpi: ?u32 = null,
+};
+
+fn parseXsettings(bytes: []const u8) ?XsettingsValues {
+    if (bytes.len < 12) return null;
+    const order = bytes[0];
+    if (order != 'l' and order != 'B') return null;
+    const count = xsettingsGet32(order, bytes[8..12]) orelse return null;
+    var off: usize = 12;
+    var values = XsettingsValues{};
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        if (off + 4 > bytes.len) return null;
+        const typ = bytes[off];
+        const name_len = xsettingsGet16(order, bytes[off + 2 .. off + 4]) orelse return null;
+        off += 4;
+        if (off + name_len > bytes.len) return null;
+        const name = bytes[off .. off + name_len];
+        off += name_len;
+        off = std.mem.alignForward(usize, off, 4);
+        if (off + 4 > bytes.len) return null;
+        off += 4; // last-change-serial
+        switch (typ) {
+            0 => { // integer
+                if (off + 4 > bytes.len) return null;
+                const raw = xsettingsGet32(order, bytes[off .. off + 4]) orelse return null;
+                off += 4;
+                if (std.mem.eql(u8, name, "Gdk/WindowScalingFactor")) {
+                    if (raw >= 1 and raw <= 8) values.gdk_scale = raw;
+                } else if (std.mem.eql(u8, name, "Xft/DPI")) {
+                    const dpi = raw / 1024;
+                    if (dpi >= 1 and dpi <= 768) values.xft_dpi = dpi;
+                }
+            },
+            1 => { // string
+                if (off + 4 > bytes.len) return null;
+                const str_len = xsettingsGet32(order, bytes[off .. off + 4]) orelse return null;
+                off += 4;
+                if (off + str_len > bytes.len) return null;
+                off += str_len;
+                off = std.mem.alignForward(usize, off, 4);
+            },
+            2 => { // color
+                if (off + 8 > bytes.len) return null;
+                off += 8;
+            },
+            else => return null,
+        }
+    }
+    return values;
+}
+
+fn xsettingsGet16(order: u8, bytes: []const u8) ?u16 {
+    if (bytes.len < 2) return null;
+    return switch (order) {
+        'l' => @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8),
+        'B' => (@as(u16, bytes[0]) << 8) | @as(u16, bytes[1]),
+        else => null,
+    };
+}
+
+fn xsettingsGet32(order: u8, bytes: []const u8) ?u32 {
+    if (bytes.len < 4) return null;
+    return switch (order) {
+        'l' => @as(u32, bytes[0]) | (@as(u32, bytes[1]) << 8) | (@as(u32, bytes[2]) << 16) | (@as(u32, bytes[3]) << 24),
+        'B' => (@as(u32, bytes[0]) << 24) | (@as(u32, bytes[1]) << 16) | (@as(u32, bytes[2]) << 8) | @as(u32, bytes[3]),
         else => null,
     };
 }
@@ -955,8 +1038,10 @@ test "uri-list drop prefers a local file path and skips comments" {
 test "desktop file-list MIME yields a local path and skips copy/cut headers" {
     var buf: [128]u8 = undefined;
     try std.testing.expect(isDesktopFileMime("x-special/gnome-copied-files"));
+    try std.testing.expect(isDesktopFileMime("x-special/nautilus-clipboard"));
     try std.testing.expect(isDesktopFileMime("text/x-moz-url"));
     try std.testing.expect(isDesktopFileMime("application/x-moz-file"));
+    try std.testing.expect(isDesktopFileMime("application/x-kde4-urilist"));
     try std.testing.expect(!isDesktopFileMime("text/uri-list"));
     try std.testing.expectEqualStrings(
         "/tmp/chat room.ccc",
@@ -969,6 +1054,37 @@ test "desktop file-list MIME yields a local path and skips copy/cut headers" {
         firstPathFromDesktopFiles("file:///tmp/photo.png\nPhoto title\n", &buf).?,
     );
     try std.testing.expect(firstPathFromDesktopFiles("copy\nhttps://example.test/a\n", &buf) == null);
+}
+
+test "XSETTINGS prefers Gdk/WindowScalingFactor then Xft/DPI" {
+    const scale2 = [_]u8{
+        'l', 0,   0,   0,
+        0,   0,   0,   0,
+        1,   0,   0,   0,
+        0,   0,   23,  0,
+        'G', 'd', 'k', '/',
+        'W', 'i', 'n', 'd',
+        'o', 'w', 'S', 'c',
+        'a', 'l', 'i', 'n',
+        'g', 'F', 'a', 'c',
+        't', 'o', 'r', 0,
+        0,   0,   0,   0,
+        2,   0,   0,   0,
+    };
+    try std.testing.expectEqual(@as(u32, 2), parseXsettingsScale(&scale2).?);
+
+    const dpi192 = [_]u8{
+        'B', 0,   0,   0,
+        0,   0,   0,   0,
+        0,   0,   0,   1,
+        0,   0,   0,   7,
+        'X', 'f', 't', '/',
+        'D', 'P', 'I', 0,
+        0,   0,   0,   0,
+        0, 3, 0, 0, // 196608 = 192 * 1024
+    };
+    try std.testing.expectEqual(@as(u32, 2), parseXsettingsScale(&dpi192).?);
+    try std.testing.expect(parseXsettingsScale("not-xsettings") == null);
 }
 
 test "Xft.dpi parser accepts integer and fractional resource lines" {

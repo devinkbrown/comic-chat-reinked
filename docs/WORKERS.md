@@ -90,12 +90,14 @@ hash.
   from the conventional Lock modifier bit when the compositor reports it,
   and refreshes text-input on keyboard enter.
   It does not
-  speak XIM.   Text and `file:` drops use XDND / `wl_data_device` and are
+  speak XIM.   X11 maps XI2 touch contacts to the shared pointer contract when the
+  device is not pointer-emulating. Text and `file:` drops use XDND / `wl_data_device` and are
   injected as existing key events (no new Event variant); Wayland sends
   `data_offer.set_actions` copy when accepting a drop. Clipboard MIME
   includes `text/plain;charset=utf8`, `text/uri-list`, receive-only
-  desktop file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
-  `application/x-moz-file`), and
+  desktop file-list MIME (`x-special/gnome-copied-files`,
+  `x-special/nautilus-clipboard`, `text/x-moz-url`, `application/x-moz-file`,
+  `application/x-kde4-urilist`), and
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
   strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
   stashes events that arrive during GetProperty. ConvertSelection uses a
@@ -108,8 +110,10 @@ hash.
   Armenian, Georgian, Thai,
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
-  requests. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
-  property changes, listens for RANDR `ScreenChangeNotify`, caches
+  requests.   X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
+  property changes, reads XSETTINGS `Gdk/WindowScalingFactor` / `Xft/DPI`,
+  maps XI2 touch to pointer events when the device is not pointer-emulating,
+  listens for RANDR `ScreenChangeNotify`, caches
   per-output millimeters so a window move can refresh integer scale,
   skips Expose while `VisibilityFullyObscured`, falls back to
   screen millimeter size, and reinstalls the scaled cursor plus physical

@@ -190,8 +190,10 @@ const html_mime_types = [_][]const u8{
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
 const desktop_file_mime_types = [_][]const u8{
     "x-special/gnome-copied-files",
+    "x-special/nautilus-clipboard",
     "text/x-moz-url",
     "application/x-moz-file",
+    "application/x-kde4-urilist",
 };
 
 pub const Key = shared_event.Key;
@@ -3325,8 +3327,10 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/html"));
     try std.testing.expect(isPlainTextMime("text/html;charset=utf-8"));
     try std.testing.expect(isPlainTextMime("x-special/gnome-copied-files"));
+    try std.testing.expect(isPlainTextMime("x-special/nautilus-clipboard"));
     try std.testing.expect(isPlainTextMime("text/x-moz-url"));
     try std.testing.expect(isPlainTextMime("application/x-moz-file"));
+    try std.testing.expect(isPlainTextMime("application/x-kde4-urilist"));
     try std.testing.expect(!isPlainTextMime("image/png"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));

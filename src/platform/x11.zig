@@ -13,9 +13,12 @@
 //!     13–14, MappingNotify refresh that does not drop queued events, and
 //!     bounded dead-key/Multi_key compose plus optional XCompose locale
 //!     tables; compose resets on FocusOut), integer HiDPI scale (env +
-//!     `Xft.dpi`, refreshed on root `RESOURCE_MANAGER` changes, RANDR
+//!     `Xft.dpi`, refreshed on root `RESOURCE_MANAGER` changes, XSETTINGS
+//!     `Gdk/WindowScalingFactor` / `Xft/DPI`, RANDR
 //!     `ScreenChangeNotify` plus cached per-output millimeters when the
 //!     window moves, VisibilityNotify (skip Expose while fully obscured),
+//!     XI2 touch mapped to the shared pointer contract when the device is
+//!     not already pointer-emulating,
 //!     with the
 //!     core cursor and physical WM size hints reinstalled), ICCCM
 //!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
@@ -58,6 +61,14 @@ const event_exposure: u32 = 1 << 15;
 const event_visibility_change: u32 = 1 << 16;
 const event_structure: u32 = 1 << 17;
 const visibility_fully_obscured: u8 = 2;
+const generic_event: u8 = 35;
+const xi_query_version: u8 = 47;
+const xi_select_events: u8 = 46;
+const xi_touch_begin: u16 = 18;
+const xi_touch_update: u16 = 19;
+const xi_touch_end: u16 = 20;
+const xi_all_master_devices: u16 = 1;
+const xi_touch_emulating_pointer: u32 = 1 << 17;
 const max_randr_crtcs: usize = 8;
 const event_focus_change: u32 = 1 << 21;
 const event_property_change: u32 = 1 << 22;
@@ -157,12 +168,18 @@ const XConn = struct {
     mime_gnome_copied: u32 = 0,
     mime_moz_url: u32 = 0,
     mime_moz_file: u32 = 0,
+    mime_kde_urilist: u32 = 0,
+    mime_nautilus: u32 = 0,
+    xsettings_s0: u32 = 0,
+    xsettings_settings: u32 = 0,
+    xsettings_window: u32 = 0,
     wm_state: u32 = 0,
     wm_change_state: u32 = 0,
     multiple: u32 = 0,
     atom_pair: u32 = 0,
     randr_opcode: u8 = 0,
     randr_event: u8 = 0,
+    xi_opcode: u8 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -172,7 +189,7 @@ const XConn = struct {
     }
 };
 
-const ScaleSource = enum { env, xft, physical, fallback };
+const ScaleSource = enum { env, xft, xsettings, physical, fallback };
 
 const RandrCrtc = struct {
     x: i32 = 0,
@@ -374,6 +391,10 @@ pub const Window = struct {
     randr_crtcs: [max_randr_crtcs]RandrCrtc,
     randr_crtc_count: u8,
     pending_events: std.ArrayList([32]u8),
+    generic_extra: [64]u8 = @splat(0),
+    generic_extra_len: usize = 0,
+    touch_contact: ?u32 = null,
+    xsettings_window: u32 = 0,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
         if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
@@ -436,6 +457,10 @@ pub const Window = struct {
             .randr_crtcs = @splat(.{}),
             .randr_crtc_count = 0,
             .pending_events = .empty,
+            .generic_extra = @splat(0),
+            .generic_extra_len = 0,
+            .touch_contact = null,
+            .xsettings_window = 0,
         };
         self.loadComposeFromEnv(env);
         errdefer self.unloadCompose();
@@ -448,6 +473,7 @@ pub const Window = struct {
 
         try internSessionAtoms(&self.conn);
         enableRandr(&self.conn) catch {};
+        self.watchXsettings();
         const detected = try detectScale(gpa, &self.conn, env, &self.pending_events, 0, 0, 0, self.randrCrtcs());
         self.scale = detected.scale;
         self.scale_source = detected.source;
@@ -460,6 +486,7 @@ pub const Window = struct {
         self.window = try self.conn.allocId();
         self.gc = try self.conn.allocId();
         try createWindow(&self.conn, self.window, @intCast(pixel_w), @intCast(pixel_h));
+        enableXi2(&self.conn, self.window) catch {};
         try createGc(&self.conn, self.gc, self.window);
         try installWmClose(&self.conn, self.window);
         try setTitle(&self.conn, self.window, title);
@@ -578,6 +605,7 @@ pub const Window = struct {
         }
         var raw: [32]u8 = undefined;
         try readExact(&self.conn, &raw);
+        self.generic_extra_len = consumeGenericExtra(&self.conn, raw, &self.generic_extra) catch 0;
         return self.decode(raw);
     }
 
@@ -586,6 +614,7 @@ pub const Window = struct {
         if (self.conn.randr_event != 0 and kind == self.conn.randr_event) {
             return self.handleRandrScreenChange(event);
         }
+        if (kind == generic_event) return self.decodeXiTouch(event);
         switch (kind) {
             0 => return .close, // request error; treat as fatal for the UI
             2 => { // KeyPress
@@ -716,6 +745,9 @@ pub const Window = struct {
                 const window = get32(event[4..8]);
                 const atom = get32(event[8..12]);
                 if (window == self.conn.screen.root and atom == atom_resource_manager) {
+                    if (self.refreshScale()) |ev| return ev;
+                }
+                if (self.conn.xsettings_window != 0 and window == self.conn.xsettings_window and atom == self.conn.xsettings_settings) {
                     if (self.refreshScale()) |ev| return ev;
                 }
                 if (window == self.window and atom == self.conn.net_wm_state) {
@@ -865,6 +897,8 @@ pub const Window = struct {
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_gnome_copied)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_url)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_file)) |path| return path;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_kde_urilist)) |path| return path;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_nautilus)) |path| return path;
         if (self.conn.text == 0) return null;
         if (self.convertTarget(gpa, selection, self.conn.text, self.conn.text)) |text| {
             if (text) |bytes| return try self.decodeClipboardBytes(gpa, bytes);
@@ -973,6 +1007,7 @@ pub const Window = struct {
         while (attempts < 64) : (attempts += 1) {
             var raw: [32]u8 = undefined;
             try readExact(&self.conn, &raw);
+            self.generic_extra_len = consumeGenericExtra(&self.conn, raw, &self.generic_extra) catch 0;
             const kind = raw[0] & 0x7f;
             if (kind == 31) {
                 if (get32(raw[8..12]) != self.window) continue;
@@ -1073,6 +1108,7 @@ pub const Window = struct {
         while (attempts < 256) : (attempts += 1) {
             var raw: [32]u8 = undefined;
             try readExact(&self.conn, &raw);
+            self.generic_extra_len = consumeGenericExtra(&self.conn, raw, &self.generic_extra) catch 0;
             const kind = raw[0] & 0x7f;
             if (kind == 28) {
                 if (get32(raw[4..8]) != self.window or get32(raw[8..12]) != property) {
@@ -1093,6 +1129,42 @@ pub const Window = struct {
             }
         }
         return error.ClipboardTimeout;
+    }
+
+    fn watchXsettings(self: *Window) void {
+        if (self.conn.xsettings_s0 == 0) return;
+        const owner = getSelectionOwner(&self.conn, self.conn.xsettings_s0) catch return;
+        if (owner == 0) return;
+        self.xsettings_window = owner;
+        self.conn.xsettings_window = owner;
+        selectPropertyNotify(&self.conn, owner) catch {};
+    }
+
+    fn decodeXiTouch(self: *Window, event: [32]u8) Event {
+        if (self.conn.xi_opcode == 0 or event[1] != self.conn.xi_opcode) return .other;
+        const evtype = get16(event[8..10]);
+        if (evtype != xi_touch_begin and evtype != xi_touch_update and evtype != xi_touch_end) return .other;
+        if (self.generic_extra_len < 28) return .other;
+        const flags = get32(self.generic_extra[24..28]);
+        if (flags & xi_touch_emulating_pointer != 0) return .other;
+        const raw_x = fp1616ToI32(get32(self.generic_extra[8..12]));
+        const raw_y = fp1616ToI32(get32(self.generic_extra[12..16]));
+        const x = physicalPointToLogical(raw_x, self.scale);
+        const y = physicalPointToLogical(raw_y, self.scale);
+        const touch_id = get32(event[16..20]);
+        if (evtype == xi_touch_begin) {
+            if (self.touch_contact != null) return .other;
+            self.touch_contact = touch_id;
+            self.noteUserTime(get32(event[12..16]));
+            self.claimFocus(get32(event[12..16]));
+            return .{ .pointer = .{ .kind = .down, .x = x, .y = y, .button = .primary } };
+        }
+        if (self.touch_contact == null or self.touch_contact.? != touch_id) return .other;
+        if (evtype == xi_touch_update) {
+            return .{ .pointer = .{ .kind = .move, .x = x, .y = y } };
+        }
+        self.touch_contact = null;
+        return .{ .pointer = .{ .kind = .up, .x = x, .y = y, .button = .primary } };
     }
 
     fn handleProtocolEvent(self: *Window, event: [32]u8) bool {
@@ -1269,6 +1341,7 @@ pub const Window = struct {
         while (attempts < 32) : (attempts += 1) {
             var raw: [32]u8 = undefined;
             readExact(&self.conn, &raw) catch return;
+            self.generic_extra_len = consumeGenericExtra(&self.conn, raw, &self.generic_extra) catch 0;
             const kind = raw[0] & 0x7f;
             if (kind == 31) return;
             _ = self.handleProtocolEvent(raw);
@@ -1924,10 +1997,43 @@ fn readReplyStashing(gpa: std.mem.Allocator, conn: *XConn, stash: *std.ArrayList
     return readReplyMaybeStashing(gpa, conn, stash);
 }
 
+fn consumeGenericExtra(conn: *XConn, header: [32]u8, dest: ?[]u8) !usize {
+    if ((header[0] & 0x7f) != generic_event) return 0;
+    const n = try std.math.mul(usize, get32(header[4..8]), 4);
+    var copied: usize = 0;
+    var remain = n;
+    var tmp: [256]u8 = undefined;
+    while (remain > 0) {
+        const chunk = @min(remain, tmp.len);
+        try readExact(conn, tmp[0..chunk]);
+        if (dest) |out| {
+            const take = @min(out.len - copied, chunk);
+            if (take != 0) {
+                @memcpy(out[copied..][0..take], tmp[0..take]);
+                copied += take;
+            }
+        }
+        remain -= chunk;
+    }
+    return copied;
+}
+
+fn genericEventExtraBytes(header: [32]u8) usize {
+    if ((header[0] & 0x7f) != generic_event) return 0;
+    return @as(usize, get32(header[4..8])) * 4;
+}
+
+fn fp1616ToI32(bits: u32) i32 {
+    return @divTrunc(@as(i32, @bitCast(bits)), 65536);
+}
+
 fn readReplyMaybeStashing(gpa: std.mem.Allocator, conn: *XConn, stash: ?*std.ArrayList([32]u8)) ![32]u8 {
     while (true) {
         var head: [32]u8 = undefined;
         try readExact(conn, &head);
+        if ((head[0] & 0x7f) == generic_event) {
+            _ = consumeGenericExtra(conn, head, null) catch {};
+        }
         switch (head[0]) {
             0 => return error.X11ServerError,
             1 => return head,
@@ -2192,6 +2298,10 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_gnome_copied = try internAtom(conn, "x-special/gnome-copied-files");
     conn.mime_moz_url = try internAtom(conn, "text/x-moz-url");
     conn.mime_moz_file = try internAtom(conn, "application/x-moz-file");
+    conn.mime_kde_urilist = try internAtom(conn, "application/x-kde4-urilist");
+    conn.mime_nautilus = try internAtom(conn, "x-special/nautilus-clipboard");
+    conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
+    conn.xsettings_settings = try internAtom(conn, "_XSETTINGS_SETTINGS");
     conn.wm_state = try internAtom(conn, "WM_STATE");
     conn.wm_change_state = try internAtom(conn, "WM_CHANGE_STATE");
     conn.multiple = try internAtom(conn, "MULTIPLE");
@@ -2347,6 +2457,7 @@ fn detectScale(
     crtcs: []const RandrCrtc,
 ) !struct { scale: u32, source: ScaleSource } {
     if (services.scaleFromEnvironment(env)) |scale| return .{ .scale = scale, .source = .env };
+    if (scaleFromXsettings(gpa, conn, stash)) |scale| return .{ .scale = scale, .source = .xsettings };
     if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager, stash)) |resources| {
         defer gpa.free(resources);
         if (services.parseXftDpi(resources)) |dpi| return .{ .scale = services.scaleFromDpi(dpi), .source = .xft };
@@ -2356,6 +2467,44 @@ fn detectScale(
         return .{ .scale = scale, .source = .physical };
     }
     return .{ .scale = 1, .source = .fallback };
+}
+
+fn scaleFromXsettings(gpa: std.mem.Allocator, conn: *XConn, stash: ?*std.ArrayList([32]u8)) ?u32 {
+    if (conn.xsettings_settings == 0 or conn.xsettings_window == 0) return null;
+    const bytes = getWindowProperty(gpa, conn, conn.xsettings_window, conn.xsettings_settings, stash) catch return null;
+    defer gpa.free(bytes);
+    return services.parseXsettingsScale(bytes);
+}
+
+fn enableXi2(conn: *XConn, window: u32) !void {
+    const ext = (try queryExtension(conn, "XInputExtension")) orelse return;
+    if (ext.major == 0) return;
+    var version_req: [8]u8 = @splat(0);
+    version_req[0] = ext.major;
+    version_req[1] = xi_query_version;
+    put16(version_req[2..4], 2);
+    put16(version_req[4..6], 2);
+    put16(version_req[6..8], 2);
+    try writeAll(conn, &version_req);
+    const reply = try readReply(conn);
+    const major = get16(reply[8..10]);
+    const minor = get16(reply[10..12]);
+    if (major < 2 or (major == 2 and minor < 2)) return;
+    conn.xi_opcode = ext.major;
+    var sel: [20]u8 = @splat(0);
+    sel[0] = ext.major;
+    sel[1] = xi_select_events;
+    put16(sel[2..4], 5);
+    put32(sel[4..8], window);
+    put16(sel[8..10], 1);
+    put16(sel[12..14], xi_all_master_devices);
+    put16(sel[14..16], 1);
+    sel[18] = xiTouchMaskByte();
+    try writeAll(conn, &sel);
+}
+
+fn xiTouchMaskByte() u8 {
+    return (1 << (xi_touch_begin & 7)) | (1 << (xi_touch_update & 7)) | (1 << (xi_touch_end & 7));
 }
 
 fn scaleFromCachedCrtcs(gpa: std.mem.Allocator, conn: *XConn, window: u32, pixel_w: u32, pixel_h: u32, crtcs: []const RandrCrtc, stash: ?*std.ArrayList([32]u8)) ?u32 {
@@ -2844,7 +2993,8 @@ fn isHtmlAtom(conn: *const XConn, atom: u32) bool {
 }
 
 fn isDesktopFileAtom(conn: *const XConn, atom: u32) bool {
-    return atom != 0 and (atom == conn.mime_gnome_copied or atom == conn.mime_moz_url or atom == conn.mime_moz_file);
+    return atom != 0 and (atom == conn.mime_gnome_copied or atom == conn.mime_moz_url or atom == conn.mime_moz_file or
+        atom == conn.mime_kde_urilist or atom == conn.mime_nautilus);
 }
 
 fn preferredTextAtom(conn: *const XConn, atoms: []const u8) ?u32 {
@@ -3140,6 +3290,8 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_gnome_copied = 111,
         .mime_moz_url = 112,
         .mime_moz_file = 113,
+        .mime_kde_urilist = 114,
+        .mime_nautilus = 115,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
@@ -3153,6 +3305,8 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 111));
     try std.testing.expect(isClipboardTextTarget(&conn, 112));
     try std.testing.expect(isClipboardTextTarget(&conn, 113));
+    try std.testing.expect(isClipboardTextTarget(&conn, 114));
+    try std.testing.expect(isClipboardTextTarget(&conn, 115));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 
     var atoms: [12]u8 = undefined;
@@ -3281,4 +3435,19 @@ test "MULTIPLE atom-pair payload is an even list of 32-bit atoms" {
     try std.testing.expectEqual(@as(usize, 0), pairs.len % 8);
     try std.testing.expectEqual(@as(u32, 100), get32(pairs[0..4]));
     try std.testing.expectEqual(@as(u32, 200), get32(pairs[4..8]));
+}
+
+test "GenericEvent extra length is 4 bytes per length unit" {
+    var header: [32]u8 = @splat(0);
+    header[0] = generic_event;
+    put32(header[4..8], 3);
+    try std.testing.expectEqual(@as(usize, 12), genericEventExtraBytes(header));
+    header[0] = 12;
+    try std.testing.expectEqual(@as(usize, 0), genericEventExtraBytes(header));
+}
+
+test "XI2 touch mask selects Begin/Update/End and FP1616 is signed 16.16" {
+    try std.testing.expectEqual(@as(u8, (1 << 2) | (1 << 3) | (1 << 4)), xiTouchMaskByte());
+    try std.testing.expectEqual(@as(i32, 12), fp1616ToI32(12 << 16));
+    try std.testing.expectEqual(@as(i32, -3), fp1616ToI32(@bitCast(@as(i32, -3) * 65536)));
 }
