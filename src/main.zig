@@ -2734,23 +2734,31 @@ fn applyDialogAction(
             try client.listRooms(value, limit, state.ircx_data);
             const room_to_join = std.mem.trim(u8, view.dialogValueAt(1), " \t");
             if (room_to_join.len != 0) {
-                const index = workspace.ensure(room_to_join) catch {
-                    view.setDialogNotice("Enter a valid room name beginning with # or &.");
+                const index = workspace.ensure(room_to_join) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNotice(err));
                     return;
                 };
                 _ = workspace.activate(index);
-                workspace.rooms.items[index].setWantRejoin(true);
-                try client.joinWithKey(room_to_join, workspace.rooms.items[index].join_key orelse "");
+                if (try requestMarkedJoinWithKey(client, workspace, index, room_to_join, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    view.setDialogNotice(notice);
+                    return;
+                }
             }
         },
         .channel => {
-            const index = workspace.ensure(value) catch {
-                view.setDialogNotice("Enter a valid room name beginning with # or &.");
+            const index = workspace.ensure(value) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNotice(err));
                 return;
             };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
-            if (maybe_client) |client| try client.joinWithKey(value, view.dialogValueAt(1));
+            if (maybe_client) |client| {
+                if (try requestJoinWithKey(client, workspace, value, view.dialogValueAt(1))) |notice| {
+                    workspace.rooms.items[index].setWantRejoin(false);
+                    view.setDialogNotice(notice);
+                    return;
+                }
+            }
             try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(1));
         },
         .channel_create => {
@@ -2770,14 +2778,18 @@ fn applyDialogAction(
                     return;
                 }
             }
-            const index = workspace.ensure(value) catch {
-                view.setDialogNotice("Enter a valid room name beginning with # or &.");
+            const index = workspace.ensure(value) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNotice(err));
                 return;
             };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
             if (maybe_client) |client| {
-                try client.create(value, creation_modes, limit, view.dialogValueAt(4));
+                if (try requestCreateRoom(client, workspace, value, creation_modes, limit, view.dialogValueAt(4))) |notice| {
+                    workspace.rooms.items[index].setWantRejoin(false);
+                    view.setDialogNotice(notice);
+                    return;
+                }
                 try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(4));
                 try workspace.rooms.items[index].setPendingTopic(workspace.gpa, view.dialogValueAt(1));
             }
@@ -2828,12 +2840,16 @@ fn applyDialogAction(
                 view.setDialogNotice("Connect before changing room properties.");
                 return;
             };
+            const key = view.dialogValueAt(3);
+            if (key.len != 0 and cc.net.irc_map.SessionLimits.exceeds(workspace.session_limits.keylen, key)) {
+                view.setDialogNotice("That room password is longer than the server allows.");
+                return;
+            }
             try client.setTopic(room.name, value);
             const modes = std.mem.trim(u8, view.dialogValueAt(1), " \t");
             if (modes.len != 0) try client.setMode(room.name, modes, "");
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (limit.len != 0) try client.setMode(room.name, "+l", limit);
-            const key = view.dialogValueAt(3);
             if (key.len != 0) {
                 try client.setMode(room.name, "+k", key);
                 try room.setJoinKey(gpa, key);
@@ -3110,13 +3126,15 @@ fn applyDialogAction(
                     return;
                 };
                 const target_room = std.mem.trim(u8, view.dialogValueAt(3), " \t");
-                const index = workspace.ensure(target_room) catch {
-                    view.setDialogNotice("Enter a valid room beginning with # or &.");
+                const index = workspace.ensure(target_room) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid room beginning with # or &."));
                     return;
                 };
                 _ = workspace.activate(index);
-                workspace.rooms.items[index].setWantRejoin(true);
-                try client.joinWithKey(target_room, workspace.rooms.items[index].join_key orelse "");
+                if (try requestMarkedJoinWithKey(client, workspace, index, target_room, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    view.setDialogNotice(notice);
+                    return;
+                }
             } else {
                 const member = std.mem.trim(u8, view.dialogValueAt(1), " \t");
                 if (!containsIgnoreCase(state.notification_current.items, member)) {
@@ -3210,7 +3228,12 @@ fn applyDialogAction(
             view.shell.setSayMode(.say);
             view.jumpLatest();
         },
-        .nickname => if (maybe_client) |client| try client.changeNick(value),
+        .nickname => if (maybe_client) |client| {
+            if (try requestNickChange(client, workspace, value)) |notice| {
+                view.setDialogNotice(notice);
+                return;
+            }
+        },
         .away => if (maybe_client) |client| {
             try client.setAway(value);
             if (value.len == 0) {
@@ -3278,13 +3301,15 @@ fn applyDialogAction(
                 return;
             };
             const target = state.last_key_channel orelse room.name;
-            const index = workspace.ensure(target) catch {
-                view.setDialogNotice("Enter a valid room beginning with # or &.");
+            const index = workspace.ensure(target) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid room beginning with # or &."));
                 return;
             };
             _ = workspace.activate(index);
-            workspace.rooms.items[index].setWantRejoin(true);
-            try client.joinWithKey(target, value);
+            if (try requestMarkedJoinWithKey(client, workspace, index, target, value)) |notice| {
+                view.setDialogNotice(notice);
+                return;
+            }
             try workspace.rooms.items[index].setJoinKey(gpa, value);
         },
         .invitation => {
@@ -3292,13 +3317,19 @@ fn applyDialogAction(
                 view.setDialogNotice("No pending room invitation.");
                 return;
             };
-            const index = workspace.ensure(target) catch {
-                view.setDialogNotice("Enter a valid room beginning with # or &.");
+            const index = workspace.ensure(target) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid room beginning with # or &."));
                 return;
             };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
-            if (maybe_client) |client| try client.joinWithKey(target, workspace.rooms.items[index].join_key orelse "");
+            if (maybe_client) |client| {
+                if (try requestJoinWithKey(client, workspace, target, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    workspace.rooms.items[index].setWantRejoin(false);
+                    view.setDialogNotice(notice);
+                    return;
+                }
+            }
         },
         .invite => if (maybe_client) |client| try client.invite(value, room.name),
         .user_list, .whisper => {
@@ -3380,15 +3411,20 @@ fn applyDialogAction(
             var locator_room_index = workspace.active.?;
             const changes_server = if (locator.server) |server| !std.ascii.eqlIgnoreCase(server, network.host) else false;
             if (locator.channel) |located_room| {
-                const index = workspace.ensure(located_room) catch {
-                    view.setDialogNotice("The locator contains an invalid room.");
+                const index = workspace.ensure(located_room) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNoticeOr(err, "The locator contains an invalid room."));
                     return;
                 };
                 _ = workspace.activate(index);
                 locator_room_index = index;
                 workspace.rooms.items[index].setWantRejoin(true);
-                if (!changes_server) if (maybe_client) |client|
-                    try client.joinWithKey(located_room, workspace.rooms.items[index].join_key orelse "");
+                if (!changes_server) if (maybe_client) |client| {
+                    if (try requestJoinWithKey(client, workspace, located_room, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                        workspace.rooms.items[index].setWantRejoin(false);
+                        view.setDialogNotice(notice);
+                        return;
+                    }
+                };
             }
             if (locator.character) |character| if (cc.comic.session.bundledAvatarByName(character)) |avatar| {
                 try workspace.rooms.items[locator_room_index].transcript.setAvatar(nick, avatar);
@@ -3448,13 +3484,19 @@ fn applyDialogAction(
                 _ = preferences.removeFavoriteRoom(value);
                 try preferences.saveFile(io, network.runtime.preferences_path);
             } else {
-                const index = workspace.ensure(value) catch {
-                    view.setDialogNotice("Enter a valid favorite room beginning with # or &.");
+                const index = workspace.ensure(value) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid favorite room beginning with # or &."));
                     return;
                 };
                 _ = workspace.activate(index);
                 workspace.rooms.items[index].setWantRejoin(true);
-                if (maybe_client) |client| try client.joinWithKey(value, workspace.rooms.items[index].join_key orelse "");
+                if (maybe_client) |client| {
+                    if (try requestJoinWithKey(client, workspace, value, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                        workspace.rooms.items[index].setWantRejoin(false);
+                        view.setDialogNotice(notice);
+                        return;
+                    }
+                }
             }
         },
         else => {},
@@ -3816,10 +3858,20 @@ fn handleWorkspaceInputKey(
         }
         if (std.mem.startsWith(u8, text, "/join ")) {
             const name = std.mem.trim(u8, text[6..], " \t");
-            const index = workspace.ensure(name) catch return true;
+            const index = workspace.ensure(name) catch |err| {
+                try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+                const consumed = try editor.take();
+                gpa.free(consumed);
+                return true;
+            };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
-            if (maybe_client) |client| try client.joinWithKey(name, workspace.rooms.items[index].join_key orelse "");
+            if (maybe_client) |client| {
+                if (try requestJoinWithKey(client, workspace, name, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    workspace.rooms.items[index].setWantRejoin(false);
+                    try appendSessionNotice(workspace, notice);
+                }
+            }
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
@@ -4022,19 +4074,22 @@ fn processWorkspaceMessages(
             if (client.hasRestorationTargets()) {
                 for (workspace.rooms.items) |*room| {
                     room.joined = false;
-                    if (roomNeedsReconnectJoin(room, client))
-                        try client.joinWithKey(room.name, room.join_key orelse "");
+                    try requestReconnectJoin(workspace, client, room);
                 }
             } else if (workspace.rooms.items.len == 0) {
                 // Open the startup room before MOTD/LUSERS so those numerics
                 // have a transcript. JOIN confirmation still marks it joined.
                 const startup = try workspace.ensure(channel);
-                workspace.rooms.items[startup].setWantRejoin(true);
-                try client.joinWithKey(channel, workspace.rooms.items[startup].join_key orelse "");
+                if (try requestMarkedJoinWithKey(
+                    client,
+                    workspace,
+                    startup,
+                    channel,
+                    workspace.rooms.items[startup].join_key orelse "",
+                )) |notice| try appendSessionNotice(workspace, notice);
             } else for (workspace.rooms.items) |*room| {
                 room.joined = false;
-                if (roomNeedsReconnectJoin(room, client))
-                    try client.joinWithKey(room.name, room.join_key orelse "");
+                try requestReconnectJoin(workspace, client, room);
             }
             state.join_requested = true;
             state.status = "joining";
@@ -4612,6 +4667,118 @@ fn canLeaveActiveRoom(room_count: usize) bool {
 
 fn roomNeedsReconnectJoin(room: *const cc.client.workspace.Room, client: *const cc.net.client.Client) bool {
     return room.want_rejoin and !client.restoresChannel(room.name);
+}
+
+fn roomEnsureFailureNotice(err: anyerror) []const u8 {
+    return roomEnsureFailureNoticeOr(err, "Enter a valid room name beginning with # or &.");
+}
+
+fn roomEnsureFailureNoticeOr(err: anyerror, invalid_name: []const u8) []const u8 {
+    return switch (err) {
+        error.TooManyRooms => "You have opened as many rooms as the server allows.",
+        else => invalid_name,
+    };
+}
+
+const SessionLimitKind = enum { join, create, nick };
+
+fn sessionLimitFailureNotice(
+    kind: SessionLimitKind,
+    workspace: *const cc.client.workspace.Workspace,
+    channel: []const u8,
+    key: []const u8,
+) []const u8 {
+    const limits = workspace.session_limits;
+    return switch (kind) {
+        .nick => "That nickname is longer than the server allows.",
+        .join, .create => if (cc.net.irc_map.SessionLimits.exceeds(limits.channellen, channel))
+            "That room name is longer than the server allows."
+        else if (cc.net.irc_map.SessionLimits.exceeds(limits.keylen, key))
+            "That room password is longer than the server allows."
+        else
+            "You have joined as many rooms as the server allows.",
+    };
+}
+
+fn requestJoinWithKey(
+    client: *cc.net.client.Client,
+    workspace: *const cc.client.workspace.Workspace,
+    channel: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    client.joinWithKey(channel, key) catch |err| switch (err) {
+        error.InvalidIrcParameter => return sessionLimitFailureNotice(.join, workspace, channel, key),
+        else => return err,
+    };
+    return null;
+}
+
+fn requestCreateRoom(
+    client: *cc.net.client.Client,
+    workspace: *const cc.client.workspace.Workspace,
+    channel: []const u8,
+    creation_modes: []const u8,
+    limit: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    client.create(channel, creation_modes, limit, key) catch |err| switch (err) {
+        error.InvalidIrcParameter => return sessionLimitFailureNotice(.create, workspace, channel, key),
+        else => return err,
+    };
+    return null;
+}
+
+fn requestNickChange(
+    client: *cc.net.client.Client,
+    workspace: *const cc.client.workspace.Workspace,
+    nick_value: []const u8,
+) !?[]const u8 {
+    client.changeNick(nick_value) catch |err| switch (err) {
+        error.InvalidIrcParameter => return sessionLimitFailureNotice(.nick, workspace, "", ""),
+        else => return err,
+    };
+    return null;
+}
+
+fn requestMarkedJoinWithKey(
+    client: *cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    room_index: usize,
+    channel: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    workspace.rooms.items[room_index].setWantRejoin(true);
+    if (try requestJoinWithKey(client, workspace, channel, key)) |notice| {
+        workspace.rooms.items[room_index].setWantRejoin(false);
+        return notice;
+    }
+    return null;
+}
+
+fn requestReconnectJoin(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    room: *cc.client.workspace.Room,
+) !void {
+    if (!roomNeedsReconnectJoin(room, client)) return;
+    client.joinWithKey(room.name, room.join_key orelse "") catch |err| switch (err) {
+        error.InvalidIrcParameter => {
+            client.forgetRestoration(room.name);
+            room.setWantRejoin(false);
+            try room.transcript.addWithOptions(
+                "Server",
+                sessionLimitFailureNotice(.join, workspace, room.name, room.join_key orelse ""),
+                .{ .modes = cc.proto.udi.bm_action },
+            );
+        },
+        else => return err,
+    };
+}
+
+fn appendSessionNotice(workspace: *cc.client.workspace.Workspace, line: []const u8) !void {
+    if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
 }
 
 fn retargetSessionHint(
@@ -5268,9 +5435,13 @@ fn runPersistentRules(
             if (value.len != 0) try client.sendSound(channel, value, "");
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Join room")) {
             if (value.len != 0) {
-                const index = workspace.ensure(value) catch continue;
-                workspace.rooms.items[index].setWantRejoin(true);
-                try client.joinWithKey(value, workspace.rooms.items[index].join_key orelse "");
+                const index = workspace.ensure(value) catch |err| {
+                    try transcript.addWithOptions("Server", roomEnsureFailureNotice(err), .{ .modes = cc.proto.udi.bm_action });
+                    continue;
+                };
+                if (try requestMarkedJoinWithKey(client, workspace, index, value, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    try transcript.addWithOptions("Server", notice, .{ .modes = cc.proto.udi.bm_action });
+                }
             }
         }
     }
@@ -6647,6 +6818,28 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expectError(error.InvalidIrcParameter, client.changeNick("alice"));
     try std.testing.expectError(error.InvalidIrcParameter, client.join("#toolong"));
     try std.testing.expectError(error.InvalidIrcParameter, client.joinWithKey("#ab", "toolong"));
+    try std.testing.expectEqualStrings("That room password is longer than the server allows.", sessionLimitFailureNotice(.join, &workspace, "#ab", "toolong"));
+    try std.testing.expectEqualStrings("That room name is longer than the server allows.", sessionLimitFailureNotice(.join, &workspace, "#toolong", "x"));
+    try std.testing.expectEqualStrings("That nickname is longer than the server allows.", sessionLimitFailureNotice(.nick, &workspace, "", ""));
+    try std.testing.expectEqualStrings("You have opened as many rooms as the server allows.", roomEnsureFailureNotice(error.TooManyRooms));
+    try std.testing.expectEqualStrings("Enter a valid room name beginning with # or &.", roomEnsureFailureNotice(error.InvalidRoomName));
+    try std.testing.expectEqualStrings(
+        "The locator contains an invalid room.",
+        roomEnsureFailureNoticeOr(error.InvalidRoomName, "The locator contains an invalid room."),
+    );
+    const join_limit_notice = (try requestJoinWithKey(&client, &workspace, "#ab", "toolong")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("That room password is longer than the server allows.", join_limit_notice);
+    const create_limit_notice = (try requestCreateRoom(&client, &workspace, "#ab", "", "", "toolong")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("That room password is longer than the server allows.", create_limit_notice);
+    const nick_limit_notice = (try requestNickChange(&client, &workspace, "alice")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("That nickname is longer than the server allows.", nick_limit_notice);
+
+    const limited = try workspace.ensure("#lim");
+    try workspace.rooms.items[limited].setJoinKey(gpa, "toolong");
+    workspace.rooms.items[limited].setWantRejoin(true);
+    try requestReconnectJoin(&workspace, &client, &workspace.rooms.items[limited]);
+    try std.testing.expect(!workspace.rooms.items[limited].want_rejoin);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[limited].transcript.lines.items[0].text, "password") != null);
     try client.setTopic("#root", "Welcome");
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOPIC #root :Welco\r\n") != null);
     try client.setAway("later");
@@ -6708,6 +6901,8 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     applyClientIsupport(&workspace, &client);
     try std.testing.expectError(error.InvalidIrcParameter, client.join("#x"));
     try std.testing.expectError(error.TooManyRooms, workspace.ensure("#x"));
+    try std.testing.expectEqualStrings("You have joined as many rooms as the server allows.", sessionLimitFailureNotice(.join, &workspace, "#x", ""));
+    try std.testing.expectEqualStrings("You have opened as many rooms as the server allows.", roomEnsureFailureNotice(error.TooManyRooms));
 
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expect(!workspace.rooms.items[old].want_rejoin);

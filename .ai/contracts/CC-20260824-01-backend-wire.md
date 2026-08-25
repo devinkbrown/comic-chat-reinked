@@ -129,6 +129,14 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 26 leftovers in scope
+
+- Live JOIN/CREATE/NICK over advertised KEYLEN/CHANNELLEN/NICKLEN/CHANLIMIT stay in the dialog or transcript; do not throw `error.InvalidIrcParameter` out of the UI or 001 rejoin
+- `workspace.ensure` TooManyRooms is "opened as many rooms as the server allows", not an invalid-name notice
+- `/join` writes those notices instead of swallowing the name or crashing the composer
+- Channel-properties `+k` rejects an over-long key before storing it for reconnect
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 25 leftovers in scope
 
 - Notification MONITOR full `734` is a command failure, like ban `478` and silence `511`
