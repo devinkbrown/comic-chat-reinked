@@ -32,6 +32,18 @@ pub fn readEnviron(gpa: std.mem.Allocator) ![]u8 {
     return env.toOwnedSlice(gpa);
 }
 
+/// Desktop startup token used to take focus after a launcher/file-manager open.
+/// `XDG_ACTIVATION_TOKEN` wins; `DESKTOP_STARTUP_ID` is the older X11 name.
+pub fn startupToken(env: []const u8) ?[]const u8 {
+    if (environValue(env, "XDG_ACTIVATION_TOKEN")) |token| {
+        if (token.len != 0) return token;
+    }
+    if (environValue(env, "DESKTOP_STARTUP_ID")) |token| {
+        if (token.len != 0) return token;
+    }
+    return null;
+}
+
 pub fn environValue(env: []const u8, name: []const u8) ?[]const u8 {
     var start: usize = 0;
     while (start < env.len) {
@@ -802,6 +814,15 @@ test "desktop service output trimming preserves an owned result" {
 test "environValue reads NUL-separated assignments" {
     try std.testing.expectEqualStrings("unix:0", environValue("HOME=/home/dev\x00DISPLAY=unix:0\x00", "DISPLAY").?);
     try std.testing.expect(environValue("HOME=/home/dev\x00", "DISPLAY") == null);
+}
+
+test "startupToken prefers XDG_ACTIVATION_TOKEN then DESKTOP_STARTUP_ID" {
+    try std.testing.expectEqualStrings(
+        "tok-1",
+        startupToken("WAYLAND_DISPLAY=wayland-0\x00XDG_ACTIVATION_TOKEN=tok-1\x00DESKTOP_STARTUP_ID=old\x00").?,
+    );
+    try std.testing.expectEqualStrings("start/0", startupToken("DESKTOP_STARTUP_ID=start/0\x00").?);
+    try std.testing.expect(startupToken("DISPLAY=:0\x00XDG_ACTIVATION_TOKEN=\x00") == null);
 }
 
 test "integer scale comes from toolkit env, then rounded DPI" {

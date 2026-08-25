@@ -34,7 +34,9 @@
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
 //! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
-//! when advertised. When a decoration manager is advertised, the client
+//! when advertised. A supplied `XDG_ACTIVATION_TOKEN` is consumed through
+//! `xdg_activation_v1` so a launcher-started window can take focus (not
+//! used for notify/urgency). When a decoration manager is advertised, the client
 //! requests server-side decorations (`zxdg` or `xdg`) and re-requests SSD
 //! once if the compositor configures client-side mode. xdg-shell records
 //! maximized/fullscreen/tiled/suspended configure states, records
@@ -119,6 +121,7 @@ const xdg_surface_ack_configure: u16 = 4;
 const xdg_toplevel_destroy: u16 = 0;
 const xdg_toplevel_set_title: u16 = 2;
 const xdg_toplevel_set_app_id: u16 = 3;
+const xdg_activation_activate: u16 = 2;
 const xdg_toplevel_set_max_size: u16 = 7;
 const xdg_toplevel_set_min_size: u16 = 8;
 const xdg_min_width: u32 = 160;
@@ -204,6 +207,7 @@ const Globals = struct {
     toplevel_icon_manager: Global = .{},
     decoration_manager: Global = .{},
     decoration_zxdg: bool = true,
+    activation: Global = .{},
 
     fn record(self: *Globals, name: u32, interface: []const u8, version: u32) void {
         const value = Global{ .name = name, .version = version };
@@ -238,6 +242,8 @@ const Globals = struct {
         } else if (std.mem.eql(u8, interface, "xdg_decoration_manager_v1") and self.decoration_manager.name == 0) {
             self.decoration_manager = value;
             self.decoration_zxdg = false;
+        } else if (std.mem.eql(u8, interface, "xdg_activation_v1") and self.activation.name == 0) {
+            self.activation = value;
         }
     }
 };
@@ -525,6 +531,8 @@ pub const Window = struct {
     decoration_id: u32 = 0,
     decoration_mode: u32 = 0,
     decoration_retry: bool = false,
+    activation_id: u32 = 0,
+    startup_token: []const u8 = "",
     frame_callback_id: u32 = 0,
     pending_present: ?PendingPresent = null,
     last_serial: u32 = 0,
@@ -595,6 +603,9 @@ pub const Window = struct {
             const env = try services.readEnviron(gpa);
             defer gpa.free(env);
             self.loadComposeFromEnv(env);
+            if (services.startupToken(env)) |token| {
+                self.startup_token = gpa.dupe(u8, token) catch "";
+            }
         }
         errdefer self.unloadCompose();
 
@@ -664,6 +675,10 @@ pub const Window = struct {
                 self.decoration_manager_id,
             );
         }
+        if (globals.activation.name != 0) {
+            self.activation_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.activation, "xdg_activation_v1", 1, self.activation_id);
+        }
         if (globals.text_input_manager.name != 0) {
             self.text_input_manager_id = try self.conn.allocId();
             try sendBind(&self.conn, self.gpa, self.registry_id, globals.text_input_manager, "zwp_text_input_manager_v3", 1, self.text_input_manager_id);
@@ -707,6 +722,7 @@ pub const Window = struct {
         }
         if (!self.argb_supported) return error.Argb8888Unsupported;
         self.installToplevelIcon() catch {};
+        self.activateStartupToken() catch {};
         return self;
     }
 
@@ -745,6 +761,7 @@ pub const Window = struct {
         self.conn.stream.close(self.conn.io);
         if (self.xkb_keymap) |*keymap| keymap.deinit();
         if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
+        if (self.startup_token.len != 0) self.gpa.free(self.startup_token);
         for (self.buffers.items) |*buffer| buffer.deinit();
         self.buffers.deinit(self.gpa);
         if (self.cursor_buffer) |*buffer| buffer.deinit();
@@ -2105,6 +2122,13 @@ pub const Window = struct {
         self.icon_buffer = buffer;
     }
 
+    fn activateStartupToken(self: *Window) !void {
+        if (self.activation_id == 0 or self.surface_id == 0 or self.startup_token.len == 0) return;
+        try sendStringU32(&self.conn, self.gpa, self.activation_id, xdg_activation_activate, self.startup_token, self.surface_id);
+        self.gpa.free(self.startup_token);
+        self.startup_token = "";
+    }
+
     fn createBuffer(self: *Window, w: u32, h: u32) !Buffer {
         const stride = try std.math.mul(usize, @as(usize, w), 4);
         const byte_len = try std.math.mul(usize, stride, @as(usize, h));
@@ -2188,6 +2212,7 @@ pub const Window = struct {
         if (self.toplevel_icon_manager_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_manager_id, 0);
         if (self.decoration_id != 0) try sendEmpty(&self.conn, self.decoration_id, 0);
         if (self.decoration_manager_id != 0) try sendEmpty(&self.conn, self.decoration_manager_id, 0);
+        if (self.activation_id != 0) try sendEmpty(&self.conn, self.activation_id, 0);
         if (self.xdg_toplevel_id != 0) try sendEmpty(&self.conn, self.xdg_toplevel_id, xdg_toplevel_destroy);
         if (self.xdg_surface_id != 0) try sendEmpty(&self.conn, self.xdg_surface_id, xdg_surface_destroy);
         if (self.surface_id != 0) try sendEmpty(&self.conn, self.surface_id, surface_destroy);
@@ -2315,6 +2340,19 @@ fn sendString(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u1
     @memset(req, 0);
     header(req, object, opcode);
     encodeString(req[8..], value);
+    try conn.writeAll(req);
+}
+
+fn sendStringU32(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u16, value: []const u8, extra: u32) !void {
+    const string_size = try encodedStringSize(value);
+    const total = try std.math.add(usize, 12, string_size);
+    if (total > std.math.maxInt(u16)) return error.WaylandMessageTooLarge;
+    const req = try gpa.alloc(u8, total);
+    defer gpa.free(req);
+    @memset(req, 0);
+    header(req, object, opcode);
+    encodeString(req[8..], value);
+    put32(req[8 + string_size ..][0..4], extra);
     try conn.writeAll(req);
 }
 
@@ -3228,6 +3266,7 @@ test "registry records fractional scale, viewporter, and primary selection" {
     globals.record(6, "wp_cursor_shape_manager_v1", 1);
     globals.record(7, "xdg_toplevel_icon_manager_v1", 1);
     globals.record(8, "zxdg_decoration_manager_v1", 1);
+    globals.record(9, "xdg_activation_v1", 1);
     try std.testing.expectEqual(@as(u32, 3), globals.viewporter.name);
     try std.testing.expectEqual(@as(u32, 4), globals.fractional_manager.name);
     try std.testing.expectEqual(@as(u32, 5), globals.primary_manager.name);
@@ -3235,6 +3274,7 @@ test "registry records fractional scale, viewporter, and primary selection" {
     try std.testing.expectEqual(@as(u32, 7), globals.toplevel_icon_manager.name);
     try std.testing.expectEqual(@as(u32, 8), globals.decoration_manager.name);
     try std.testing.expect(globals.decoration_zxdg);
+    try std.testing.expectEqual(@as(u32, 9), globals.activation.name);
 }
 
 test "plain-text MIME set covers UTF-8 and ICCCM names" {

@@ -101,6 +101,7 @@ hash.
   uses the drop timestamp. Middle-click pastes PRIMARY as typed keys.
   Receive-only `text/html` strips tags to plain text. Clipboard text normalizes
   CR/LF to LF. Central European Latin-2, Latin-9, Greek, Hebrew, Arabic,
+  Armenian, Georgian,
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
   requests. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
@@ -120,7 +121,9 @@ hash.
   `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
   `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
-  `xdg_toplevel_icon_v1` when advertised. See `xkb.zig` and
+  `xdg_toplevel_icon_v1` when advertised. Wayland consumes
+  `XDG_ACTIVATION_TOKEN` via `xdg_activation_v1`; X11 sets `_NET_STARTUP_ID`
+  from that token or `DESKTOP_STARTUP_ID`. See `xkb.zig` and
   `compose_file.zig` for the exact parsing scope. Do not add an AT-SPI bus
   or a Wayland→X11 fallback.
 

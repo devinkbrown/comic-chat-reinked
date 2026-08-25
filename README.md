@@ -271,7 +271,8 @@ composes bounded dead-key / Multi_key accents and optional XCompose locale
 tables, accepts committed IME text through text-input-v3 (multiline hint,
 composer-strip cursor rectangle, confirming-key de-dupe), restores held
 modifiers from the keyboard-enter keys array and Caps Lock from the
-conventional Lock modifier bit, maps native touch contacts to
+conventional Lock modifier bit, consumes `XDG_ACTIVATION_TOKEN` via
+`xdg_activation_v1` so a launcher-started window can take focus, maps native touch contacts to
 the shared interaction contract, tracks entered `wl_output` integer scale
 plus `wp_fractional_scale_v1` / `wp_viewporter` and
 `wl_surface.preferred_buffer_scale` when advertised, advertises xdg-shell
@@ -286,7 +287,8 @@ decode including receive-only `text/plain;charset=utf-16` and `text/html`, and C
 normalized to LF), pastes PRIMARY on middle-click as typed keys, injects
 text/`file:` drops as typed keys with `data_offer.set_actions(copy)`, shows
 a `wp_cursor_shape_v1` or scaled shm pointer, and sets
-`xdg_toplevel_icon_v1` when advertised.
+`xdg_toplevel_icon_v1` when advertised. Armenian and Georgian keysyms type
+without an IME.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
@@ -304,7 +306,7 @@ MappingNotify without dropping queued events, resets compose on FocusOut,
 installs a scaled core pointer and `_NET_WM_ICON`, raises urgency on
 `notify` until FocusIn, hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
 present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
-`_NET_WM_USER_TIME`, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
+`_NET_WM_USER_TIME`, `_NET_STARTUP_ID`, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
 replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,

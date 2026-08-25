@@ -14,7 +14,8 @@
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
 //! group-2 character of a non-US or dual-layout keymap actually correct.
 //! Named Central European letters, X11 Latin-2 keysyms (`0x01a0`–`0x01ff`),
-//! Latin-9 OE/Ydiaeresis, Greek, Hebrew, and Arabic letters resolve to
+//! Latin-9 OE/Ydiaeresis, Greek, Hebrew, Arabic, Armenian, and Georgian
+//! letters resolve to
 //! characters without an IME. A
 //! bounded dead-key / Multi_key composer plus optional XCompose locale
 //! tables (`~/.XCompose`,
@@ -832,6 +833,141 @@ const named_arabic_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Arabic_sukun", 0x0652 },
 });
 
+const named_armenian_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "Armenian_ligature_ew", 0x0587 },
+    .{ "Armenian_full_stop", 0x0589 },
+    .{ "Armenian_verjaket", 0x0589 },
+    .{ "Armenian_separation_mark", 0x055d },
+    .{ "Armenian_but", 0x055d },
+    .{ "Armenian_hyphen", 0x058a },
+    .{ "Armenian_yentamna", 0x058a },
+    .{ "Armenian_exclam", 0x055c },
+    .{ "Armenian_amanak", 0x055c },
+    .{ "Armenian_accent", 0x055b },
+    .{ "Armenian_shesht", 0x055b },
+    .{ "Armenian_question", 0x055e },
+    .{ "Armenian_paruyk", 0x055e },
+    .{ "Armenian_apostrophe", 0x055a },
+    .{ "Armenian_AYB", 0x0531 },
+    .{ "Armenian_ayb", 0x0561 },
+    .{ "Armenian_BEN", 0x0532 },
+    .{ "Armenian_ben", 0x0562 },
+    .{ "Armenian_GIM", 0x0533 },
+    .{ "Armenian_gim", 0x0563 },
+    .{ "Armenian_DA", 0x0534 },
+    .{ "Armenian_da", 0x0564 },
+    .{ "Armenian_YECH", 0x0535 },
+    .{ "Armenian_yech", 0x0565 },
+    .{ "Armenian_ZA", 0x0536 },
+    .{ "Armenian_za", 0x0566 },
+    .{ "Armenian_E", 0x0537 },
+    .{ "Armenian_e", 0x0567 },
+    .{ "Armenian_AT", 0x0538 },
+    .{ "Armenian_at", 0x0568 },
+    .{ "Armenian_TO", 0x0539 },
+    .{ "Armenian_to", 0x0569 },
+    .{ "Armenian_ZHE", 0x053a },
+    .{ "Armenian_zhe", 0x056a },
+    .{ "Armenian_INI", 0x053b },
+    .{ "Armenian_ini", 0x056b },
+    .{ "Armenian_LYUN", 0x053c },
+    .{ "Armenian_lyun", 0x056c },
+    .{ "Armenian_KHE", 0x053d },
+    .{ "Armenian_khe", 0x056d },
+    .{ "Armenian_TSA", 0x053e },
+    .{ "Armenian_tsa", 0x056e },
+    .{ "Armenian_KEN", 0x053f },
+    .{ "Armenian_ken", 0x056f },
+    .{ "Armenian_HO", 0x0540 },
+    .{ "Armenian_ho", 0x0570 },
+    .{ "Armenian_DZA", 0x0541 },
+    .{ "Armenian_dza", 0x0571 },
+    .{ "Armenian_GHAT", 0x0542 },
+    .{ "Armenian_ghat", 0x0572 },
+    .{ "Armenian_TCHE", 0x0543 },
+    .{ "Armenian_tche", 0x0573 },
+    .{ "Armenian_MEN", 0x0544 },
+    .{ "Armenian_men", 0x0574 },
+    .{ "Armenian_HI", 0x0545 },
+    .{ "Armenian_hi", 0x0575 },
+    .{ "Armenian_NU", 0x0546 },
+    .{ "Armenian_nu", 0x0576 },
+    .{ "Armenian_SHA", 0x0547 },
+    .{ "Armenian_sha", 0x0577 },
+    .{ "Armenian_VO", 0x0548 },
+    .{ "Armenian_vo", 0x0578 },
+    .{ "Armenian_CHA", 0x0549 },
+    .{ "Armenian_cha", 0x0579 },
+    .{ "Armenian_PE", 0x054a },
+    .{ "Armenian_pe", 0x057a },
+    .{ "Armenian_JE", 0x054b },
+    .{ "Armenian_je", 0x057b },
+    .{ "Armenian_RA", 0x054c },
+    .{ "Armenian_ra", 0x057c },
+    .{ "Armenian_SE", 0x054d },
+    .{ "Armenian_se", 0x057d },
+    .{ "Armenian_VEV", 0x054e },
+    .{ "Armenian_vev", 0x057e },
+    .{ "Armenian_TYUN", 0x054f },
+    .{ "Armenian_tyun", 0x057f },
+    .{ "Armenian_RE", 0x0550 },
+    .{ "Armenian_re", 0x0580 },
+    .{ "Armenian_TSO", 0x0551 },
+    .{ "Armenian_tso", 0x0581 },
+    .{ "Armenian_VYUN", 0x0552 },
+    .{ "Armenian_vyun", 0x0582 },
+    .{ "Armenian_PYUR", 0x0553 },
+    .{ "Armenian_pyur", 0x0583 },
+    .{ "Armenian_KE", 0x0554 },
+    .{ "Armenian_ke", 0x0584 },
+    .{ "Armenian_O", 0x0555 },
+    .{ "Armenian_o", 0x0585 },
+    .{ "Armenian_FE", 0x0556 },
+    .{ "Armenian_fe", 0x0586 },
+});
+
+const named_georgian_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "Georgian_an", 0x10d0 },
+    .{ "Georgian_ban", 0x10d1 },
+    .{ "Georgian_gan", 0x10d2 },
+    .{ "Georgian_don", 0x10d3 },
+    .{ "Georgian_en", 0x10d4 },
+    .{ "Georgian_vin", 0x10d5 },
+    .{ "Georgian_zen", 0x10d6 },
+    .{ "Georgian_tan", 0x10d7 },
+    .{ "Georgian_in", 0x10d8 },
+    .{ "Georgian_kan", 0x10d9 },
+    .{ "Georgian_las", 0x10da },
+    .{ "Georgian_man", 0x10db },
+    .{ "Georgian_nar", 0x10dc },
+    .{ "Georgian_on", 0x10dd },
+    .{ "Georgian_par", 0x10de },
+    .{ "Georgian_zhar", 0x10df },
+    .{ "Georgian_rae", 0x10e0 },
+    .{ "Georgian_san", 0x10e1 },
+    .{ "Georgian_tar", 0x10e2 },
+    .{ "Georgian_un", 0x10e3 },
+    .{ "Georgian_phar", 0x10e4 },
+    .{ "Georgian_khar", 0x10e5 },
+    .{ "Georgian_ghan", 0x10e6 },
+    .{ "Georgian_qar", 0x10e7 },
+    .{ "Georgian_shin", 0x10e8 },
+    .{ "Georgian_chin", 0x10e9 },
+    .{ "Georgian_can", 0x10ea },
+    .{ "Georgian_jil", 0x10eb },
+    .{ "Georgian_cil", 0x10ec },
+    .{ "Georgian_char", 0x10ed },
+    .{ "Georgian_xan", 0x10ee },
+    .{ "Georgian_jhan", 0x10ef },
+    .{ "Georgian_hae", 0x10f0 },
+    .{ "Georgian_he", 0x10f1 },
+    .{ "Georgian_hie", 0x10f2 },
+    .{ "Georgian_we", 0x10f3 },
+    .{ "Georgian_har", 0x10f4 },
+    .{ "Georgian_hoe", 0x10f5 },
+    .{ "Georgian_fi", 0x10f6 },
+});
+
 /// ISO-8859-2 codepoints for X11 Latin-2 keysyms `0x01a0`–`0x01ff`.
 const latin2_01a0 = [_]u21{
     0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
@@ -861,6 +997,8 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     if (named_greek_keysyms.get(name)) |character| return character;
     if (named_hebrew_keysyms.get(name)) |character| return character;
     if (named_arabic_keysyms.get(name)) |character| return character;
+    if (named_armenian_keysyms.get(name)) |character| return character;
+    if (named_georgian_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
         if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return null;
@@ -914,6 +1052,31 @@ pub fn charForX11Arabic(sym: u32) ?u21 {
         0x05e0...0x05f2 => @intCast(sym + 0x60),
         else => null,
     };
+}
+
+/// Legacy X11 Armenian keysyms. Letters `0x14b2`–`0x14fd` pair upper/lower
+/// onto U+0531–U+0556 / U+0561–U+0586; a few punctuation codes sit below.
+pub fn charForX11Armenian(sym: u32) ?u21 {
+    return switch (sym) {
+        0x14a1 => 0x0587,
+        0x14a3 => 0x0589,
+        0x14a4 => 0x055d,
+        0x14a5 => 0x058a,
+        0x14a7 => 0x055c,
+        0x14a8 => 0x055b,
+        0x14a9 => 0x055e,
+        0x14b2...0x14fd => blk: {
+            const i = sym - 0x14b2;
+            break :blk if (i % 2 == 0) 0x0531 + i / 2 else 0x0561 + i / 2;
+        },
+        else => null,
+    };
+}
+
+/// Legacy X11 Georgian keysyms. `0x15d0`–`0x15f6` map onto U+10D0–U+10F6.
+pub fn charForX11Georgian(sym: u32) ?u21 {
+    if (sym < 0x15d0 or sym > 0x15f6) return null;
+    return @intCast(0x10d0 + (sym - 0x15d0));
 }
 
 /// ISO-8859-15 leftovers used by Western European layouts (OE, Ydiaeresis).
@@ -1523,6 +1686,16 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(@as(u21, 0x0152), charForKeysym("OE").?);
     try std.testing.expectEqual(@as(u21, 0x0153), charForX11Latin9(0x13bd).?);
     try std.testing.expectEqual(@as(u21, 0x0178), charForX11Latin9(0x13be).?);
+    try std.testing.expectEqual(@as(u21, 0x0561), charForKeysym("Armenian_ayb").?);
+    try std.testing.expectEqual(@as(u21, 0x0531), charForKeysym("Armenian_AYB").?);
+    try std.testing.expectEqual(@as(u21, 0x0589), charForKeysym("Armenian_verjaket").?);
+    try std.testing.expectEqual(@as(u21, 0x0531), charForX11Armenian(0x14b2).?);
+    try std.testing.expectEqual(@as(u21, 0x0561), charForX11Armenian(0x14b3).?);
+    try std.testing.expectEqual(@as(u21, 0x0586), charForX11Armenian(0x14fd).?);
+    try std.testing.expectEqual(@as(u21, 0x10d0), charForKeysym("Georgian_an").?);
+    try std.testing.expectEqual(@as(u21, 0x10f6), charForKeysym("Georgian_fi").?);
+    try std.testing.expectEqual(@as(u21, 0x10d0), charForX11Georgian(0x15d0).?);
+    try std.testing.expectEqual(@as(u21, 0x10f6), charForX11Georgian(0x15f6).?);
     try std.testing.expectEqual(NamedKey.backspace, namedKeyForKeysym("BackSpace").?);
     try std.testing.expectEqual(NamedKey.page_up, namedKeyForKeysym("Prior").?);
     try std.testing.expectEqual(@as(?NamedKey, null), namedKeyForKeysym("nonexistent_keysym_name"));

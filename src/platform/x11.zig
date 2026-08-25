@@ -28,7 +28,7 @@
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
 //!     `WM_STATE` / `WM_CHANGE_STATE` iconic tracking, a scaled
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
-//!     FocusIn), EWMH ping/type/icon name/user time/allowed actions,
+//!     FocusIn), EWMH ping/type/icon name/user time/startup id/allowed actions,
 //!     WM_TAKE_FOCUS, WM_LOCALE_NAME, physical WM size hints, and
 //!     resize/close events, suitable for a poll(2)-driven client event loop.
 
@@ -109,6 +109,7 @@ const XConn = struct {
     net_wm_name: u32 = 0,
     net_wm_icon_name: u32 = 0,
     net_wm_pid: u32 = 0,
+    net_startup_id: u32 = 0,
     net_wm_ping: u32 = 0,
     net_wm_user_time: u32 = 0,
     net_wm_window_type: u32 = 0,
@@ -277,6 +278,8 @@ pub fn keysymToKey(sym: u32) Key {
     if (xkb.charForX11Hebrew(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Arabic(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Latin9(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Armenian(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Georgian(sym)) |ch| return .{ .char = ch };
     return switch (sym) {
         0xff08 => .backspace,
         0xff09 => .tab,
@@ -450,6 +453,7 @@ pub const Window = struct {
         try setTitle(&self.conn, self.window, title);
         try setWmClass(&self.conn, self.window, "comicchat", "Reinked");
         try setNetWmPid(&self.conn, self.window);
+        try setNetStartupId(&self.conn, self.window, env);
         try setWmHints(&self.conn, self.window);
         try setNetWmWindowType(&self.conn, self.window);
         try setAllowedActions(&self.conn, self.window);
@@ -1728,6 +1732,14 @@ fn setNetWmPid(conn: *XConn, window: u32) !void {
     try changeProperty32(conn, window, conn.net_wm_pid, atom_cardinal, &.{pid});
 }
 
+fn setNetStartupId(conn: *XConn, window: u32, env: []const u8) !void {
+    if (conn.net_startup_id == 0) return;
+    const token = services.startupToken(env) orelse return;
+    if (token.len > 256) return;
+    const typ = if (conn.utf8_string != 0) conn.utf8_string else atom_string;
+    try changePropertyBytes(conn, window, conn.net_startup_id, typ, token);
+}
+
 fn setWmHints(conn: *XConn, window: u32) !void {
     try writeWmHints(conn, window, false);
 }
@@ -2069,6 +2081,7 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_name = try internAtom(conn, "_NET_WM_NAME");
     conn.net_wm_icon_name = try internAtom(conn, "_NET_WM_ICON_NAME");
     conn.net_wm_pid = try internAtom(conn, "_NET_WM_PID");
+    conn.net_startup_id = try internAtom(conn, "_NET_STARTUP_ID");
     conn.net_wm_ping = try internAtom(conn, "_NET_WM_PING");
     conn.net_wm_user_time = try internAtom(conn, "_NET_WM_USER_TIME");
     conn.net_wm_window_type = try internAtom(conn, "_NET_WM_WINDOW_TYPE");
@@ -3129,6 +3142,8 @@ test "Keymap.translate uses group bits 13-14 without reading the next key" {
     try std.testing.expectEqual(Key{ .char = 0x064a }, keysymToKey(0x05ea));
     try std.testing.expectEqual(Key{ .char = 0x0153 }, keysymToKey(0x13bd));
     try std.testing.expectEqual(Key{ .char = 0x0178 }, keysymToKey(0x13be));
+    try std.testing.expectEqual(Key{ .char = 0x0561 }, keysymToKey(0x14b3));
+    try std.testing.expectEqual(Key{ .char = 0x10d0 }, keysymToKey(0x15d0));
 
     var pair = [_]u32{ 'a', 'A', 'b', 'B' };
     const km2 = Keymap{ .syms = &pair, .per = 2, .min = 8 };
