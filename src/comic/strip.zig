@@ -1741,6 +1741,39 @@ test "Anna Color continuation keeps her head in the panel" {
         }
     }
     try std.testing.expect(checked >= 2);
+
+    var sticker_edge: usize = 0;
+    var y: u32 = 1;
+    while (y + 1 < image.height) : (y += 1) {
+        var x: u32 = 1;
+        while (x + 1 < image.width) : (x += 1) {
+            const pixel = image.pixels[y * image.width + x];
+            const red: i32 = @as(u8, @truncate(pixel >> 16));
+            const green: i32 = @as(u8, @truncate(pixel >> 8));
+            const blue: i32 = @as(u8, @truncate(pixel));
+            if (red < 245 or green < 245 or blue < 245) continue;
+            var ink = false;
+            var room = false;
+            var dy: i32 = -1;
+            while (dy <= 1) : (dy += 1) {
+                var dx: i32 = -1;
+                while (dx <= 1) : (dx += 1) {
+                    if (dx == 0 and dy == 0) continue;
+                    const nx: u32 = @intCast(@as(i32, @intCast(x)) + dx);
+                    const ny: u32 = @intCast(@as(i32, @intCast(y)) + dy);
+                    const n = image.pixels[ny * image.width + nx];
+                    const nr: i32 = @as(u8, @truncate(n >> 16));
+                    const ng: i32 = @as(u8, @truncate(n >> 8));
+                    const nb: i32 = @as(u8, @truncate(n));
+                    const chroma = @max(@max(nr, ng), nb) - @min(@min(nr, ng), nb);
+                    if (chroma > 25 and (nr < 240 or ng < 240 or nb < 240)) ink = true;
+                    if (chroma >= 12 and (nr > 30 or ng > 30 or nb > 30)) room = true;
+                }
+            }
+            if (ink and room) sticker_edge += 1;
+        }
+    }
+    try std.testing.expect(sticker_edge < 20);
 }
 
 test "Anna Color tall balloon keeps her face clear" {

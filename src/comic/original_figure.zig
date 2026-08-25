@@ -96,7 +96,7 @@ pub const Error = bgb.Error || error{
     MissingImage,
 };
 
-pub const RasterOp = enum { merge_paint, merge_paint_sticker, src_and };
+pub const RasterOp = enum { merge_paint, merge_paint_sticker, src_and, src_copy_keyed };
 
 /// Cross-platform equivalent of the source's `StretchDIBits` calls.  Sampling
 /// uses an area filter, preserving the coverage/color averaging expected from
@@ -123,6 +123,7 @@ pub fn stretchRop(canvas: *Canvas, source: Image, destination: Rect, flipped: bo
             // the Canvas destination alpha and apply the exact RGB truth table.
             canvas.px[index] = (old & 0xff000000) | switch (op) {
                 .src_and => (old & sampled) & 0x00ffffff,
+                .src_copy_keyed => if (stickerInk(sampled)) sampled & 0x00ffffff else old & 0x00ffffff,
                 .merge_paint => (old | ~sampled) & 0x00ffffff,
                 .merge_paint_sticker => blk: {
                     const sticker: u32 = if (stickerInk(sampled)) 0x00000000 else 0x00ffffff;
@@ -235,8 +236,7 @@ pub fn drawSingle(canvas: *Canvas, pose: PoseLayers, options: Options) Error!Geo
         .w = full_w,
         .h = full_h,
     };
-    try paintAura(canvas, pose, full, options.flipped, options.draw_aura);
-    try stretchRop(canvas, pose.drawing, full, options.flipped, .src_and);
+    try paintKeyedBody(canvas, pose, full, options.flipped, options.draw_aura);
     return .{ .full = full, .head = null, .torso = full };
 }
 
@@ -288,8 +288,7 @@ pub fn drawSingleLogical(canvas: *Canvas, pose: PoseLayers, options: LogicalOpti
 
     const logical = try singleLogicalGeometry(pose.drawing, options);
     const device = try mapLogicalGeometry(logical, options.transform);
-    try paintAura(canvas, pose, device.full, options.flipped, options.draw_aura);
-    try stretchRop(canvas, pose.drawing, device.full, options.flipped, .src_and);
+    try paintKeyedBody(canvas, pose, device.full, options.flipped, options.draw_aura);
     return .{ .logical = logical, .device = device };
 }
 
@@ -791,16 +790,28 @@ fn stickerInk(sampled: u32) bool {
 }
 
 /// `CBodySingle::DrawBody` MERGEPAINTs an aura before SRCAND (`bodycam.cpp:602-609`).
-/// Color/HD packages have no authored aura; synthesize the 1-bit white sticker
-/// from chromatic ink so SRCAND does not AND those colors into the backdrop.
-fn paintAura(canvas: *Canvas, pose: PoseLayers, destination: Rect, flipped: bool, draw_aura: bool) Error!void {
-    if (!draw_aura) return;
-    if (pose.aura) |layer| {
-        try stretchRop(canvas, layer, destination, flipped, .merge_paint);
-        return;
+/// Color/HD packages have no authored aura. A synthesized 1-bit sticker then
+/// bleaches a paper ring on colored rooms; copy keyed chromatic ink instead.
+/// Testdata keeps the authored aura + SRCAND path.
+fn paintKeyedBody(
+    canvas: *Canvas,
+    pose: PoseLayers,
+    destination: Rect,
+    flipped: bool,
+    draw_aura: bool,
+) Error!void {
+    if (draw_aura) {
+        if (pose.aura) |layer| {
+            try stretchRop(canvas, layer, destination, flipped, .merge_paint);
+            try stretchRop(canvas, pose.drawing, destination, flipped, .src_and);
+            return;
+        }
+        if (drawingHasChromaticInk(pose.drawing)) {
+            try stretchRop(canvas, pose.drawing, destination, flipped, .src_copy_keyed);
+            return;
+        }
     }
-    if (!drawingHasChromaticInk(pose.drawing)) return;
-    try stretchRop(canvas, pose.drawing, destination, flipped, .merge_paint_sticker);
+    try stretchRop(canvas, pose.drawing, destination, flipped, .src_and);
 }
 
 fn decodePlan(gpa: std.mem.Allocator, data: []const u8, plan: avb.PoseImagePlan) !Image {
@@ -961,7 +972,7 @@ test "color DIB MERGEPAINT sticker keeps chromatic ink off a colored dest" {
     defer canvas.deinit(gpa);
     canvas.clear(0xff00ff00);
     _ = try drawSingle(&canvas, pose, .{ .client = .{ .x = 0, .y = 0, .w = 1, .h = 1 } });
-    // Without the synthesized sticker, SRCAND is red & green = black.
+    // Keyed copy keeps red. SRCAND without a sticker would be red & green = black.
     try std.testing.expectEqual(@as(u32, 0xffff0000), canvas.px[0]);
 
     const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
