@@ -82,7 +82,7 @@ pub const specs = [_]Spec{
     .{ .id = .about, .resource = "IDD_ABOUTBOX", .title = "About Comic Chat", .group = .files, .source_w = 279, .source_h = 137 },
     .{ .id = .room_list, .resource = "IDD_ROOMLIST", .title = "Room list", .group = .rooms, .source_w = 400, .source_h = 255 },
     .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Settings", .group = .application, .source_w = 360, .source_h = 300 },
-    .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "Personal profile", .group = .connection, .source_w = 252, .source_h = 218 },
+    .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "CAST card", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose character", .group = .connection, .source_w = 360, .source_h = 260 },
     .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Background", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
@@ -127,7 +127,7 @@ pub const specs = [_]Spec{
     .{ .id = .ircx_events, .resource = "PORTABLE_IRCX_EVENTS", .title = "Room events", .group = .rooms, .source_w = 300, .source_h = 184 },
     .{ .id = .call_link, .resource = "PORTABLE_CALL_LINK", .title = "Call link", .group = .connection, .source_w = 300, .source_h = 184 },
     .{ .id = .member_profile, .resource = "PORTABLE_MEMBER_PROFILE", .title = "CAST profile", .group = .connection, .source_w = 300, .source_h = 132 },
-    .{ .id = .open_locator, .resource = "PORTABLE_OPEN_LOCATOR", .title = "Open chat locator", .group = .files, .source_w = 300, .source_h = 108 },
+    .{ .id = .open_locator, .resource = "PORTABLE_OPEN_LOCATOR", .title = "Open locator", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .recent_files, .resource = "PORTABLE_RECENT_FILES", .title = "Recent conversations", .group = .files, .source_w = 340, .source_h = 150 },
     .{ .id = .favorite_rooms, .resource = "PORTABLE_FAVORITE_ROOMS", .title = "Favorite rooms", .group = .rooms, .source_w = 320, .source_h = 184 },
     .{ .id = .print_preview, .resource = "PORTABLE_PRINT_PREVIEW", .title = "Print and PDF preview", .group = .files, .source_w = 320, .source_h = 150 },
@@ -213,7 +213,7 @@ pub fn fields(id: Id) []const Field {
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
         .choose_color => &.{ .{ .label = "Color value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current theme color", .kind = .preview } },
         .comics_view => &.{ .{ .label = "Page mode", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
-        .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving member" }, .{ .label = "Repeat limit", .hint = "8" }, .{ .label = "Repeat window seconds", .hint = "10" } },
+        .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving CAST" }, .{ .label = "Repeat limit", .hint = "8" }, .{ .label = "Repeat window seconds", .hint = "10" } },
         .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
         .rule_sets => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Import or export file", .hint = "Optional .ccrules path" } },
         .add_to_sets => &.{ .{ .label = "Rule name" }, .{ .label = "Rule set" } },
@@ -236,7 +236,7 @@ pub fn fields(id: Id) []const Field {
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
-        .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, member, server, or connection", .kind = .choice }, .{ .label = "Filter", .hint = "Optional; one word" } },
+        .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Filter", .hint = "Optional; one word" } },
         .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Compatibility", .hint = "Portable secure-link invitation", .kind = .readonly } },
         .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Result", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
@@ -312,7 +312,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         .ircx_events => if (index == 0)
             &.{ "Show", "Add", "Remove" }
         else if (index == 1)
-            &.{ "Room", "Member", "Server", "Connection", "Link" }
+            &.{ "Room", "CAST", "Server", "Connection", "Link" }
         else
             &.{},
         .rule_sets => if (index == 0) &.{ "Create", "Rename", "Assign rule", "Advanced limits", "Advanced matching", "Import", "Export" } else &.{},
@@ -336,7 +336,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .setup => "Connect",
         .settings => "Apply settings",
         .servers => "Save changes",
-        .personal => "Save profile",
+        .personal => "Save card",
         .character => "Choose character",
         .background => "Choose backdrop",
         .text_font, .set_text_font => "Apply font",
@@ -405,7 +405,8 @@ pub fn accessLevelToken(label: []const u8) []const u8 {
 }
 
 /// Operator-event choices are Sunday labels. EVENT still needs the draft
-/// category token on the wire.
+/// category token on the wire. Visible CAST maps to MEMBER; leftover
+/// Member/USER labels still map so saved choices keep working.
 pub fn matchesAny(value: []const u8, names: []const []const u8) bool {
     for (names) |name| if (std.ascii.eqlIgnoreCase(value, name)) return true;
     return false;
@@ -413,7 +414,7 @@ pub fn matchesAny(value: []const u8, names: []const []const u8) bool {
 
 pub fn eventNameToken(label: []const u8) []const u8 {
     if (std.ascii.eqlIgnoreCase(label, "Room") or std.ascii.eqlIgnoreCase(label, "CHANNEL")) return "CHANNEL";
-    if (std.ascii.eqlIgnoreCase(label, "Member") or std.ascii.eqlIgnoreCase(label, "MEMBER") or std.ascii.eqlIgnoreCase(label, "USER")) return "MEMBER";
+    if (std.ascii.eqlIgnoreCase(label, "CAST") or std.ascii.eqlIgnoreCase(label, "Member") or std.ascii.eqlIgnoreCase(label, "MEMBER") or std.ascii.eqlIgnoreCase(label, "USER")) return "MEMBER";
     if (std.ascii.eqlIgnoreCase(label, "Server") or std.ascii.eqlIgnoreCase(label, "SERVER")) return "SERVER";
     if (std.ascii.eqlIgnoreCase(label, "Connection") or std.ascii.eqlIgnoreCase(label, "CONNECTION") or std.ascii.eqlIgnoreCase(label, "CONNECT")) return "CONNECTION";
     if (std.ascii.eqlIgnoreCase(label, "Link") or std.ascii.eqlIgnoreCase(label, "Socket") or std.ascii.eqlIgnoreCase(label, "SOCKET")) return "SOCKET";
@@ -450,7 +451,12 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Select CAST", primaryLabel(.user_list));
     try std.testing.expectEqualStrings("Send", primaryLabel(.sound));
     try std.testing.expectEqualStrings("Join room", primaryLabel(.channel));
-    try std.testing.expectEqualStrings("Save profile", primaryLabel(.personal));
+    try std.testing.expectEqualStrings("Save card", primaryLabel(.personal));
+    try std.testing.expectEqualStrings("CAST card", get(.personal).title);
+    try std.testing.expectEqualStrings("Open locator", get(.open_locator).title);
+    try std.testing.expectEqualStrings("CAST", choiceOptions(.ircx_events, 1)[1]);
+    try std.testing.expectEqualStrings("Room, CAST, server, connection, or link", fields(.ircx_events)[1].hint);
+    try std.testing.expectEqualStrings("Use %nick% for the arriving CAST", fields(.automation)[1].hint);
     try std.testing.expectEqualStrings("Set away", primaryLabel(.away));
     try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
     try std.testing.expectEqualStrings("Named properties", get(.ircx_properties).title);
@@ -521,6 +527,7 @@ test "room access Sunday labels map back to ACCESS wire tokens" {
 
 test "operator event Sunday labels map back to EVENT wire tokens" {
     try std.testing.expectEqualStrings("CHANNEL", eventNameToken("Room"));
+    try std.testing.expectEqualStrings("MEMBER", eventNameToken("CAST"));
     try std.testing.expectEqualStrings("MEMBER", eventNameToken("member"));
     try std.testing.expectEqualStrings("SERVER", eventNameToken("SERVER"));
     try std.testing.expectEqualStrings("CONNECTION", eventNameToken("Connection"));

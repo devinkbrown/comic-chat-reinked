@@ -217,6 +217,10 @@ pub const View = struct {
                     .page_down => self.shell.moveMemberSelection(member_count, page),
                     .home => if (member_count > 0) self.shell.selectMember(0),
                     .end => if (member_count > 0) self.shell.selectMember(member_count - 1),
+                    .escape => {
+                        self.shell.focus = .composer;
+                        return true;
+                    },
                     else => return false,
                 }
             },
@@ -226,11 +230,20 @@ pub const View = struct {
                 .up => self.shell.moveEmotion(0, -1),
                 .down => self.shell.moveEmotion(0, 1),
                 .home => self.shell.neutralEmotion(),
+                .escape => {
+                    self.shell.focus = .composer;
+                    return true;
+                },
                 else => return false,
             },
             .composer => {
                 if (key != .escape) return false;
                 self.shell.focus = .navigation;
+                return true;
+            },
+            .transcript => {
+                if (key != .escape) return false;
+                self.shell.focus = .composer;
                 return true;
             },
             else => return false,
@@ -255,6 +268,10 @@ pub const View = struct {
                 .end => self.focused_toolbar = @intCast(ui.ToolbarLayout.button_count - 1),
                 .enter => return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]),
                 .char => |code| if (code == ' ') return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]) else return null,
+                .escape => {
+                    self.shell.focus = .navigation;
+                    return .none;
+                },
                 else => return null,
             },
             .say_actions => switch (key) {
@@ -264,6 +281,10 @@ pub const View = struct {
                 .end => self.focused_say_action = lastEnabledSayAction(self.wire_live),
                 .enter => return self.activateSayAction(self.focused_say_action),
                 .char => |code| if (code == ' ') return self.activateSayAction(self.focused_say_action) else return null,
+                .escape => {
+                    self.shell.focus = .composer;
+                    return .none;
+                },
                 else => return null,
             },
             .status => switch (key) {
@@ -2064,7 +2085,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
     return switch (menu) {
         0 => switch (item) {
             0 => "Open conversation",
-            1 => "Open chat locator",
+            1 => "Open locator",
             2 => "Recent conversations",
             3 => "Save conversation",
             4 => "Export comic image",
@@ -2090,7 +2111,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             1 => "Text color",
             2 => "Background",
             3 => "Character",
-            4 => "Personal profile",
+            4 => "CAST card",
             5 => "Bold selection",
             6 => "Italic selection",
             else => "Underline selection",
@@ -2434,7 +2455,7 @@ fn toolbarLabel(index: u8) []const u8 {
         8 => "Show or hide CAST",
         9 => "Favorite rooms",
         10 => "Set away message",
-        11 => "Personal profile",
+        11 => "CAST card",
         12 => "Ignore CAST",
         13 => "Send a whisper",
         14 => "Email CAST",
@@ -3364,7 +3385,8 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .channel, .channel_create => "Join after the wire is live",
         .whisper => "Whisper after the wire is live",
         .invite => "Invite after the wire is live",
-        .kick, .ban, .room_access, .ircx_properties, .ircx_events => "Moderation after the wire is live",
+        .kick, .ban, .room_access, .ircx_properties => "Moderation after the wire is live",
+        .ircx_events => "Watch room, CAST, server, or wire events after the wire is live",
         .invitation => "Accept after the wire is live",
         .channel_properties => "Room topic and limits after the wire is live",
         .file_transfer => "Offer or accept a file after the wire is live",
@@ -4474,7 +4496,11 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("CAST icons", menuItemLabel(2, 3));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(2, 4));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
+    try std.testing.expectEqualStrings("CAST card", menuItemLabel(3, 4));
+    try std.testing.expectEqualStrings("Open locator", menuItemLabel(0, 1));
+    try std.testing.expectEqualStrings("CAST card", toolbarLabel(11));
     try std.testing.expectEqualStrings("CAST profile", menuItemLabel(5, 1));
+    try std.testing.expectEqualStrings("Watch room, CAST, server, or wire events after the wire is live", dialogHelper(.ircx_events, ""));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
     try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 6));
@@ -4727,6 +4753,21 @@ test "composer Escape returns to the menu bar and transcript Escape clears selec
     try std.testing.expect(view.shell.transcript_anchor == null);
     try std.testing.expectEqual(shell_mod.Focus.transcript, view.shell.focus);
     try std.testing.expect(!view.handleTranscriptKey(.escape, 4, false));
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+
+    view.shell.focus = .members;
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .emotion;
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .toolbar;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
+    view.shell.focus = .say_actions;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
 }
 
 test "member keyboard pages through the CAST" {

@@ -2222,7 +2222,7 @@ fn prefillOpenedDialog(
                 if (index != 0) try online.appendSlice(view.gpa, ", ");
                 try online.appendSlice(view.gpa, member);
             }
-            try view.setDialogValueAt(0, if (online.items.len == 0) "No matching users in the last refresh" else online.items);
+            try view.setDialogValueAt(0, if (online.items.len == 0) "No matching CAST in the last refresh" else online.items);
             if (state.notification_current.items.len != 0) try view.setDialogValueAt(1, state.notification_current.items[0]);
             try view.setDialogValueAt(2, "Refresh");
         },
@@ -3050,7 +3050,7 @@ fn applyDialogAction(
             };
             defer gpa.free(document);
             const locator = cc.client.files.parseLocator(document) catch {
-                view.setDialogNotice("That file is not a valid ComicChat locator.");
+                view.setDialogNotice("That file is not a valid Comic Chat locator.");
                 return;
             };
             var locator_room_index = workspace.active.?;
@@ -3716,18 +3716,18 @@ fn finishNotificationWho(gpa: std.mem.Allocator, state: *ChatState, workspace: *
     for (state.notification_current.items) |current| {
         if (!containsIgnoreCase(state.notification_previous.items, current)) {
             var text: [256]u8 = undefined;
-            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched member is online.", .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched CAST is online.", .{ .modes = cc.proto.udi.bm_action });
             if (state.desktop_notification) |old| gpa.free(old);
-            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched member is online.");
+            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched CAST is online.");
             changed = true;
         }
     }
     for (state.notification_previous.items) |previous| {
         if (!containsIgnoreCase(state.notification_current.items, previous)) {
             var text: [256]u8 = undefined;
-            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched member went offline.", .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched CAST went offline.", .{ .modes = cc.proto.udi.bm_action });
             if (state.desktop_notification) |old| gpa.free(old);
-            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched member went offline.");
+            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched CAST went offline.");
             changed = true;
         }
     }
