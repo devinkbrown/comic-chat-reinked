@@ -170,6 +170,27 @@ const balloon_rect = original_balloon.Rect{
     .bottom = -@divTrunc(original_layout.default_unit_height, 2),
 };
 
+fn nudgeColorDestsBelowBalloons(
+    placements: []original_layout.Placement,
+    bodies: []const original_layout.Body,
+    balloons: []const original_balloon.BalloonGeometry,
+) void {
+    var clear_above: i32 = 0;
+    for (balloons) |balloon| {
+        const cloud_bottom_down = -balloon.cloud_bbox.bottom;
+        if (cloud_bottom_down > 0) clear_above = @max(clear_above, cloud_bottom_down + 40);
+    }
+    if (clear_above <= 0) return;
+    for (placements) |*placement| {
+        if (!bodies[placement.body_index].keep_recognizable) continue;
+        original_layout.nudgeRecognizableDestBelow(
+            &placement.rect,
+            clear_above,
+            original_layout.default_unit_height,
+        );
+    }
+}
+
 const HistoryEntry = struct {
     id: u32,
     history: original_layout.History,
@@ -686,19 +707,25 @@ fn renderScene(
     );
     defer balloon_layout.deinit(gpa);
 
-    var clear_above: i32 = 0;
-    for (balloon_layout.balloons) |balloon| {
-        const cloud_bottom_down = -balloon.cloud_bbox.bottom;
-        if (cloud_bottom_down > 0) clear_above = @max(clear_above, cloud_bottom_down + 40);
+    var any_recognizable = false;
+    for (bodies) |body| {
+        if (!body.keep_recognizable) continue;
+        any_recognizable = true;
+        break;
     }
-    if (clear_above > 0) {
-        for (layout.placements) |*placement| {
+    nudgeColorDestsBelowBalloons(layout.placements, bodies, balloon_layout.balloons);
+    if (any_recognizable) {
+        var head_line: i32 = std.math.maxInt(i32);
+        for (layout.placements) |placement| {
             if (!bodies[placement.body_index].keep_recognizable) continue;
-            original_layout.nudgeRecognizableDestBelow(
-                &placement.rect,
-                clear_above,
-                original_layout.default_unit_height,
-            );
+            head_line = @min(head_line, placement.rect.y);
+        }
+        if (head_line != std.math.maxInt(i32)) {
+            const max_bottom_y_up = -(head_line - 40);
+            for (balloon_layout.balloons) |*balloon| {
+                balloon.liftAbove(max_bottom_y_up, balloon_rect.top);
+            }
+            nudgeColorDestsBelowBalloons(layout.placements, bodies, balloon_layout.balloons);
         }
     }
 
@@ -1686,6 +1713,53 @@ test "Anna Color continuation keeps her head in the panel" {
         }
     }
     try std.testing.expect(checked >= 2);
+}
+
+test "Anna Color tall balloon keeps her face clear" {
+    const gpa = std.testing.allocator;
+    const lines = [_]Line{
+        .{
+            .speaker = "anna color",
+            .text = "Great. The comic view feels much clearer now and the standing Color figures keep their faces visible even when the balloon needs several more lines of text than a short dest would allow without sliding.",
+        },
+    };
+    var image = try renderWithOptions(gpa, &lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try std.testing.expect(image.height >= panel_height);
+
+    const stride = panel_width + device_interstice;
+    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    var checked: usize = 0;
+    var col: u32 = 1;
+    while (col < cols) : (col += 1) {
+        const x0 = col * stride;
+        if (x0 + panel_width > image.width) continue;
+        var face_peach: usize = 0;
+        var high_red: usize = 0;
+        var y: u32 = panel_height / 4;
+        while (y < (panel_height * 6) / 10) : (y += 1) {
+            var x: u32 = 0;
+            while (x < panel_width) : (x += 1) {
+                const pixel = image.pixels[y * image.width + x0 + x];
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red > green + 15 and red > blue + 15 and green + 25 > blue and
+                    red > 90 and red < 230 and green > 60 and blue > 40)
+                    face_peach += 1;
+                if (red > 120 and red > green + 40 and red > blue + 40 and green < 90)
+                    high_red += 1;
+            }
+        }
+        if (face_peach + high_red < 20) continue;
+        try std.testing.expect(face_peach > 8);
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
 }
 
 test "Color cafe and apartment keep wood plants and sky" {
