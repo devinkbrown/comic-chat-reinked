@@ -77,11 +77,12 @@ hash.
   (`src/platform/xkb.zig`, base + Shift + AltGr/ISO Level3 when a third
   keysym is listed), implements client-side key-repeat (`repeat_info` +
   `Window.checkRepeat`), and applies a bounded dead-key / Multi_key composer
-  for common European accents. A US evdev fallback remains before the first
-  keymap arrives or for an out-of-scope keysym. Do not claim a full
-  input-method editor or locale compose files — committed IME text uses
-  text-input-v3 when advertised; see `xkb.zig`'s module doc for the exact
-  parsing scope.
+  plus optional XCompose locale tables (`XCOMPOSEFILE`, `~/.XCompose`,
+  system `%L`, capped file size/entries/include depth). A US evdev fallback
+  remains before the first keymap arrives or for an out-of-scope keysym. Do
+  not claim a full input-method editor — committed IME text uses
+  text-input-v3 when advertised; see `xkb.zig` and `compose_file.zig` for
+  the exact parsing scope.
 
 ## Change rules
 

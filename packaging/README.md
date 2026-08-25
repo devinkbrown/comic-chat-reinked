@@ -39,15 +39,33 @@ Put the executable on `PATH` as `reinked` (the `.desktop` file calls that
 name). `StartupWMClass=comicchat` matches the native X11 `WM_CLASS` and
 Wayland `xdg_toplevel` app id so a panel groups the window with the launcher.
 
+The helper installs the binary, desktop entry, MIME package, and AppStream
+metainfo under `PREFIX` (default `~/.local`):
+
+```sh
+./packaging/install-linux.sh
+# or
+./packaging/install-linux.sh /path/to/reinked
+PREFIX=/usr/local ./packaging/install-linux.sh
+```
+
+Manual copy is the same layout:
+
 ```sh
 install -Dm755 reinked ~/.local/bin/reinked
 install -Dm644 packaging/comicchat.desktop \
     ~/.local/share/applications/comicchat.desktop
 install -Dm644 packaging/comicchat-mime.xml \
     ~/.local/share/mime/packages/comicchat.xml
+install -Dm644 packaging/com.reinked.comicchat.metainfo.xml \
+    ~/.local/share/metainfo/com.reinked.comicchat.metainfo.xml
 update-mime-database ~/.local/share/mime
 update-desktop-database ~/.local/share/applications
 ```
+
+Compose sequences load from `XCOMPOSEFILE`, then `~/.XCompose`, then the
+system locale table (`/usr/share/X11/locale/*/Compose`). Files and include
+depth are capped; missing files keep the built-in dead-key / Multi_key set.
 
 A nonempty `WAYLAND_DISPLAY` selects the Wayland backend. There is no X11
 fallback if that socket is missing. For X11 or XWayland:

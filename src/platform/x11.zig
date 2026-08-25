@@ -10,10 +10,10 @@
 //!     keypress / close.
 //!   * `Window` — interactive: open/present/nextEvent/fd, with keyboard
 //!     translation (GetKeyboardMapping, including Mod5/AltGr and bounded
-//!     dead-key/Multi_key compose), integer HiDPI scale, ICCCM
-//!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING), EWMH ping/type,
-//!     WM size hints, and resize/close events, suitable for a poll(2)-driven
-//!     client event loop.
+//!     dead-key/Multi_key compose plus optional XCompose locale tables),
+//!     integer HiDPI scale, ICCCM CLIPBOARD+PRIMARY (INCR, UTF8_STRING then
+//!     STRING/TEXT), EWMH ping/type/icon name/user time, WM size hints, and
+//!     resize/close events, suitable for a poll(2)-driven client event loop.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -85,10 +85,13 @@ const XConn = struct {
     targets: u32 = 0,
     incr: u32 = 0,
     net_wm_name: u32 = 0,
+    net_wm_icon_name: u32 = 0,
     net_wm_pid: u32 = 0,
     net_wm_ping: u32 = 0,
+    net_wm_user_time: u32 = 0,
     net_wm_window_type: u32 = 0,
     net_wm_window_type_normal: u32 = 0,
+    text: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -243,6 +246,7 @@ pub const Window = struct {
     incr_property: u32,
     incr_target: u32,
     incr_offset: usize,
+    compose_table: ?xkb.ComposeTable,
     compose: xkb.Compose,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
@@ -286,8 +290,11 @@ pub const Window = struct {
             .incr_property = 0,
             .incr_target = 0,
             .incr_offset = 0,
+            .compose_table = null,
             .compose = .{},
         };
+        self.loadComposeFromEnv(env);
+        errdefer self.unloadCompose();
         errdefer self.threaded.deinit();
         const io = self.threaded.io();
 
@@ -326,7 +333,24 @@ pub const Window = struct {
         self.keymap.deinit(self.gpa);
         self.conn.stream.close(self.conn.io);
         self.threaded.deinit();
+        self.unloadCompose();
         self.gpa.destroy(self);
+    }
+
+    fn loadComposeFromEnv(self: *Window, env: []const u8) void {
+        self.compose_table = xkb.loadComposeTable(self.gpa, env) catch null;
+        if (self.compose_table) |*table| {
+            self.compose.table = table;
+        }
+    }
+
+    fn unloadCompose(self: *Window) void {
+        self.compose.table = null;
+        self.compose.reset();
+        if (self.compose_table) |*table| {
+            table.deinit();
+            self.compose_table = null;
+        }
     }
 
     /// Socket handle, for poll(2)-based event loops.
@@ -393,6 +417,7 @@ pub const Window = struct {
         switch (kind) {
             0 => return .close, // request error; treat as fatal for the UI
             2 => { // KeyPress
+                self.noteUserTime(get32(event[4..8]));
                 const keycode = event[1];
                 const state = get16(event[28..30]);
                 const modifiers = shared_event.Modifiers{
@@ -406,6 +431,7 @@ pub const Window = struct {
                 return .{ .key = .{ .key = key.?, .modifiers = modifiers } };
             },
             4, 5, 6 => {
+                if (kind != 6) self.noteUserTime(get32(event[4..8]));
                 const raw_x: i32 = @as(i16, @bitCast(get16(event[24..26])));
                 const raw_y: i32 = @as(i16, @bitCast(get16(event[26..28])));
                 const x = physicalPointToLogical(raw_x, self.scale);
@@ -515,7 +541,14 @@ pub const Window = struct {
                 gpa.free(bytes);
             }
         } else |_| {}
-        return self.convertTarget(gpa, selection, atom_string, atom_string);
+        if (self.convertTarget(gpa, selection, atom_string, atom_string)) |text| {
+            if (text) |bytes| {
+                if (bytes.len != 0) return bytes;
+                gpa.free(bytes);
+            }
+        } else |_| {}
+        if (self.conn.text == 0) return null;
+        return self.convertTarget(gpa, selection, self.conn.text, self.conn.text);
     }
 
     fn convertTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32, property: u32) !?[]u8 {
@@ -542,13 +575,19 @@ pub const Window = struct {
             self.compose.reset();
             return keysymToKey(sym);
         }
-        if (xkb.deadForX11(sym)) |dead| {
+        if (xkb.keysymNameForX11(sym)) |name| {
+            switch (self.compose.feedName(name)) {
+                .pending => return null,
+                .char => |ch| return .{ .char = ch },
+                .pass => {},
+            }
+        } else if (xkb.deadForX11(sym)) |dead| {
             return switch (self.compose.feedDead(dead)) {
                 .pending => null,
                 .char => |ch| .{ .char = ch },
+                .pass => keysymToKey(sym),
             };
-        }
-        if (sym == xkb.x11_multi_key) {
+        } else if (sym == xkb.x11_multi_key) {
             _ = self.compose.feedMulti();
             return null;
         }
@@ -561,12 +600,18 @@ pub const Window = struct {
             .char => |ch| switch (self.compose.feedChar(ch)) {
                 .pending => null,
                 .char => |out| .{ .char = out },
+                .pass => .{ .char = ch },
             },
             else => blk: {
                 self.compose.reset();
                 break :blk key;
             },
         };
+    }
+
+    fn noteUserTime(self: *Window, time: u32) void {
+        if (self.conn.net_wm_user_time == 0 or time == 0) return;
+        changeProperty32(&self.conn, self.window, self.conn.net_wm_user_time, atom_cardinal, &.{time}) catch {};
     }
 
     fn replyNetWmPing(self: *Window, event: [32]u8) !void {
@@ -664,10 +709,10 @@ pub const Window = struct {
         var served: u32 = 0;
         if (ours and property != 0) {
             if (target == self.conn.targets) {
-                const atoms = [_]u32{ self.conn.targets, self.conn.utf8_string, atom_string, self.conn.incr };
+                const atoms = [_]u32{ self.conn.targets, self.conn.utf8_string, atom_string, self.conn.text, self.conn.incr };
                 try changePropertyAtoms(&self.conn, requestor, property, &atoms);
                 served = property;
-            } else if (target == self.conn.utf8_string or target == atom_string) {
+            } else if (target == self.conn.utf8_string or target == atom_string or target == self.conn.text) {
                 if (self.clipboard_text.len > incrThreshold(&self.conn) and self.conn.incr != 0) {
                     try selectPropertyNotify(&self.conn, requestor);
                     const size: u32 = @intCast(self.clipboard_text.len);
@@ -908,6 +953,9 @@ fn setTitle(conn: *XConn, window: u32, title: []const u8) !void {
     try changePropertyBytes(conn, window, atom_wm_icon_name, atom_string, title);
     if (conn.net_wm_name != 0 and conn.utf8_string != 0) {
         try changePropertyBytes(conn, window, conn.net_wm_name, conn.utf8_string, title);
+    }
+    if (conn.net_wm_icon_name != 0 and conn.utf8_string != 0) {
+        try changePropertyBytes(conn, window, conn.net_wm_icon_name, conn.utf8_string, title);
     }
 }
 
@@ -1210,10 +1258,13 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.targets = try internAtom(conn, "TARGETS");
     conn.incr = try internAtom(conn, "INCR");
     conn.net_wm_name = try internAtom(conn, "_NET_WM_NAME");
+    conn.net_wm_icon_name = try internAtom(conn, "_NET_WM_ICON_NAME");
     conn.net_wm_pid = try internAtom(conn, "_NET_WM_PID");
     conn.net_wm_ping = try internAtom(conn, "_NET_WM_PING");
+    conn.net_wm_user_time = try internAtom(conn, "_NET_WM_USER_TIME");
     conn.net_wm_window_type = try internAtom(conn, "_NET_WM_WINDOW_TYPE");
     conn.net_wm_window_type_normal = try internAtom(conn, "_NET_WM_WINDOW_TYPE_NORMAL");
+    conn.text = try internAtom(conn, "TEXT");
 }
 
 fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8) !u32 {
@@ -1653,6 +1704,8 @@ test "x11 dead keysyms stay non-character until the composer combines them" {
     try std.testing.expectEqual(Key.other, keysymToKey(0xfe51));
     try std.testing.expectEqual(xkb.Dead.acute, xkb.deadForX11(0xfe51).?);
     try std.testing.expectEqual(xkb.x11_multi_key, @as(u32, 0xff20));
+    try std.testing.expectEqualStrings("dead_acute", xkb.keysymNameForX11(0xfe51).?);
+    try std.testing.expectEqualStrings("Multi_key", xkb.keysymNameForX11(xkb.x11_multi_key).?);
 }
 
 test "keysymToKey maps printable ASCII and editing keys" {

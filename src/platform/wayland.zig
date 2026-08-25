@@ -15,12 +15,14 @@
 //! `Window.checkRepeat`.
 //!
 //! Dead-key and Multi_key sequences are composed client-side from the keymap
-//! names (see `xkb.Compose`). Committed IME text is received through
-//! text-input-v3 when the compositor advertises it; IME preedit suppresses
-//! the keyboard/compose path. Fractional buffer scale uses
-//! `wp_fractional_scale_v1` + `wp_viewporter` when advertised, otherwise the
-//! entered `wl_output` integer scale. Clipboard uses `wl_data_device` and
-//! `zwp_primary_selection_v1` when present.
+//! names (see `xkb.Compose`), including an optional bounded XCompose locale
+//! table. Committed IME text is received through text-input-v3 when the
+//! compositor advertises it; IME preedit suppresses the keyboard/compose
+//! path. Fractional buffer scale uses `wp_fractional_scale_v1` +
+//! `wp_viewporter` when advertised, otherwise the entered `wl_output`
+//! integer scale. Clipboard uses `wl_data_device` and
+//! `zwp_primary_selection_v1` when present. xdg-shell min/max size matches
+//! the X11 WM size hints.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -88,6 +90,20 @@ const xdg_surface_ack_configure: u16 = 4;
 const xdg_toplevel_destroy: u16 = 0;
 const xdg_toplevel_set_title: u16 = 2;
 const xdg_toplevel_set_app_id: u16 = 3;
+const xdg_toplevel_set_max_size: u16 = 7;
+const xdg_toplevel_set_min_size: u16 = 8;
+const xdg_min_width: u32 = 160;
+const xdg_min_height: u32 = 120;
+const xdg_max_width: u32 = 8192;
+const xdg_max_height: u32 = 8192;
+
+const text_mime_types = [_][]const u8{
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "TEXT",
+    "STRING",
+    "UTF8_STRING",
+};
 
 pub const Key = shared_event.Key;
 pub const Event = shared_event.Event;
@@ -384,6 +400,7 @@ pub const Window = struct {
     axis_have_discrete: bool = false,
     ime_composing: bool = false,
     last_committed: ?u21 = null,
+    compose_table: ?xkb.ComposeTable = null,
     compose: xkb.Compose = .{},
     committed_text: std.ArrayList(u21) = .empty,
     committed_text_offset: usize = 0,
@@ -440,6 +457,12 @@ pub const Window = struct {
             .height = h,
         };
         errdefer self.threaded.deinit();
+        {
+            const env = try services.readEnviron(gpa);
+            defer gpa.free(env);
+            self.loadComposeFromEnv(env);
+        }
+        errdefer self.unloadCompose();
 
         const io = self.threaded.io();
         const stream = try openUnixSocket(io, socket_path);
@@ -512,6 +535,8 @@ pub const Window = struct {
         try sendOneU32(&self.conn, self.xdg_surface_id, xdg_surface_get_toplevel, self.xdg_toplevel_id);
         try sendString(&self.conn, self.gpa, self.xdg_toplevel_id, xdg_toplevel_set_title, title);
         try sendString(&self.conn, self.gpa, self.xdg_toplevel_id, xdg_toplevel_set_app_id, "comicchat");
+        try sendTwoU32(&self.conn, self.xdg_toplevel_id, xdg_toplevel_set_min_size, xdg_min_width, xdg_min_height);
+        try sendTwoU32(&self.conn, self.xdg_toplevel_id, xdg_toplevel_set_max_size, xdg_max_width, xdg_max_height);
 
         // xdg-shell forbids attaching a buffer before this initial, empty
         // commit has elicited a configure which the client acknowledges.
@@ -564,7 +589,24 @@ pub const Window = struct {
         self.buffers.deinit(self.gpa);
         self.committed_text.deinit(self.gpa);
         self.threaded.deinit();
+        self.unloadCompose();
         self.gpa.destroy(self);
+    }
+
+    fn loadComposeFromEnv(self: *Window, env: []const u8) void {
+        self.compose_table = xkb.loadComposeTable(self.gpa, env) catch null;
+        if (self.compose_table) |*table| {
+            self.compose.table = table;
+        }
+    }
+
+    fn unloadCompose(self: *Window) void {
+        self.compose.table = null;
+        self.compose.reset();
+        if (self.compose_table) |*table| {
+            table.deinit();
+            self.compose_table = null;
+        }
     }
 
     /// Pollable Wayland connection socket.
@@ -1205,15 +1247,10 @@ pub const Window = struct {
             return self.translateKey(code, shift);
         }
         if (self.currentKeysymName(code, shift)) |name| {
-            if (xkb.deadForKeysym(name)) |dead| {
-                return switch (self.compose.feedDead(dead)) {
-                    .pending => null,
-                    .char => |ch| .{ .char = ch },
-                };
-            }
-            if (xkb.isMultiKeyName(name)) {
-                _ = self.compose.feedMulti();
-                return null;
+            switch (self.compose.feedName(name)) {
+                .pending => return null,
+                .char => |ch| return .{ .char = ch },
+                .pass => {},
             }
         }
         const key = self.translateKey(code, shift);
@@ -1225,6 +1262,7 @@ pub const Window = struct {
             .char => |ch| switch (self.compose.feedChar(ch)) {
                 .pending => null,
                 .char => |out| .{ .char = out },
+                .pass => .{ .char = ch },
             },
             else => blk: {
                 if (self.compose.active()) self.compose.reset();
@@ -1304,8 +1342,7 @@ pub const Window = struct {
         }
         self.data_source_id = try self.conn.allocId();
         try sendOneU32(&self.conn, self.data_device_manager_id, data_device_manager_create_data_source, self.data_source_id);
-        try sendString(&self.conn, self.gpa, self.data_source_id, data_source_offer, "text/plain;charset=utf-8");
-        try sendString(&self.conn, self.gpa, self.data_source_id, data_source_offer, "text/plain");
+        try self.offerTextMimes(self.data_source_id, data_source_offer);
         try sendTwoU32(&self.conn, self.data_device_id, data_device_set_selection, self.data_source_id, self.last_serial);
         if (self.primary_device_id != 0) {
             if (self.primary_source_id != 0) {
@@ -1314,8 +1351,7 @@ pub const Window = struct {
             }
             self.primary_source_id = try self.conn.allocId();
             try sendOneU32(&self.conn, self.primary_manager_id, primary_manager_create_source, self.primary_source_id);
-            try sendString(&self.conn, self.gpa, self.primary_source_id, primary_source_offer, "text/plain;charset=utf-8");
-            try sendString(&self.conn, self.gpa, self.primary_source_id, primary_source_offer, "text/plain");
+            try self.offerTextMimes(self.primary_source_id, primary_source_offer);
             try sendTwoU32(&self.conn, self.primary_device_id, primary_device_set_selection, self.primary_source_id, self.last_serial);
         }
     }
@@ -1334,11 +1370,25 @@ pub const Window = struct {
     }
 
     fn receiveOffer(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16) ![]u8 {
-        if (self.receiveMime(gpa, offer_id, opcode, "text/plain;charset=utf-8")) |text| {
-            if (text.len != 0) return text;
-            gpa.free(text);
-        } else |_| {}
-        return self.receiveMime(gpa, offer_id, opcode, "text/plain");
+        var last_empty: ?[]u8 = null;
+        for (text_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    return text;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        if (last_empty) |text| return text;
+        return error.MissingDataOffer;
+    }
+
+    fn offerTextMimes(self: *Window, source_id: u32, opcode: u16) !void {
+        for (text_mime_types) |mime| {
+            try sendString(&self.conn, self.gpa, source_id, opcode, mime);
+        }
     }
 
     fn receiveMime(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16, mime: []const u8) ![]u8 {
@@ -1413,7 +1463,7 @@ pub const Window = struct {
     fn dataOfferEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
         if (opcode != 0) return null;
         const mime = try parseWireString(body);
-        if (std.mem.eql(u8, mime, "text/plain") or std.mem.eql(u8, mime, "text/plain;charset=utf-8")) {
+        if (isPlainTextMime(mime)) {
             if (self.pending_offer_id != 0) self.pending_offer_has_text = true;
             if (self.data_offer_id != 0) self.offer_has_text = true;
         }
@@ -1468,7 +1518,7 @@ pub const Window = struct {
     fn primaryOfferEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
         if (opcode != 0) return null;
         const mime = try parseWireString(body);
-        if (std.mem.eql(u8, mime, "text/plain") or std.mem.eql(u8, mime, "text/plain;charset=utf-8")) {
+        if (isPlainTextMime(mime)) {
             if (self.pending_primary_offer_id != 0) self.pending_primary_offer_has_text = true;
             if (self.primary_offer_id != 0) self.primary_offer_has_text = true;
         }
@@ -1752,6 +1802,13 @@ fn namedKeyToKey(named: xkb.NamedKey) Key {
         .page_down => .page_down,
         .delete => .delete,
     };
+}
+
+fn isPlainTextMime(mime: []const u8) bool {
+    for (text_mime_types) |known| {
+        if (std.mem.eql(u8, mime, known)) return true;
+    }
+    return false;
 }
 
 fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
@@ -2427,5 +2484,12 @@ test "registry records fractional scale, viewporter, and primary selection" {
     try std.testing.expectEqual(@as(u32, 3), globals.viewporter.name);
     try std.testing.expectEqual(@as(u32, 4), globals.fractional_manager.name);
     try std.testing.expectEqual(@as(u32, 5), globals.primary_manager.name);
+}
+
+test "plain-text MIME set covers UTF-8 and ICCCM names" {
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf-8"));
+    try std.testing.expect(isPlainTextMime("TEXT"));
+    try std.testing.expect(isPlainTextMime("UTF8_STRING"));
+    try std.testing.expect(!isPlainTextMime("image/png"));
 }
 const pointer_release: u16 = 1;

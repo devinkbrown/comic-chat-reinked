@@ -11,9 +11,10 @@
 //! name <-> numeric code) and `xkb_symbols` (key name -> the keysym list for
 //! levels 1–3: unshifted, Shift, and AltGr/ISO Level3 when the keymap lists
 //! a third keysym). That is what makes the base, shifted, and AltGr
-//! character of a non-US layout actually correct. A bounded dead-key and
-//! Multi_key composer covers the common European accents (see `Compose`).
-//! A level-4+ keysym, if present, is ignored. IME input method integration
+//! character of a non-US layout actually correct. A bounded dead-key /
+//! Multi_key composer plus optional XCompose locale tables (`~/.XCompose`,
+//! `XCOMPOSEFILE`, `%L`) cover European accents (see `Compose`). A
+//! level-4+ keysym, if present, is ignored. IME input method integration
 //! is a separate protocol (text-input-unstable-v3) and out of scope for this
 //! parser.
 //!
@@ -23,6 +24,13 @@
 //! `xkbKeycodeFromEvdev`.
 
 const std = @import("std");
+const compose_file = @import("compose_file.zig");
+
+pub const ComposeTable = compose_file.Table;
+
+pub fn loadComposeTable(gpa: std.mem.Allocator, env: []const u8) !?ComposeTable {
+    return compose_file.loadFromEnvironment(gpa, env);
+}
 
 pub const ParseError = error{
     UnsupportedKeymapFormat,
@@ -502,27 +510,74 @@ pub const Dead = enum {
 pub const x11_multi_key: u32 = 0xff20;
 
 /// Result of feeding one key into `Compose`. `pending` means the key was
-/// consumed and the caller should not emit a character yet.
+/// consumed and the caller should not emit a character yet. `pass` means
+/// compose did not handle the key; the caller should translate it normally.
 pub const Outcome = union(enum) {
     pending,
     char: u21,
+    pass,
 };
 
-/// One-accent dead-key plus two-key Multi_key composer. No locale files, no
-/// libxkbcommon: the pair table is the common Western-European set that
-/// US-International / Compose users actually type. Escape/control cancel;
-/// space or a doubled dead key emits the standalone accent.
+/// Dead-key plus Multi_key composer, optionally backed by a parsed XCompose
+/// table. The built-in pair table covers the common Western-European set
+/// when no locale file is present. Escape/control cancel; space or a doubled
+/// dead key emits the standalone accent.
 pub const Compose = struct {
+    table: ?*const ComposeTable = null,
+    seq: [compose_file.max_seq_len]u16 = @splat(0),
+    seq_len: u8 = 0,
     dead: ?Dead = null,
     multi: bool = false,
     first: ?u21 = null,
 
     pub fn reset(self: *Compose) void {
-        self.* = .{};
+        const table = self.table;
+        self.* = .{ .table = table };
     }
 
     pub fn active(self: *const Compose) bool {
-        return self.dead != null or self.multi;
+        return self.seq_len != 0 or self.dead != null or self.multi;
+    }
+
+    /// Locale table first, then the built-in dead/Multi_key rules.
+    pub fn feedName(self: *Compose, name: []const u8) Outcome {
+        if (self.feedLocale(name)) |out| return out;
+        return self.feedBuiltin(name);
+    }
+
+    fn feedLocale(self: *Compose, name: []const u8) ?Outcome {
+        const table = self.table orelse return null;
+        const id = table.idOf(name) orelse {
+            if (self.seq_len != 0) {
+                self.reset();
+                return self.feedBuiltin(name);
+            }
+            return null;
+        };
+        if (self.seq_len >= self.seq.len) self.reset();
+        self.seq[self.seq_len] = id;
+        self.seq_len += 1;
+        switch (table.match(self.seq[0..self.seq_len])) {
+            .exact => |ch| {
+                self.reset();
+                return .{ .char = ch };
+            },
+            .prefix => return .pending,
+            .none => {
+                self.reset();
+                if (self.seq_len == 0) return self.feedBuiltin(name);
+                return .pass;
+            },
+        }
+    }
+
+    fn feedBuiltin(self: *Compose, name: []const u8) Outcome {
+        if (deadForKeysym(name)) |dead| return self.feedDead(dead);
+        if (isMultiKeyName(name)) return self.feedMulti();
+        if (charForKeysym(name)) |ch| return self.feedChar(ch);
+        if (std.mem.eql(u8, name, "space")) return self.feedChar(' ');
+        if (self.active()) self.reset();
+        return .pass;
     }
 
     pub fn feedDead(self: *Compose, dead: Dead) Outcome {
@@ -584,6 +639,68 @@ pub fn deadForKeysym(name: []const u8) ?Dead {
         .{ "dead_ogonek", .ogonek },
     });
     return dead_names.get(name);
+}
+
+const ascii_letter_lo = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z" };
+const ascii_letter_hi = [_][]const u8{ "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" };
+const ascii_digit = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+
+pub fn keysymNameForX11(sym: u32) ?[]const u8 {
+    if (sym == x11_multi_key) return "Multi_key";
+    if (deadForX11(sym)) |dead| return switch (dead) {
+        .grave => "dead_grave",
+        .acute => "dead_acute",
+        .circumflex => "dead_circumflex",
+        .tilde => "dead_tilde",
+        .macron => "dead_macron",
+        .breve => "dead_breve",
+        .abovedot => "dead_abovedot",
+        .diaeresis => "dead_diaeresis",
+        .abovering => "dead_abovering",
+        .doubleacute => "dead_doubleacute",
+        .caron => "dead_caron",
+        .cedilla => "dead_cedilla",
+        .ogonek => "dead_ogonek",
+    };
+    if (sym == ' ') return "space";
+    if (sym >= '0' and sym <= '9') return ascii_digit[sym - '0'];
+    if (sym >= 'a' and sym <= 'z') return ascii_letter_lo[sym - 'a'];
+    if (sym >= 'A' and sym <= 'Z') return ascii_letter_hi[sym - 'A'];
+    return switch (sym) {
+        '!' => "exclam",
+        '"' => "quotedbl",
+        '#' => "numbersign",
+        '$' => "dollar",
+        '%' => "percent",
+        '&' => "ampersand",
+        '\'' => "apostrophe",
+        '(' => "parenleft",
+        ')' => "parenright",
+        '*' => "asterisk",
+        '+' => "plus",
+        ',' => "comma",
+        '-' => "minus",
+        '.' => "period",
+        '/' => "slash",
+        ':' => "colon",
+        ';' => "semicolon",
+        '<' => "less",
+        '=' => "equal",
+        '>' => "greater",
+        '?' => "question",
+        '@' => "at",
+        '[' => "bracketleft",
+        '\\' => "backslash",
+        ']' => "bracketright",
+        '^' => "asciicircum",
+        '_' => "underscore",
+        '`' => "grave",
+        '{' => "braceleft",
+        '|' => "bar",
+        '}' => "braceright",
+        '~' => "asciitilde",
+        else => null,
+    };
 }
 
 pub fn deadForX11(sym: u32) ?Dead {
@@ -963,4 +1080,30 @@ test "Multi_key compose accepts punctuation+letter in either order" {
     try std.testing.expectEqual(Outcome.pending, compose.feedMulti());
     try std.testing.expectEqual(Outcome.pending, compose.feedChar('s'));
     try std.testing.expectEqual(Outcome{ .char = 0xdf }, compose.feedChar('s'));
+}
+
+test "feedName prefers a parsed XCompose table over the built-in pairs" {
+    const text =
+        \\<Multi_key> <minus> <greater> : "→"
+        \\<dead_acute> <e> : "é"
+        \\
+    ;
+    var table = try compose_file.parse(std.testing.allocator, text);
+    defer table.deinit();
+    var compose: Compose = .{ .table = &table };
+    try std.testing.expectEqual(Outcome.pending, compose.feedName("Multi_key"));
+    try std.testing.expectEqual(Outcome.pending, compose.feedName("minus"));
+    try std.testing.expectEqual(Outcome{ .char = 0x2192 }, compose.feedName("greater"));
+    try std.testing.expectEqual(Outcome.pending, compose.feedName("dead_acute"));
+    try std.testing.expectEqual(Outcome{ .char = 0xe9 }, compose.feedName("e"));
+    try std.testing.expectEqualStrings("dead_acute", keysymNameForX11(0xfe51).?);
+    try std.testing.expectEqualStrings("apostrophe", keysymNameForX11('\'').?);
+}
+
+test "loadComposeTable honors a missing XCOMPOSEFILE instead of falling through" {
+    const table = try loadComposeTable(
+        std.testing.allocator,
+        "XCOMPOSEFILE=/tmp/comicchat-missing-xcompose\x00LANG=en_US.UTF-8\x00",
+    );
+    try std.testing.expect(table == null);
 }

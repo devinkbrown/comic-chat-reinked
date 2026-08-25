@@ -15,7 +15,7 @@ not vendored here.
 | `docs/UI_LIBRARY.md` | Shared desktop design tokens, components, interaction states, and visual checks |
 | `legacy/docs/` | Historical Microsoft-reference audits and migration records; excluded from binary packages |
 | `tools/` | Reproducible asset and font tooling |
-| `packaging/` | Optional Windows and freedesktop `.ccc`/`.ccr` file associations |
+| `packaging/` | Optional Windows and freedesktop `.ccc`/`.ccr` file associations, Linux install helper, and AppStream metainfo |
 | `third_party/onyx-server/` | Pinned Onyx source submodule; ComicChat imports it through the narrow `onyx_tls_root.zig` boundary |
 
 ## Releases

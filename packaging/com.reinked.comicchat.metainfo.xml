@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.reinked.comicchat</id>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>Reinked</name>
+  <summary>Comic Chat client with a software-rendered comic framebuffer</summary>
+  <description>
+    <p>
+      Reinked is a portable Comic Chat client. It talks IRC/IRCX over verified
+      TLS and presents rooms as software-rendered comic pages on native X11,
+      Wayland, and Win32 backends.
+    </p>
+    <p>
+      The Linux desktop files register .ccc conversations and .ccr locators.
+      A nonempty WAYLAND_DISPLAY selects Wayland; there is no automatic X11
+      fallback.
+    </p>
+  </description>
+  <launchable type="desktop-id">comicchat.desktop</launchable>
+  <provides>
+    <binary>reinked</binary>
+    <mediatype>application/x-comicchat-conversation</mediatype>
+    <mediatype>application/x-comicchat-locator</mediatype>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+    <category>InstantMessaging</category>
+  </categories>
+  <keywords>
+    <keyword>IRC</keyword>
+    <keyword>IRCX</keyword>
+    <keyword>comic</keyword>
+    <keyword>chat</keyword>
+  </keywords>
+  <url type="homepage">https://github.com/devinkbrown/comic-chat-reinked</url>
+  <content_rating type="oars-1.1"/>
+</component>
