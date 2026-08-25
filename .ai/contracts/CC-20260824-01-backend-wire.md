@@ -122,6 +122,15 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Retarget last-key and last-invite hints when 470 forwards a room
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 18 leftovers in scope
+
+- Mark the startup and locator rooms `want_rejoin` so the first 001 still JOINs them
+- Invitation / favorite / LISTX / locator JOIN reuse the stored room key
+- `MODE +k` and the channel-properties key field retarget `last_key_channel`
+- Show CREATE `927` ALREADYONCHANNEL, connect `463` host-denied, and `466` you-will-be-banned
+- File-transfer dialog status uses English labels, not `@tagName`
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules

@@ -1214,6 +1214,16 @@ const PendingDcc = struct {
 
 const TransferStatus = enum(u8) { waiting, running, completed, cancelled, failed };
 
+fn transferStatusLabel(status: TransferStatus) []const u8 {
+    return switch (status) {
+        .waiting => "Waiting",
+        .running => "Transferring",
+        .completed => "Completed",
+        .cancelled => "Cancelled",
+        .failed => "Failed",
+    };
+}
+
 const DccWorkerContext = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -1796,7 +1806,7 @@ fn tickBackgroundFeatures(
         if (view.active_dialog == .file_transfer) {
             var amount: [96]u8 = undefined;
             try view.setDialogValueAt(3, try std.fmt.bufPrint(&amount, "{d} / {d} bytes", .{ transferred, transfer.context.expected_size orelse 0 }));
-            try view.setDialogValueAt(4, @tagName(transfer_status));
+            try view.setDialogValueAt(4, transferStatusLabel(transfer_status));
         }
         if (transfer_status != .waiting and transfer_status != .running and !transfer.terminal_announced) {
             if (transfer.thread) |thread| {
@@ -1879,7 +1889,8 @@ fn runInteractivePollBackend(
     defer view.deinit();
     var workspace = try cc.client.workspace.Workspace.init(gpa, nick);
     defer workspace.deinit();
-    _ = try workspace.ensure(channel);
+    const startup_room = try workspace.ensure(channel);
+    workspace.rooms.items[startup_room].setWantRejoin(true);
     var state: ChatState = .{};
     defer state.deinit(gpa);
     var network = try AsyncNetwork.init(gpa, host, port, nick, runtime);
@@ -1997,7 +2008,8 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
     defer view.deinit();
     var workspace = try cc.client.workspace.Workspace.init(gpa, nick);
     defer workspace.deinit();
-    _ = try workspace.ensure(channel);
+    const startup_room = try workspace.ensure(channel);
+    workspace.rooms.items[startup_room].setWantRejoin(true);
     var state: ChatState = .{};
     defer state.deinit(gpa);
     var network = try AsyncNetwork.init(gpa, host, port, nick, runtime);
@@ -2322,6 +2334,7 @@ fn loadStartupDocument(
     if (locator.channel) |channel| {
         room_index = try workspace.ensure(channel);
         _ = workspace.activate(room_index);
+        workspace.rooms.items[room_index].setWantRejoin(true);
     }
     if (locator.character) |character| if (cc.comic.session.bundledAvatarByName(character)) |avatar|
         try workspace.rooms.items[room_index].transcript.setAvatar(nick, avatar);
@@ -2726,11 +2739,14 @@ fn applyDialogAction(
                 };
                 _ = workspace.activate(index);
                 workspace.rooms.items[index].setWantRejoin(true);
-                try client.join(room_to_join);
+                try client.joinWithKey(room_to_join, workspace.rooms.items[index].join_key orelse "");
             }
         },
         .channel => {
-            const index = workspace.ensure(value) catch return;
+            const index = workspace.ensure(value) catch {
+                view.setDialogNotice("Enter a valid room name beginning with # or &.");
+                return;
+            };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
             if (maybe_client) |client| try client.joinWithKey(value, view.dialogValueAt(1));
@@ -2753,7 +2769,10 @@ fn applyDialogAction(
                     return;
                 }
             }
-            const index = workspace.ensure(value) catch return;
+            const index = workspace.ensure(value) catch {
+                view.setDialogNotice("Enter a valid room name beginning with # or &.");
+                return;
+            };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
             if (maybe_client) |client| {
@@ -2818,6 +2837,7 @@ fn applyDialogAction(
                 try client.setMode(room.name, "+k", key);
                 try room.setJoinKey(gpa, key);
                 client.setRestorationKey(room.name, key);
+                try state.replaceOwned(gpa, &state.last_key_channel, room.name);
             }
         },
         .ircx_properties => {
@@ -3276,7 +3296,7 @@ fn applyDialogAction(
             };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
-            if (maybe_client) |client| try client.join(target);
+            if (maybe_client) |client| try client.joinWithKey(target, workspace.rooms.items[index].join_key orelse "");
         },
         .invite => if (maybe_client) |client| try client.invite(value, room.name),
         .user_list, .whisper => {
@@ -3364,7 +3384,9 @@ fn applyDialogAction(
                 };
                 _ = workspace.activate(index);
                 locator_room_index = index;
-                if (!changes_server) if (maybe_client) |client| try client.join(located_room);
+                workspace.rooms.items[index].setWantRejoin(true);
+                if (!changes_server) if (maybe_client) |client|
+                    try client.joinWithKey(located_room, workspace.rooms.items[index].join_key orelse "");
             }
             if (locator.character) |character| if (cc.comic.session.bundledAvatarByName(character)) |avatar| {
                 try workspace.rooms.items[locator_room_index].transcript.setAvatar(nick, avatar);
@@ -3429,7 +3451,8 @@ fn applyDialogAction(
                     return;
                 };
                 _ = workspace.activate(index);
-                if (maybe_client) |client| try client.join(value);
+                workspace.rooms.items[index].setWantRejoin(true);
+                if (maybe_client) |client| try client.joinWithKey(value, workspace.rooms.items[index].join_key orelse "");
             }
         },
         else => {},
@@ -3712,6 +3735,10 @@ test "connection failures remain actionable" {
     try std.testing.expectEqualStrings("Connection failed (server closed the session) - click for settings", connectionFailureStatus(error.IrcServerError));
     try std.testing.expectEqualStrings("Connection failed - click for settings", connectionFailureStatus(error.Unexpected));
     try std.testing.expect(std.mem.indexOf(u8, connectionFailureStatus(error.OutOfMemory), "OutOfMemory") == null);
+    try std.testing.expectEqualStrings("Waiting", transferStatusLabel(.waiting));
+    try std.testing.expectEqualStrings("Transferring", transferStatusLabel(.running));
+    try std.testing.expectEqualStrings("Failed", transferStatusLabel(.failed));
+    try std.testing.expect(std.mem.indexOf(u8, transferStatusLabel(.cancelled), "cancelled") == null);
 }
 
 test "comic view choices remain bounded and roster selection ignores departed users" {
@@ -3920,7 +3947,7 @@ fn processWorkspaceMessages(
             redraw = (try appendTopicLine(workspace, &msg)) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "MODE") or std.mem.eql(u8, msg.command, "324")) {
             redraw = (try appendModeLine(workspace, &msg)) or redraw;
-            if (try applyLiveChannelKey(workspace, client, &msg)) redraw = true;
+            if (try applyLiveChannelKey(workspace, client, state, &msg)) redraw = true;
         } else if (isJoinDeniedReply(&msg, workspace)) {
             redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
         } else if (isCommandFailureNumeric(msg.command)) {
@@ -3936,7 +3963,7 @@ fn processWorkspaceMessages(
             redraw = (try applyChannelForward(workspace, client, state, &msg)) or redraw;
         } else if (isNickFailureNumeric(msg.command)) {
             redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
-        } else if (std.mem.eql(u8, msg.command, "464") or std.mem.eql(u8, msg.command, "465")) {
+        } else if (isAuthFailureNumeric(msg.command)) {
             redraw = (try applyAuthFailure(workspace, state, &msg, channel)) or redraw;
             return error.IrcServerError;
         } else if (std.mem.eql(u8, msg.command, "305") or std.mem.eql(u8, msg.command, "306")) {
@@ -4140,7 +4167,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
     return switch (code) {
         2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
         301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
-        322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
+        322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
         710, 711, 712, 713, 714, 715, 717, 718, 732, 733, 734 => true,
         801...819, 824, 825, 900...908, 913...925 => true,
         else => false,
@@ -4307,6 +4334,7 @@ fn appendModeLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.
 fn applyLiveChannelKey(
     workspace: *cc.client.workspace.Workspace,
     client: *cc.net.client.Client,
+    state: *ChatState,
     msg: *const cc.net.message.Message,
 ) !bool {
     if (!std.ascii.eqlIgnoreCase(msg.command, "MODE") or msg.param_count < 2) return false;
@@ -4333,6 +4361,8 @@ fn applyLiveChannelKey(
                 changed = true;
             }
             client.setRestorationKey(channel, key);
+            if (adding and key.len != 0)
+                try state.replaceOwned(workspace.gpa, &state.last_key_channel, channel);
             continue;
         }
         if (workspace.prefixes.isMode(mode) or workspace.chanmodes.takesParam(mode, adding)) {
@@ -4381,6 +4411,7 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "458") or
         std.mem.eql(u8, command, "489") or
         std.mem.eql(u8, command, "926") or
+        std.mem.eql(u8, command, "927") or
         std.mem.eql(u8, command, "492") or
         std.mem.eql(u8, command, "494") or
         std.mem.eql(u8, command, "716") or
@@ -4403,13 +4434,24 @@ fn isNickFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "438");
 }
 
+fn isAuthFailureNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "463") or
+        std.mem.eql(u8, command, "464") or
+        std.mem.eql(u8, command, "465");
+}
+
 fn applyAuthFailure(
     workspace: *cc.client.workspace.Workspace,
     state: *ChatState,
     msg: *const cc.net.message.Message,
     channel: []const u8,
 ) !bool {
-    state.status = if (std.mem.eql(u8, msg.command, "464")) "password rejected" else "banned";
+    state.status = if (std.mem.eql(u8, msg.command, "464"))
+        "password rejected"
+    else if (std.mem.eql(u8, msg.command, "463"))
+        "host not permitted"
+    else
+        "banned";
     if (workspaceTranscriptRoom(workspace, channel)) |active| try appendServerWorkflowReply(&active.transcript, msg);
     return true;
 }
@@ -5983,11 +6025,13 @@ test "live MODE key and command failures update membership state" {
     }
     try client.joinWithKey("#root", "old");
     const set_key = cc.net.message.parse(":op!u@h MODE #root +k secret");
-    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &set_key));
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &set_key));
     try std.testing.expectEqualStrings("secret", workspace.rooms.items[root].join_key.?);
+    try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
     const clear_key = cc.net.message.parse(":op!u@h MODE #root -k");
-    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &clear_key));
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &clear_key));
     try std.testing.expect(workspace.rooms.items[root].join_key == null);
+    try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
 
     const noton = cc.net.message.parse(":server 442 me #root :You're not on that channel");
     try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &noton));
@@ -6082,6 +6126,10 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(!isCommandFailureNumeric("480"));
     try std.testing.expect(isJoinDeniedNumeric("520"));
     try std.testing.expect(isCommandFailureNumeric("926"));
+    try std.testing.expect(isCommandFailureNumeric("927"));
+    try std.testing.expect(isAuthFailureNumeric("463"));
+    try std.testing.expect(isAuthFailureNumeric("464"));
+    try std.testing.expect(isVisibleServerWorkflowReply("466"));
     try std.testing.expect(isCommandFailureNumeric("489"));
     try std.testing.expect(isCommandFailureNumeric("492"));
     try std.testing.expect(isCommandFailureNumeric("716"));
@@ -6144,6 +6192,9 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     const password = cc.net.message.parse(":server 464 me :Password incorrect");
     try std.testing.expect(try applyAuthFailure(&workspace, &state, &password, "#root"));
     try std.testing.expectEqualStrings("password rejected", state.status);
+    const host_denied = cc.net.message.parse(":server 463 me :Your host isn't among the privileged");
+    try std.testing.expect(try applyAuthFailure(&workspace, &state, &host_denied, "#root"));
+    try std.testing.expectEqualStrings("host not permitted", state.status);
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expect(state.pending_dcc == null);
     try std.testing.expect(!workspace.rooms.items[0].joined);
@@ -6470,7 +6521,7 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
 
     const root = try workspace.ensure("#root");
     const set_key = cc.net.message.parse(":op!u@h MODE #root +Zfk secretfilter 10 swordfish");
-    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &set_key));
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &set_key));
     try std.testing.expectEqualStrings("swordfish", workspace.rooms.items[root].join_key.?);
 
     const old = try workspace.ensure("#old");
