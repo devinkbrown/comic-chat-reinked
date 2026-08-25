@@ -2552,7 +2552,7 @@ fn applyDialogAction(
             const creation_modes = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             const limit = std.mem.trim(u8, view.dialogValueAt(3), " \t");
             if (creation_modes.len != 0 and std.mem.indexOfAny(u8, creation_modes, " \r\n\x00") != null) {
-                view.setDialogNotice("Enter room modes as one word, without spaces.");
+                view.setDialogNotice("Enter room options as one word, without spaces.");
                 return;
             }
             if (limit.len != 0) {
@@ -2850,7 +2850,7 @@ fn applyDialogAction(
         },
         .notifications => {
             if (value.len == 0) {
-                view.setDialogNotice("Enter a nickname or * pattern to watch.");
+                view.setDialogNotice("Enter a name or * pattern to watch.");
                 return;
             }
             const delivery = view.dialogValueAt(4);

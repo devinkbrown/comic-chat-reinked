@@ -1734,6 +1734,7 @@ pub fn statusTone(status: []const u8) NoticeTone {
     if (std.mem.eql(u8, status, "On the wire")) return .success;
     if (std.mem.indexOf(u8, status, "connected") != null and std.mem.indexOf(u8, status, "reconnecting") == null) return .success;
     if (std.mem.indexOf(u8, status, "error") != null or std.mem.indexOf(u8, status, "failed") != null) return .failure;
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return .warning;
     if (std.mem.indexOf(u8, status, "reconnect") != null or std.mem.indexOf(u8, status, "offline") != null) return .warning;
     return .info;
 }

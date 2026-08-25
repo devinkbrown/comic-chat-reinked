@@ -305,7 +305,8 @@ pub const View = struct {
     }
 
     pub fn handleTranscriptKey(self: *View, key: platform_event.Key, total_lines: usize, extend: bool) bool {
-        if (self.shell.focus == .composer) {
+        const pages_history = self.shell.focus == .composer or self.shell.focus == .toolbar or self.shell.focus == .say_actions or self.shell.focus == .status or self.shell.focus == .emotion;
+        if (pages_history) {
             switch (key) {
                 .page_up => {
                     self.pageEarlier(total_lines);
@@ -1590,8 +1591,8 @@ pub const View = struct {
             .focused = self.hovered_room_overflow,
         });
         snapshot.append(.{ .id = "transcript", .role = .transcript, .bounds = layout.transcript, .label = "Conversation", .focused = self.shell.focus == .transcript });
-        if (layout.right.w > 0) snapshot.append(.{ .id = "members", .role = .member_list, .bounds = layout.members, .label = "Members", .focused = self.shell.focus == .members });
-        snapshot.append(.{ .id = "composer", .role = .composer, .bounds = layout.say_editor, .label = "Message", .focused = self.shell.focus == .composer });
+        if (layout.right.w > 0) snapshot.append(.{ .id = "members", .role = .member_list, .bounds = layout.members, .label = "CAST", .focused = self.shell.focus == .members });
+        snapshot.append(.{ .id = "composer", .role = .composer, .bounds = layout.say_editor, .label = "Balloon", .focused = self.shell.focus == .composer });
         var action_index: i32 = 0;
         while (action_index < geometry.say_button_count) : (action_index += 1) snapshot.append(.{
             .id = sayActionSemanticId(@intCast(action_index)),
@@ -2412,7 +2413,7 @@ fn toolbarLabel(index: u8) []const u8 {
         5 => "Comic view",
         6 => "Text view",
         7 => "Browse rooms",
-        8 => "Show or hide members",
+        8 => "Show or hide CAST",
         9 => "Favorite rooms",
         10 => "Set away message",
         11 => "Personal profile",
@@ -3006,6 +3007,7 @@ fn statusTabLabel(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "Live";
     if (tone == .failure) return "Fail";
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Name";
     if (std.mem.indexOf(u8, status, "offline") != null) return "Off";
     return "Wait";
 }
@@ -3014,7 +3016,12 @@ fn statusPanelHeading(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "On the wire";
     if (tone == .failure) return "Wire failed";
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken";
     if (std.mem.indexOf(u8, status, "offline") != null) return "Offline";
+    if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
+    if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
+    if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
+    if (std.mem.eql(u8, status, "connecting")) return "Connecting to the wire";
     return "Waiting on the wire";
 }
 
@@ -3022,6 +3029,7 @@ fn statusPanelDetail(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "Live";
     if (tone == .failure) return failureStatusLabel(status);
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Choose another sign-in name";
     if (std.mem.indexOf(u8, status, "offline") != null) return "Connect to ink the first balloon";
     return "Waiting for the wire";
 }
@@ -3030,7 +3038,12 @@ fn statusBarLabel(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "On the wire";
     if (tone == .failure) return failureStatusLabel(status);
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - click Connect";
     if (std.mem.indexOf(u8, status, "offline") != null) return "Sunday page is offline";
+    if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
+    if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
+    if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
+    if (std.mem.eql(u8, status, "connecting")) return "Connecting to the wire";
     return "Waiting on the wire";
 }
 
@@ -4426,6 +4439,14 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Copy selected lines", menuItemLabel(1, 0));
     try std.testing.expectEqualStrings("Delete selected lines", menuItemLabel(1, 2));
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
+    try std.testing.expectEqualStrings("Name", statusTabLabel("nickname in use"));
+    try std.testing.expectEqualStrings("Sign-in name is taken", statusPanelHeading("nickname in use"));
+    try std.testing.expectEqualStrings("Sign-in name is taken - click Connect", statusBarLabel("nickname in use"));
+    try std.testing.expectEqualStrings("Signing in on the wire", statusBarLabel("registering"));
+    try std.testing.expectEqualStrings("Joining the Sunday page", statusBarLabel("joining"));
+    try std.testing.expectEqualStrings("Opening a verified wire", statusBarLabel("upgrading to TLS"));
+    try std.testing.expectEqualStrings("Connecting to the wire", statusBarLabel("connecting"));
+    try std.testing.expectEqualStrings("Show or hide CAST", toolbarLabel(8));
     try std.testing.expectEqualStrings("Search rooms after the wire is live", dialogHelper(.room_list, ""));
     try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
     try std.testing.expectEqualStrings("Bulletin", menuItemLabel(4, 5));
@@ -4465,6 +4486,15 @@ test "composer Page Up and Page Down page the transcript" {
     try std.testing.expect(view.handleTranscriptKey(.page_down, transcript.lines.items.len, false));
     try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
     try std.testing.expect(!view.handleTranscriptKey(.up, transcript.lines.items.len, false));
+
+    view.shell.history_offset = 0;
+    view.shell.focus = .toolbar;
+    try std.testing.expect(view.handleTranscriptKey(.page_up, transcript.lines.items.len, false));
+    try std.testing.expect(view.shell.history_offset > 0);
+    try std.testing.expectEqual(shell_mod.Focus.toolbar, view.shell.focus);
+    view.shell.focus = .say_actions;
+    try std.testing.expect(view.handleTranscriptKey(.page_down, transcript.lines.items.len, false));
+    try std.testing.expectEqual(shell_mod.Focus.say_actions, view.shell.focus);
 }
 
 test "member context stays closed until the wire is live" {

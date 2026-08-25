@@ -149,7 +149,7 @@ pub fn prompt(id: Id) ?[]const u8 {
     return switch (id) {
         .channel, .channel_create => "Room name",
         .nickname => "Nickname",
-        .kick, .ban, .invite, .whisper, .call_link, .member_profile => "Member nickname",
+        .kick, .ban, .invite, .whisper, .call_link, .member_profile => "CAST member",
         .away => "Away message",
         .password, .channel_password => "Password",
         .choose_color => "Color value",
@@ -196,17 +196,17 @@ pub fn fields(id: Id) []const Field {
         .channel_create => &.{
             .{ .label = "Room name", .hint = "#room" },
             .{ .label = "Topic", .hint = "Optional" },
-            .{ .label = "Room modes", .hint = "Optional" },
+            .{ .label = "Room options", .hint = "Optional; one word" },
             .{ .label = "Maximum users", .hint = "Optional" },
             .{ .label = "Optional password", .kind = .password },
         },
-        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room modes", .hint = "Optional" }, .{ .label = "Maximum users", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, modes and limits", .kind = .readonly } },
+        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "Maximum users", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and limits", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password", .hint = "Needed if the room is locked" }},
         .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "Result limit", .hint = "Optional; blank means unlimited" } },
-        .user_list => &.{ .{ .label = "Member nickname", .hint = "Choose a visible room member" }, .{ .label = "Filter", .hint = "Optional nickname filter" } },
-        .kick => &.{ .{ .label = "Member nickname", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban pattern", .hint = "Optional" } },
+        .user_list => &.{ .{ .label = "CAST member", .hint = "Choose a visible room member" }, .{ .label = "Filter", .hint = "Optional name filter" } },
+        .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban pattern", .hint = "Optional" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
-        .invite, .whisper => &.{.{ .label = "Member nickname", .hint = "Visible CAST member" }},
+        .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
         .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "Member", .hint = "Select an online nickname" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Room", .hint = "For Join room, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound file", .kind = .choice }, .{ .label = "Accompanying message", .hint = "Optional" } },
@@ -221,7 +221,7 @@ pub fn fields(id: Id) []const Field {
         .create_set => &.{.{ .label = "Rule set name" }},
         .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat limit", .hint = "0 means unlimited" }, .{ .label = "Repeat window seconds", .hint = "0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Enabled", .kind = .choice }, .{ .label = "Case-sensitive match", .kind = .choice } },
-        .notifications => &.{ .{ .label = "Nickname", .hint = "Nickname or * pattern" }, .{ .label = "User pattern", .hint = "*" }, .{ .label = "Host pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional server" }, .{ .label = "Delivery", .kind = .choice } },
+        .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional server" }, .{ .label = "Delivery", .kind = .choice } },
         .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "Member", .hint = "CAST nickname" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
         .save_conversation => &.{.{ .label = "Conversation file", .hint = "Save as .ccc" }},
@@ -459,7 +459,11 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Save events", primaryLabel(.ircx_events));
     try std.testing.expectEqualStrings("Room extras", fields(.connection_features)[2].label);
     try std.testing.expectEqualStrings("Room", fields(.ircx_properties)[0].label);
-    try std.testing.expectEqualStrings("Room modes", fields(.channel_create)[2].label);
+    try std.testing.expectEqualStrings("Room options", fields(.channel_create)[2].label);
+    try std.testing.expectEqualStrings("Room options", fields(.channel_properties)[1].label);
+    try std.testing.expectEqualStrings("CAST member", fields(.whisper)[0].label);
+    try std.testing.expectEqualStrings("Account pattern", fields(.notifications)[1].label);
+    try std.testing.expectEqualStrings("Address pattern", fields(.notifications)[2].label);
     try std.testing.expectEqualStrings("Voice", choiceOptions(.room_access, 1)[0]);
     try std.testing.expectEqualStrings("Read common properties", choiceOptions(.ircx_properties, 3)[1]);
     try std.testing.expectEqualStrings("Show", choiceOptions(.room_access, 0)[0]);
