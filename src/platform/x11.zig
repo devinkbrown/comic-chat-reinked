@@ -31,16 +31,20 @@
 //!     Shift+Insert / XF86Paste CLIPBOARD paste as typed keys, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
-//!     paste does not read PRIMARY), TARGETS-first XDND,
+//!     paste does not read PRIMARY and local text is used only while we
+//!     still own CLIPBOARD), receive-only ISO-8859-1/15 and Markdown MIME,
+//!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
+//!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
+//!     hover clear,
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
 //!     FocusIn/leaving-hidden expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
 //!     while hidden or fully obscured; MapNotify exposes), a scaled
-//!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
+//!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128, urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
-//!     for `xdg-open`, EnterNotify cursor restore,
+//!     for `xdg-open`, EnterNotify cursor restore and pointer move,
 //!     XSETTINGS owner re-watch after DestroyNotify (that owner does not close
 //!     the chat),
 //!     allowed actions,
@@ -63,6 +67,7 @@ const event_key_press: u32 = 1 << 0;
 const event_button_press: u32 = 1 << 2;
 const event_button_release: u32 = 1 << 3;
 const event_enter_window: u32 = 1 << 4;
+const event_leave_window: u32 = 1 << 5;
 const event_pointer_motion: u32 = 1 << 6;
 const event_exposure: u32 = 1 << 15;
 const event_visibility_change: u32 = 1 << 16;
@@ -183,6 +188,11 @@ const XConn = struct {
     compound_text: u32 = 0,
     mime_kde5_urilist: u32 = 0,
     mime_moz_url_priv: u32 = 0,
+    mime_text_latin1: u32 = 0,
+    mime_text_latin1_alt: u32 = 0,
+    mime_text_latin9: u32 = 0,
+    mime_text_markdown: u32 = 0,
+    mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
     xsettings_settings: u32 = 0,
     xsettings_window: u32 = 0,
@@ -719,7 +729,16 @@ pub const Window = struct {
             7 => { // EnterNotify
                 self.noteUserTime(get32(event[4..8]));
                 if (self.cursor_id != 0) defineCursor(&self.conn, self.window, self.cursor_id) catch {};
-                return .other;
+                const raw_x: i32 = @as(i16, @bitCast(get16(event[24..26])));
+                const raw_y: i32 = @as(i16, @bitCast(get16(event[26..28])));
+                return .{ .pointer = .{
+                    .kind = .move,
+                    .x = physicalPointToLogical(raw_x, self.scale),
+                    .y = physicalPointToLogical(raw_y, self.scale),
+                } };
+            },
+            8 => { // LeaveNotify
+                return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
             },
             9 => { // FocusIn
                 self.clearAttention();
@@ -838,10 +857,11 @@ pub const Window = struct {
                 } else if (typ == self.conn.xdnd_enter) {
                     self.handleXdndEnter(event);
                 } else if (typ == self.conn.xdnd_position) {
-                    self.handleXdndPosition(event) catch {};
+                    if (self.handleXdndPosition(event) catch null) |ev| return ev;
                 } else if (typ == self.conn.xdnd_leave) {
                     self.xdnd_source = 0;
                     self.xdnd_has_text = false;
+                    return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
                 } else if (typ == self.conn.xdnd_drop) {
                     if (self.takeXdndDrop(event)) |ev| return ev;
                 } else if (typ == self.conn.net_wm_state) {
@@ -873,7 +893,7 @@ pub const Window = struct {
     }
 
     fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        if (self.owns_clipboard or self.owns_primary) {
+        if (self.owns_clipboard) {
             if (self.clipboard_text.len == 0) return null;
             return try gpa.dupe(u8, self.clipboard_text);
         }
@@ -981,6 +1001,11 @@ pub const Window = struct {
         if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html_utf8_alt)) |text| return text;
         if (self.readRtfTarget(gpa, selection, self.conn.mime_rtf)) |text| return text;
         if (self.readRtfTarget(gpa, selection, self.conn.mime_rtf_app)) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1, "ISO-8859-1")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1_alt, "ISO-8859-1")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9, "ISO-8859-15")) |text| return text;
+        if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
+        if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
         return null;
     }
@@ -1053,7 +1078,34 @@ pub const Window = struct {
         if (target == self.conn.compound_text or target == self.conn.text) {
             return try self.decodeTextBytes(gpa, bytes);
         }
+        if (isLatin1Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-1") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (target == self.conn.mime_text_latin9) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-15") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
         return try self.decodeClipboardBytes(gpa, bytes);
+    }
+
+    fn readCharsetTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32, charset: []const u8) ?[]u8 {
+        if (target == 0) return null;
+        const text = (self.convertTarget(gpa, selection, target, target) catch return null) orelse return null;
+        const decoded = services.decodePlainByCharset(gpa, text, charset) catch {
+            gpa.free(text);
+            return null;
+        };
+        gpa.free(text);
+        return decoded;
+    }
+
+    fn readPlainTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
+        if (target == 0) return null;
+        const text = (self.convertTarget(gpa, selection, target, target) catch return null) orelse return null;
+        return self.decodeClipboardBytes(gpa, text) catch null;
     }
 
     fn readCompoundTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
@@ -1621,9 +1673,11 @@ pub const Window = struct {
         }
     }
 
-    fn handleXdndPosition(self: *Window, event: [32]u8) !void {
+    fn handleXdndPosition(self: *Window, event: [32]u8) !?Event {
         const source = get32(event[12..16]);
         if (source != 0) self.xdnd_source = source;
+        const time = get32(event[24..28]);
+        if (time != 0) self.noteUserTime(time);
         const flags: u32 = if (self.xdnd_has_text) 0x3 else 0x2; // accept? + no rectangle
         try sendXdndClientMessage(&self.conn, self.xdnd_source, self.conn.xdnd_status, .{
             self.window,
@@ -1632,6 +1686,32 @@ pub const Window = struct {
             0,
             self.conn.xdnd_action_copy,
         });
+        const root = xdndRootPoint(get32(event[20..24]));
+        if (self.translateRootToLocal(root.x, root.y)) |local| {
+            return .{ .pointer = .{
+                .kind = .move,
+                .x = physicalPointToLogical(local.x, self.scale),
+                .y = physicalPointToLogical(local.y, self.scale),
+            } };
+        }
+        return null;
+    }
+
+    fn translateRootToLocal(self: *Window, root_x: i32, root_y: i32) ?struct { x: i32, y: i32 } {
+        var req: [16]u8 = @splat(0);
+        req[0] = 40;
+        put16(req[2..4], 4);
+        put32(req[4..8], self.conn.screen.root);
+        put32(req[8..12], self.window);
+        put16(req[12..14], @bitCast(@as(i16, @truncate(root_x))));
+        put16(req[14..16], @bitCast(@as(i16, @truncate(root_y))));
+        writeAll(&self.conn, &req) catch return null;
+        const reply = readReplyStashing(self.gpa, &self.conn, &self.pending_events) catch return null;
+        if (reply[1] == 0) return null;
+        return .{
+            .x = @as(i16, @bitCast(get16(reply[16..18]))),
+            .y = @as(i16, @bitCast(get16(reply[18..20]))),
+        };
     }
 
     fn takeXdndDrop(self: *Window, event: [32]u8) ?Event {
@@ -1906,7 +1986,7 @@ fn createWindow(conn: *XConn, window: u32, w: u16, h: u16) !void {
         conn.screen.white_pixel,
         conn.screen.black_pixel,
         event_key_press | event_button_press | event_button_release |
-            event_enter_window | event_pointer_motion | event_exposure | event_visibility_change |
+            event_enter_window | event_leave_window | event_pointer_motion | event_exposure | event_visibility_change |
             event_structure | event_focus_change | event_property_change,
     };
     const value_mask = cw_back_pixel | cw_border_pixel | cw_event_mask;
@@ -2450,6 +2530,11 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.compound_text = try internAtom(conn, "COMPOUND_TEXT");
     conn.mime_kde5_urilist = try internAtom(conn, "application/x-kde5-urilist");
     conn.mime_moz_url_priv = try internAtom(conn, "text/x-moz-url-priv");
+    conn.mime_text_latin1 = try internAtom(conn, "text/plain;charset=ISO-8859-1");
+    conn.mime_text_latin1_alt = try internAtom(conn, "text/plain;charset=iso-8859-1");
+    conn.mime_text_latin9 = try internAtom(conn, "text/plain;charset=ISO-8859-15");
+    conn.mime_text_markdown = try internAtom(conn, "text/markdown");
+    conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
     conn.xsettings_settings = try internAtom(conn, "_XSETTINGS_SETTINGS");
     conn.wm_state = try internAtom(conn, "WM_STATE");
@@ -2460,7 +2545,7 @@ fn internSessionAtoms(conn: *XConn) !void {
 
 fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
     if (conn.net_wm_icon == 0) return;
-    const packed_icon = try services.packNetWmIcon(gpa, &.{ 16, 32 });
+    const packed_icon = try services.packNetWmIcon(gpa, &.{ 16, 32, 64, 128 });
     defer gpa.free(packed_icon);
     try changePropertyCardinals(conn, window, conn.net_wm_icon, packed_icon);
 }
@@ -3132,9 +3217,10 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
+    if (isLatin1Atom(conn, atom) or atom == conn.mime_text_latin9) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
-    if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom)) return 1;
+    if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
     return 0;
 }
 
@@ -3148,6 +3234,14 @@ fn isUriListAtom(conn: *const XConn, atom: u32) bool {
 
 fn isRtfAtom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_rtf or atom == conn.mime_rtf_app);
+}
+
+fn isLatin1Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_latin1 or atom == conn.mime_text_latin1_alt);
+}
+
+fn isMarkdownAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_markdown or atom == conn.mime_text_markdown_alt);
 }
 
 fn isDesktopFileAtom(conn: *const XConn, atom: u32) bool {
@@ -3177,7 +3271,8 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         target == conn.mime_text_plain or target == conn.mime_text_utf8 or
         target == conn.mime_text_utf8_alt or isUriListAtom(conn, target) or
         target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
-        isDesktopFileAtom(conn, target) or target == conn.compound_text;
+        isDesktopFileAtom(conn, target) or target == conn.compound_text or
+        isLatin1Atom(conn, target) or target == conn.mime_text_latin9 or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3466,6 +3561,11 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .compound_text = 119,
         .mime_kde5_urilist = 120,
         .mime_moz_url_priv = 121,
+        .mime_text_latin1 = 122,
+        .mime_text_latin1_alt = 123,
+        .mime_text_latin9 = 124,
+        .mime_text_markdown = 125,
+        .mime_text_markdown_alt = 126,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
@@ -3487,6 +3587,13 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 119));
     try std.testing.expect(isClipboardTextTarget(&conn, 120));
     try std.testing.expect(isClipboardTextTarget(&conn, 121));
+    try std.testing.expect(isClipboardTextTarget(&conn, 122));
+    try std.testing.expect(isClipboardTextTarget(&conn, 124));
+    try std.testing.expect(isClipboardTextTarget(&conn, 125));
+    try std.testing.expect(isClipboardTextTarget(&conn, 126));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 122));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 124));
+    try std.testing.expectEqual(@as(u8, 1), textAtomRank(&conn, 125));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 
     var atoms: [12]u8 = undefined;
@@ -3509,6 +3616,19 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isUriListAtom(&conn, 106));
     try std.testing.expect(isUriListAtom(&conn, 116));
     try std.testing.expect(isRtfAtom(&conn, 117));
+    try std.testing.expect(isLatin1Atom(&conn, 122));
+    try std.testing.expect(isMarkdownAtom(&conn, 125));
+    try std.testing.expectEqual(@as(u32, 1 << 5), event_leave_window);
+    const xdnd = xdndRootPoint((@as(u32, 120) << 16) | 80);
+    try std.testing.expectEqual(@as(i32, 120), xdnd.x);
+    try std.testing.expectEqual(@as(i32, 80), xdnd.y);
+}
+
+fn xdndRootPoint(packed_xy: u32) struct { x: i32, y: i32 } {
+    return .{
+        .x = @as(i16, @bitCast(@as(u16, @truncate(packed_xy >> 16)))),
+        .y = @as(i16, @bitCast(@as(u16, @truncate(packed_xy)))),
+    };
 }
 
 test "x11 dead keysyms stay non-character until the composer combines them" {

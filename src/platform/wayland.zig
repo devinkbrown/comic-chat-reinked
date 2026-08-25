@@ -35,18 +35,22 @@
 //! `application/x-moz-file`). Middle-click pastes PRIMARY as typed keys
 //! and falls back to `wl-paste --primary` when the native primary protocol
 //! is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed keys;
-//! CLIPBOARD paste does not read PRIMARY. A copy before the first seat
-//! serial is stored and advertised once a serial arrives. NumLock (Mod2
-//! lock bit or KEY_NUMLOCK) selects keypad digits. XKB groups 3–4 wrap
-//! and AltGr reads the active group's Level3. Receive-only COMPOUND_TEXT
-//! and extra KDE5/Mozilla-priv file MIME are accepted. `present()` skips
+//! CLIPBOARD paste does not read PRIMARY, and local text is used only
+//! while this client still owns the clipboard source. A copy before the
+//! first seat serial is stored and advertised once a serial arrives.
+//! Pointer leave and incoming DnD motion emit pointer moves so hover
+//! tracks the seat. NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
+//! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/15/2 `text/plain` charset MIME,
+//! Markdown, and extra KDE5/Mozilla-priv file MIME are accepted.
+//! `present()` skips
 //! commits while the toplevel is suspended; leaving suspended or gaining
 //! xdg activated exposes, and text-input disables when not activated.
 //! Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
-//! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
-//! when advertised. A supplied `XDG_ACTIVATION_TOKEN` is consumed through
+//! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` ships
+//! 32@1 and 64@2 buffers when advertised. A supplied `XDG_ACTIVATION_TOKEN` is consumed through
 //! `xdg_activation_v1` so a launcher-started window can take focus (not
 //! used for notify/urgency). `openPath` requests a fresh
 //! `xdg_activation_v1` token for `xdg-open` when advertised.
@@ -229,6 +233,24 @@ const desktop_file_mime_types = [_][]const u8{
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
 const compound_text_mime_types = [_][]const u8{
     "COMPOUND_TEXT",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const latin_mime_types = [_][]const u8{
+    "text/plain;charset=ISO-8859-1",
+    "text/plain;charset=iso-8859-1",
+    "text/plain;charset=latin1",
+    "text/plain;charset=ISO-8859-15",
+    "text/plain;charset=iso-8859-15",
+    "text/plain;charset=latin9",
+    "text/plain;charset=ISO-8859-2",
+    "text/plain;charset=iso-8859-2",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const markdown_mime_types = [_][]const u8{
+    "text/markdown",
+    "text/x-markdown",
 };
 
 pub const Key = shared_event.Key;
@@ -577,6 +599,7 @@ pub const Window = struct {
     toplevel_icon_manager_id: u32 = 0,
     toplevel_icon_id: u32 = 0,
     icon_buffer: ?Buffer = null,
+    icon_buffer_2x: ?Buffer = null,
     decoration_manager_id: u32 = 0,
     decoration_id: u32 = 0,
     decoration_mode: u32 = 0,
@@ -823,6 +846,7 @@ pub const Window = struct {
         self.buffers.deinit(self.gpa);
         if (self.cursor_buffer) |*buffer| buffer.deinit();
         if (self.icon_buffer) |*buffer| buffer.deinit();
+        if (self.icon_buffer_2x) |*buffer| buffer.deinit();
         self.committed_text.deinit(self.gpa);
         self.threaded.deinit();
         self.unloadCompose();
@@ -1406,7 +1430,8 @@ pub const Window = struct {
             },
             1 => { // leave(serial, surface)
                 if (body.len != 8) return error.InvalidWaylandMessage;
-                return null;
+                self.noteSerial(get32(body[0..4]));
+                return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
             },
             2 => { // motion(time, x, y)
                 if (body.len != 12) return error.InvalidWaylandMessage;
@@ -1913,7 +1938,7 @@ pub const Window = struct {
     }
 
     fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        if (self.clipboard_text.len != 0 and (self.data_source_id != 0 or self.primary_source_id != 0 or self.clipboard_needs_serial)) {
+        if (self.clipboard_text.len != 0 and (self.data_source_id != 0 or self.clipboard_needs_serial)) {
             return try gpa.dupe(u8, self.clipboard_text);
         }
         if (self.data_offer_id != 0 and self.offer_has_text) {
@@ -1998,6 +2023,28 @@ pub const Window = struct {
                 last_empty = text;
             } else |_| {}
         }
+        for (latin_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = services.decodePlainMime(gpa, mime, text) catch return text;
+                    gpa.free(text);
+                    return decoded;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (markdown_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
         for (rtf_mime_types) |mime| {
             if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
                 if (text.len != 0) {
@@ -2077,14 +2124,17 @@ pub const Window = struct {
                 if (self.dnd_has_text) {
                     self.acceptDrop(id, self.last_serial) catch {};
                 }
+                return .{ .pointer = .{ .kind = .move, .x = self.pointer_x, .y = self.pointer_y } };
             },
             2 => { // leave
                 self.clearDndOffer();
+                return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
             },
             3 => { // motion(time, x, y)
                 if (body.len != 12) return error.InvalidWaylandMessage;
                 self.pointer_x = @divTrunc(getI32(body[4..8]), 256);
                 self.pointer_y = @divTrunc(getI32(body[8..12]), 256);
+                return .{ .pointer = .{ .kind = .move, .x = self.pointer_x, .y = self.pointer_y } };
             },
             4 => { // drop
                 return self.takeDrop();
@@ -2294,18 +2344,35 @@ pub const Window = struct {
 
     fn installToplevelIcon(self: *Window) !void {
         if (self.toplevel_icon_manager_id == 0 or self.xdg_toplevel_id == 0) return;
+        if (self.toplevel_icon_id != 0) sendEmpty(&self.conn, self.toplevel_icon_id, 0) catch {};
+        if (self.icon_buffer) |*buffer| {
+            sendEmpty(&self.conn, buffer.id, buffer_destroy) catch {};
+            buffer.deinit();
+            self.icon_buffer = null;
+        }
+        if (self.icon_buffer_2x) |*buffer| {
+            sendEmpty(&self.conn, buffer.id, buffer_destroy) catch {};
+            buffer.deinit();
+            self.icon_buffer_2x = null;
+        }
         self.toplevel_icon_id = try self.conn.allocId();
         try sendOneU32(&self.conn, self.toplevel_icon_manager_id, toplevel_icon_create_icon, self.toplevel_icon_id);
         try sendString(&self.conn, self.gpa, self.toplevel_icon_id, toplevel_icon_set_name, "applications-internet");
-        const size: u32 = 32;
-        var pixels: [32 * 32]u32 = undefined;
-        services.fillWindowMark(&pixels, size);
-        const buffer = try self.createBuffer(size, size);
-        const destination: []u32 = std.mem.bytesAsSlice(u32, buffer.memory);
-        @memcpy(destination[0 .. 32 * 32], &pixels);
-        try sendTwoU32(&self.conn, self.toplevel_icon_id, toplevel_icon_add_buffer, buffer.id, 1);
+        var pixels_1x: [32 * 32]u32 = undefined;
+        var pixels_2x: [64 * 64]u32 = undefined;
+        services.fillWindowMark(&pixels_1x, 32);
+        services.fillWindowMark(&pixels_2x, 64);
+        const buffer_1x = try self.createBuffer(32, 32);
+        const buffer_2x = try self.createBuffer(64, 64);
+        const dest_1x: []u32 = std.mem.bytesAsSlice(u32, buffer_1x.memory);
+        const dest_2x: []u32 = std.mem.bytesAsSlice(u32, buffer_2x.memory);
+        @memcpy(dest_1x[0 .. 32 * 32], &pixels_1x);
+        @memcpy(dest_2x[0 .. 64 * 64], &pixels_2x);
+        try sendTwoU32(&self.conn, self.toplevel_icon_id, toplevel_icon_add_buffer, buffer_1x.id, 1);
+        try sendTwoU32(&self.conn, self.toplevel_icon_id, toplevel_icon_add_buffer, buffer_2x.id, 2);
         try sendTwoU32(&self.conn, self.toplevel_icon_manager_id, toplevel_icon_set_icon, self.xdg_toplevel_id, self.toplevel_icon_id);
-        self.icon_buffer = buffer;
+        self.icon_buffer = buffer_1x;
+        self.icon_buffer_2x = buffer_2x;
     }
 
     fn takeOutgoingActivationToken(self: *Window) ?[]u8 {
@@ -2439,6 +2506,7 @@ pub const Window = struct {
         if (self.cursor_buffer) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
         if (self.toplevel_icon_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_id, 0);
         if (self.icon_buffer) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
+        if (self.icon_buffer_2x) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
         if (self.toplevel_icon_manager_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_manager_id, 0);
         if (self.decoration_id != 0) try sendEmpty(&self.conn, self.decoration_id, 0);
         if (self.decoration_manager_id != 0) try sendEmpty(&self.conn, self.decoration_manager_id, 0);
@@ -2776,11 +2844,19 @@ fn knownTextMime(mime: []const u8) ?[]const u8 {
     for (compound_text_mime_types) |known| {
         if (std.ascii.eqlIgnoreCase(mime, known)) return known;
     }
+    for (latin_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (markdown_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
     if (services.isHtmlMime(mime)) return "text/html";
     if (services.isUriListMime(mime)) return "text/uri-list";
     if (services.isRtfMime(mime)) return "text/rtf";
     if (services.isDesktopFileMime(mime)) return "x-special/gnome-copied-files";
     if (services.isCompoundTextMime(mime)) return "COMPOUND_TEXT";
+    if (services.isLatinPlainMime(mime)) return "text/plain;charset=ISO-8859-1";
+    if (services.isMarkdownMime(mime)) return "text/markdown";
     return null;
 }
 
@@ -2790,7 +2866,8 @@ fn textMimeRank(mime: []const u8) u8 {
     if (std.mem.eql(u8, mime, "text/plain")) return 4;
     if (std.mem.eql(u8, mime, "UTF8_STRING")) return 3;
     if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
-    if (services.isUriListMime(mime) or services.isDesktopFileMime(mime)) return 2;
+    if (services.isLatinPlainMime(mime)) return 3;
+    if (services.isUriListMime(mime) or services.isDesktopFileMime(mime) or services.isMarkdownMime(mime)) return 2;
     if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
     if (services.isHtmlMime(mime) or services.isRtfMime(mime) or services.isCompoundTextMime(mime)) return 1;
     return 0;
@@ -3589,6 +3666,10 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/rtf"));
     try std.testing.expect(isPlainTextMime("application/rtf"));
     try std.testing.expect(isPlainTextMime("COMPOUND_TEXT"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-1"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-15"));
+    try std.testing.expect(isPlainTextMime("text/markdown"));
+    try std.testing.expect(isPlainTextMime("text/x-markdown"));
     try std.testing.expect(!isPlainTextMime("image/png"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));
@@ -3597,6 +3678,8 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("application/x-kde5-urilist"));
     try std.testing.expectEqual(textMimeRank("text/html"), textMimeRank("text/rtf"));
     try std.testing.expectEqual(textMimeRank("text/html"), textMimeRank("COMPOUND_TEXT"));
+    try std.testing.expectEqual(@as(u8, 3), textMimeRank("text/plain;charset=ISO-8859-1"));
+    try std.testing.expectEqual(@as(u8, 2), textMimeRank("text/markdown"));
 }
 
 test "keyboard-enter key array restores held modifiers" {

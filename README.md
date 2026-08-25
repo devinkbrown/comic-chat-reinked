@@ -285,15 +285,16 @@ commits behind `wl_surface.frame`, copies through
 `wl_data_device` and `zwp_primary_selection_v1` (including
 `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
 decode including receive-only `text/plain;charset=utf-16`, `text/html`,
-`text/rtf`, `text/x-uri-list`, receive-only `COMPOUND_TEXT`, and
+`text/rtf`, `text/x-uri-list`, receive-only `COMPOUND_TEXT`, receive-only
+ISO-8859-1/15 charset MIME and Markdown, and
 desktop file-list MIME including KDE5 / Mozilla-priv, and CR/LF
-normalized to LF), skips `present()` while suspended and exposes when leaving
+normalized to LF; invalid UTF-8 bytes decode as Latin-1), skips `present()` while suspended and exposes when leaving
 that state or gaining activated, disables text-input when not activated, pastes PRIMARY on
 middle-click as typed keys (`wl-paste --primary` fallback), pastes CLIPBOARD on
-Shift+Insert / XF86Paste as typed keys (CLIPBOARD does not read PRIMARY), injects
-text/`file:` drops as typed keys with `data_offer.set_actions(copy)`, shows
+Shift+Insert / XF86Paste as typed keys (CLIPBOARD does not read PRIMARY, and local text is used only while this client owns the clipboard source), injects
+text/`file:` drops as typed keys with `data_offer.set_actions(copy)` (DnD motion updates hover; leave clears it), shows
 a `wp_cursor_shape_v1` or scaled shm pointer, and sets
-`xdg_toplevel_icon_v1` when advertised. NumLock XOR Shift selects keypad digits.
+`xdg_toplevel_icon_v1` (32@1 plus 64@2) when advertised. NumLock XOR Shift selects keypad digits.
 Armenian, Georgian, Thai, extra
 Cyrillic (Ukrainian/Belarusian/Serbian/Macedonian), Latin-3, and
 Latin-4 keysyms type
@@ -308,18 +309,18 @@ per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT`, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
-TARGETS list and sending a user ConvertSelection timestamp), accepts XDND text/`file:`
-drops as typed keys (TARGETS-first, drop timestamp), pastes PRIMARY on
-middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste does not read PRIMARY), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
+`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT` / ISO-8859-1/15 / Markdown, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
+TARGETS list and sending a user ConvertSelection timestamp; invalid UTF-8 paste decodes as Latin-1), accepts XDND text/`file:`
+drops as typed keys (TARGETS-first, drop timestamp, Position hover via TranslateCoordinates, Leave clears hover), pastes PRIMARY on
+middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste does not read PRIMARY and uses local text only while we own CLIPBOARD), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE` (skipping `present()` while hidden or
 fully obscured; MapNotify, FocusIn, and leaving hidden expose), honors keyboard group bits, Mod3 Mode_switch, and
 MappingNotify without dropping queued events, resets compose on FocusOut,
-installs a scaled core pointer and `_NET_WM_ICON`, raises urgency on
+installs a scaled core pointer and `_NET_WM_ICON` at 16/32/64/128, raises urgency on
 `notify` until FocusIn (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
 present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
 `_NET_WM_USER_TIME`, `_NET_STARTUP_ID` plus a startup-notification remove
-after map, an outgoing `DESKTOP_STARTUP_ID` for `xdg-open`, EnterNotify cursor restore, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
+after map, an outgoing `DESKTOP_STARTUP_ID` for `xdg-open`, EnterNotify cursor restore and pointer move, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
 replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,
