@@ -221,9 +221,19 @@ pub const SessionLimits = struct {
     maxtargets: usize = 0,
     monitor: usize = 0,
     silence: usize = 0,
+    modes: usize = 0,
+    maxlist: usize = 0,
+    bot: u8 = 0,
+    whox: bool = false,
+    utf8only: bool = false,
 
     pub fn parseCount(value: []const u8) usize {
         return std.fmt.parseUnsigned(usize, value, 10) catch 0;
+    }
+
+    /// `MAXLIST=beIZ:100` / `b:50,e:20` — take the largest per-list cap.
+    pub fn parseMaxlist(value: []const u8) usize {
+        return parseChanlimit(value);
     }
 
     /// `CHANLIMIT=#&:50` / `#:20,&:10` — take the largest per-prefix cap.
@@ -261,6 +271,54 @@ pub const SessionLimits = struct {
     }
 };
 
+pub const Extban = struct {
+    prefix: u8 = '$',
+    types: [16]u8 = @splat(0),
+    types_len: u8 = 0,
+    present: bool = false,
+
+    pub const Parsed = struct { negated: bool, kind: u8, value: []const u8 };
+
+    /// `$,acgmrz` — prefix plus the advertised type letters.
+    pub fn parse(value: []const u8) Extban {
+        var parsed = Extban{ .present = true };
+        const comma = std.mem.indexOfScalar(u8, value, ',');
+        const prefix_part = if (comma) |index| value[0..index] else value;
+        const types_part = if (comma) |index| value[index + 1 ..] else "";
+        if (prefix_part.len != 0) parsed.prefix = prefix_part[0];
+        for (types_part) |ch| {
+            if (parsed.types_len == parsed.types.len) break;
+            if (ch <= ' ' or std.mem.indexOfScalar(u8, parsed.types[0..parsed.types_len], ch) != null) continue;
+            parsed.types[parsed.types_len] = ch;
+            parsed.types_len += 1;
+        }
+        return parsed;
+    }
+
+    pub fn allows(self: Extban, kind: u8) bool {
+        if (!self.present) return true;
+        const folded = if (kind >= 'A' and kind <= 'Z') kind + ('a' - 'A') else kind;
+        for (self.types[0..self.types_len]) |advertised| {
+            const want = if (advertised >= 'A' and advertised <= 'Z') advertised + ('a' - 'A') else advertised;
+            if (want == folded) return true;
+        }
+        return false;
+    }
+
+    /// `$a:alice`, `$~a:alice`, `$c:#chan`.
+    pub fn parseMask(self: Extban, mask: []const u8) ?Parsed {
+        if (mask.len < 3 or mask[0] != self.prefix) return null;
+        var index: usize = 1;
+        var negated = false;
+        if (mask[index] == '~') {
+            negated = true;
+            index += 1;
+        }
+        if (index + 1 >= mask.len or mask[index + 1] != ':') return null;
+        return .{ .negated = negated, .kind = mask[index], .value = mask[index + 2 ..] };
+    }
+};
+
 pub const Advertised = struct {
     casemapping: CaseMapping = .rfc1459,
     prefixes: PrefixMap = .default,
@@ -268,6 +326,7 @@ pub const Advertised = struct {
     chanmodes: ChanModes = .default,
     statusmsg: StatusMsg = .default,
     session_limits: SessionLimits = .{},
+    extban: Extban = .{},
 };
 
 test "casemapping distinguishes ascii from rfc1459 punctuation" {
@@ -359,4 +418,19 @@ test "session limits parse CHANLIMIT and clip outgoing text" {
     try std.testing.expectEqual(@as(usize, 1), SessionLimits.targetCount("anna"));
     try std.testing.expect(SessionLimits.exceedsCount(4, 5));
     try std.testing.expect(!SessionLimits.exceedsCount(0, 20));
+    try std.testing.expectEqual(@as(usize, 100), SessionLimits.parseMaxlist("beIZ:100"));
+    const extban = Extban.parse("$,acgmrz");
+    try std.testing.expect(extban.present);
+    try std.testing.expectEqual(@as(u8, '$'), extban.prefix);
+    try std.testing.expect(extban.allows('a'));
+    try std.testing.expect(extban.allows('Z'));
+    try std.testing.expect(!extban.allows('x'));
+    const account = extban.parseMask("$a:alice").?;
+    try std.testing.expect(!account.negated);
+    try std.testing.expectEqual(@as(u8, 'a'), account.kind);
+    try std.testing.expectEqualStrings("alice", account.value);
+    const muted = extban.parseMask("$~m:*!*@*").?;
+    try std.testing.expect(muted.negated);
+    try std.testing.expectEqual(@as(u8, 'm'), muted.kind);
+    try std.testing.expect(extban.parseMask("alice!*@*") == null);
 }

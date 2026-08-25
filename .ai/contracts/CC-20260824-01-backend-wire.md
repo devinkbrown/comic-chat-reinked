@@ -129,6 +129,20 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 32 leftovers in scope
+
+- Onyx Server is first-class: `onyx/session-sync` ACK plus a resume/restoration
+  skips the 001 JOIN storm; `want_rejoin` still JOINs first visits and servers
+  that do not ACK session-sync
+- Bouncer/CHATHISTORY msgid dedup; SASL SESSION-TOKEN + SCRAM-SHA-512 + EXTERNAL;
+  password-dialog IDENTIFY + persisted SASL file; account/service slashes as
+  real commands (MEMO, not TEGAMI); REGISTER/IDENTIFY replies visible; `491`
+  is a command failure
+- Honor advertised `MODES` (split MODE lines), `EXTBAN`, `MAXLIST`, `BOT`, `WHOX`,
+  `UTF8ONLY`; persist the Onyx TLS 6697 profile in existing prefs fields
+- Skip NetMeeting, remote art, `onyx/e2ee` group crypto, WEBAUTHN, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 31 leftovers in scope
 
 - Invite/kick nicknames and ban/except/invite/kick masks reject spaces in the dialog (`INVITE`/`KICK` nick is a middle parameter and would otherwise throw `InvalidIrcParameter` out of the UI)

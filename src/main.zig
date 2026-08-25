@@ -106,8 +106,8 @@ pub fn main(init: std.process.Init) !void {
         const display = if (comptime builtin.os.tag == .windows) null else minimal.environ.getPosix("DISPLAY");
         try runInteractive(
             gpa,
-            connection.host,
-            connection.port,
+            runtime.resolved_host,
+            runtime.resolved_port,
             connection.nick,
             connection.channel,
             prefer_wayland,
@@ -134,8 +134,8 @@ pub fn main(init: std.process.Init) !void {
         try runChatComic(
             gpa,
             init.io,
-            connection.host,
-            connection.port,
+            runtime.resolved_host,
+            runtime.resolved_port,
             connection.nick,
             connection.channel,
             maxlines,
@@ -156,8 +156,8 @@ pub fn main(init: std.process.Init) !void {
         try runConnect(
             gpa,
             init.io,
-            connection.host,
-            connection.port,
+            runtime.resolved_host,
+            runtime.resolved_port,
             connection.nick,
             connection.channel,
             runtime.connect_options,
@@ -249,6 +249,7 @@ const ConnectionArgs = struct {
     auth: AuthArgs = .{},
     sts_file: []const u8 = ".comicchat-sts",
     session_file: []const u8 = ".comicchat-session",
+    used_default_endpoint: bool = false,
 };
 
 fn parseConnectionArgs(args: []const []const u8, allow_extra: bool) ?ConnectionArgs {
@@ -400,6 +401,7 @@ fn parseConnectionArgs(args: []const []const u8, allow_extra: bool) ?ConnectionA
             .auth = auth,
             .sts_file = sts_file,
             .session_file = session_file,
+            .used_default_endpoint = true,
         };
     } else if (positional_count == 1) {
         result = .{
@@ -410,6 +412,7 @@ fn parseConnectionArgs(args: []const []const u8, allow_extra: bool) ?ConnectionA
             .auth = auth,
             .sts_file = sts_file,
             .session_file = session_file,
+            .used_default_endpoint = true,
         };
     } else if (positional_count == 2) {
         result = .{
@@ -480,7 +483,7 @@ fn parseProxyEndpoint(raw: []const u8) ?cc.net.transport.ProxyEndpoint {
 
 fn printConnectionUsage(command: []const u8, allow_extra: bool) void {
     std.debug.print(
-        "usage: reinked {s} <nick> (hosts: eshmaki.me or ircx.us; default: eshmaki.me #root) | <host> <nick> [#channel] | <host> [port=6697] <nick> <#channel>{s} [--ca-file <pem>] [--tls-cert <cert-and-key.pem>] [--plaintext] [--socks5 host:port|--http-proxy host:port] [--connect-timeout-ms <ms>] [--sasl-user <name> --sasl-password-file <path>] [--sasl-mechanism SCRAM-SHA-256|EXTERNAL|PLAIN] [--sts-file <path>] [--session-file <path>]\n",
+        "usage: reinked {s} <nick> (hosts: eshmaki.me or ircx.us; default: eshmaki.me #root) | <host> <nick> [#channel] | <host> [port=6697] <nick> <#channel>{s} [--ca-file <pem>] [--tls-cert <cert-and-key.pem>] [--plaintext] [--socks5 host:port|--http-proxy host:port] [--connect-timeout-ms <ms>] [--sasl-user <name> --sasl-password-file <path>] [--sasl-mechanism SCRAM-SHA-256|SCRAM-SHA-512|EXTERNAL|PLAIN|SESSION-TOKEN] [--sts-file <path>] [--session-file <path>]\n",
         .{ command, if (allow_extra) " [maxlines]" else "" },
     );
 }
@@ -534,7 +537,10 @@ const ConnectionRuntime = struct {
     authzid_storage: ?[]u8 = null,
     authcid_storage: ?[]u8 = null,
     password_storage: ?[]u8 = null,
+    session_token_storage: ?[]u8 = null,
     credentials: ?cc.net.sasl.Credentials = null,
+    resolved_host: []const u8 = "",
+    resolved_port: u16 = default_tls_port,
     preference: [1]cc.net.sasl.Mechanism = undefined,
     preference_len: usize = 0,
     executable: []const u8,
@@ -547,6 +553,15 @@ const ConnectionRuntime = struct {
         var auth = args.auth;
         applyResolvedSaslAuth(&auth, &preferences, args.nick, io);
 
+        var host = args.host;
+        var port = args.port;
+        var options = args.options;
+        if (args.used_default_endpoint and preferences.server_host.items.len != 0) {
+            host = preferences.server_host.items;
+            if (preferences.server_port != 0) port = preferences.server_port;
+            options.security = if (preferences.server_tls) .tls else .plaintext;
+        }
+
         const stores = stores: {
             var sts = try cc.net.sts_store.Store.loadFile(gpa, io, args.sts_file);
             errdefer sts.deinit();
@@ -554,7 +569,7 @@ const ConnectionRuntime = struct {
                 gpa,
                 io,
                 args.session_file,
-                args.host,
+                host,
                 auth.user orelse args.nick,
             );
             errdefer session.deinit();
@@ -569,25 +584,28 @@ const ConnectionRuntime = struct {
             .session = stores.session,
             .preferences_path = ".comicchat-preferences",
             .preferences = preferences,
-            .connect_options = args.options,
+            .connect_options = options,
             .now_seconds = now_seconds,
             .auth = auth,
             .nick = args.nick,
             .executable = executable,
+            .resolved_host = host,
+            .resolved_port = port,
         };
         errdefer runtime.deinit();
 
         // A cached STS policy always overrides a plaintext command-line
         // request. This is the downgrade protection the persisted policy is
         // intended to provide.
-        if (runtime.sts.requiresTls(args.host, now_seconds)) runtime.connect_options.security = .tls;
+        if (runtime.sts.requiresTls(host, now_seconds)) runtime.connect_options.security = .tls;
         try runtime.loadCredentials();
         runtime.persistSaslAuthPaths();
         return runtime;
     }
 
     fn loadCredentials(self: *ConnectionRuntime) !void {
-        if (!self.auth.enabled()) return;
+        const have_sasl_token = if (self.session.sasl) |token| token.len != 0 else false;
+        if (!self.auth.enabled() and !have_sasl_token) return;
         if (self.connect_options.security == .plaintext) return error.SaslRequiresTls;
 
         const selected = self.auth.mechanism;
@@ -595,10 +613,12 @@ const ConnectionRuntime = struct {
         if (wants_external and self.connect_options.client_cert_file == null)
             return error.SaslExternalRequiresClientCertificate;
         const external_available = wants_external;
-        if (!external_available and self.auth.password_file == null) return error.MissingSaslPasswordFile;
+        if (!external_available and self.auth.password_file == null and !have_sasl_token)
+            return error.MissingSaslPasswordFile;
 
         self.authzid_storage = try self.gpa.dupe(u8, self.auth.authzid orelse "");
-        self.authcid_storage = try self.gpa.dupe(u8, self.auth.user orelse self.nick);
+        self.authcid_storage = try self.gpa.dupe(u8, self.auth.user orelse
+            (if (self.session.account.len != 0) self.session.account else self.nick));
         if (self.auth.password_file) |path| {
             self.password_storage = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(64 * 1024));
         } else {
@@ -611,10 +631,14 @@ const ConnectionRuntime = struct {
             password_len -= 1;
         }
         const password = self.password_storage.?[0..password_len];
+        if (self.session.sasl) |token| {
+            self.session_token_storage = try self.gpa.dupe(u8, token);
+        }
         self.credentials = .{
             .authorization_identity = self.authzid_storage.?,
             .authentication_identity = self.authcid_storage.?,
             .password = password,
+            .session_token = if (self.session_token_storage) |token| token else &.{},
             .external_available = external_available,
         };
         if (selected) |mechanism| {
@@ -698,6 +722,11 @@ const ConnectionRuntime = struct {
             std.crypto.secureZero(u8, storage);
             self.gpa.free(storage);
             self.password_storage = null;
+        }
+        if (self.session_token_storage) |storage| {
+            std.crypto.secureZero(u8, storage);
+            self.gpa.free(storage);
+            self.session_token_storage = null;
         }
         self.credentials = null;
     }
@@ -1715,6 +1744,9 @@ fn connectionFailureStatus(err: anyerror) []const u8 {
         error.UnexpectedConnectClose, error.ConnectionFailed => "Connection failed (could not connect) - click for settings",
         error.StsUpgradeRequired => "Connection failed (TLS upgrade required) - click for settings",
         error.ProxyConnectFailed, error.ProxyAuthenticationRequired, error.ProxyHandshakeTimeout, error.ProxyClosed, error.InvalidProxyTarget, error.InvalidProxyResponse => "Connection failed (proxy) - click for settings",
+        error.SaslRequiresTls => "Connection failed (SASL needs TLS) - click for settings",
+        error.SaslExternalRequiresClientCertificate => "Connection failed (SASL EXTERNAL needs a client certificate) - click for settings",
+        error.MissingSaslPasswordFile => "Connection failed (SASL password file missing) - click for settings",
         else => "Connection failed - click for settings",
     };
 }
@@ -2686,6 +2718,8 @@ fn applyDialogAction(
         };
         resetChatConnectionState(state, workspace, workspace.gpa);
         state.status = "connecting";
+        network.runtime.preferences.setServerProfile(request.host, request.port, request.security == .tls) catch {};
+        network.runtime.preferences.saveFile(io, network.runtime.preferences_path) catch {};
         _ = view.closeDialog();
         return;
     }
@@ -3352,6 +3386,10 @@ fn applyDialogAction(
                         view.setDialogNotice("Use one nickname mask without spaces.");
                         return;
                     }
+                    if (!extbanMaskAllowed(workspace.extban, mask)) {
+                        view.setDialogNotice("That extended ban type is not advertised by this server.");
+                        return;
+                    }
                     switch (list.kind) {
                         .ban => try client.clearBan(room.name, mask),
                         .except => try client.clearException(room.name, mask),
@@ -3362,6 +3400,10 @@ fn applyDialogAction(
                 .add => {
                     if (!isSingleIrcToken(mask)) {
                         view.setDialogNotice("Use one nickname mask without spaces.");
+                        return;
+                    }
+                    if (!extbanMaskAllowed(workspace.extban, mask)) {
+                        view.setDialogNotice("That extended ban type is not advertised by this server.");
                         return;
                     }
                     switch (list.kind) {
@@ -3582,6 +3624,40 @@ fn applyDialogAction(
                     }
                 }
             }
+        },
+        .password => {
+            const account = value;
+            const password = view.dialogValueAt(1);
+            if (account.len == 0 or password.len == 0) {
+                view.setDialogNotice("Enter the account name and password.");
+                return;
+            }
+            if (hasWireControl(account) or hasWireControl(password) or std.mem.indexOfScalar(u8, account, ' ') != null) {
+                view.setDialogNotice("Account must be one token; the password must stay on one line.");
+                return;
+            }
+            const password_file = network.runtime.auth.password_file orelse default_sasl_password_file;
+            cc.client.files.saveBytesAtomic(io, gpa, password_file, password) catch {
+                view.setDialogNotice("Could not store the account password file.");
+                return;
+            };
+            network.runtime.preferences.setSaslAuth(account, password_file) catch {
+                view.setDialogNotice("Could not remember the account name.");
+                return;
+            };
+            network.runtime.preferences.saveFile(io, network.runtime.preferences_path) catch {};
+            network.runtime.auth.user = network.runtime.preferences.sasl_user.items;
+            network.runtime.auth.password_file = network.runtime.preferences.sasl_password_file.items;
+            if (maybe_client) |client| {
+                client.identify(account, password, "") catch |err| switch (err) {
+                    error.InvalidIrcParameter => {
+                        view.setDialogNotice("Enter a valid account name and password.");
+                        return;
+                    },
+                    else => return err,
+                };
+            }
+            state.status = "signing in";
         },
         else => {},
     }
@@ -3862,7 +3938,11 @@ test "connection failures remain actionable" {
     try std.testing.expectEqualStrings("Connection failed (TLS) - click for settings", connectionFailureStatus(error.TlsReadFailed));
     try std.testing.expectEqualStrings("Connection failed (server closed the session) - click for settings", connectionFailureStatus(error.IrcServerError));
     try std.testing.expectEqualStrings("Connection failed - click for settings", connectionFailureStatus(error.Unexpected));
+    try std.testing.expectEqualStrings("Connection failed (SASL needs TLS) - click for settings", connectionFailureStatus(error.SaslRequiresTls));
+    try std.testing.expectEqualStrings("Connection failed (SASL EXTERNAL needs a client certificate) - click for settings", connectionFailureStatus(error.SaslExternalRequiresClientCertificate));
+    try std.testing.expectEqualStrings("Connection failed (SASL password file missing) - click for settings", connectionFailureStatus(error.MissingSaslPasswordFile));
     try std.testing.expect(std.mem.indexOf(u8, connectionFailureStatus(error.OutOfMemory), "OutOfMemory") == null);
+    try std.testing.expect(std.mem.indexOf(u8, connectionFailureStatus(error.SaslRequiresTls), "SaslRequiresTls") == null);
     try std.testing.expectEqualStrings("Waiting", transferStatusLabel(.waiting));
     try std.testing.expectEqualStrings("Transferring", transferStatusLabel(.running));
     try std.testing.expectEqualStrings("Failed", transferStatusLabel(.failed));
@@ -3936,6 +4016,11 @@ fn handleWorkspaceInputKey(
             const png = cc.render.png.encode(gpa, view.pixels(), view.width(), view.height()) catch return true;
             defer gpa.free(png);
             cc.client.files.saveBytesAtomic(io, gpa, path, png) catch return true;
+            const consumed = try editor.take();
+            gpa.free(consumed);
+            return true;
+        }
+        if (try sendOnyxServiceSlash(maybe_client, workspace, text)) {
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
@@ -4159,7 +4244,9 @@ fn processWorkspaceMessages(
                 try workspace.setSelfNick(assigned);
                 try network.adoptNick(assigned);
             }
-            if (client.hasRestorationTargets()) {
+            if (client.projectsSessionChannels()) {
+                for (workspace.rooms.items) |*room| room.joined = false;
+            } else if (client.hasRestorationTargets()) {
                 for (workspace.rooms.items) |*room| {
                     room.joined = false;
                     try requestReconnectJoin(workspace, client, room);
@@ -4320,10 +4407,11 @@ fn processWorkspaceMessages(
 
 fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch
-        return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE");
+        return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE") or
+            isOnyxServiceReply(command);
     return switch (code) {
         2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
-        301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
+        301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 354, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
         322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
         710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733 => true,
         801...819, 824, 825, 900...905, 907, 908 => true,
@@ -4600,7 +4688,21 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "924") or
         std.mem.eql(u8, command, "925") or
         std.mem.eql(u8, command, "906") or
-        std.mem.eql(u8, command, "734");
+        std.mem.eql(u8, command, "734") or
+        std.mem.eql(u8, command, "491");
+}
+
+fn isOnyxServiceReply(command: []const u8) bool {
+    const names = .{
+        "REGISTER",    "VERIFY",     "RESETPASS", "IDENTIFY", "LOGOUT",  "DROP",
+        "ACCOUNTINFO", "ACCOUNTSET", "SASLINFO",  "GHOST",    "RECOVER", "RELEASE",
+        "CHANNEL",     "CS",         "AUTOJOIN",  "GROUP",    "SEEN",    "MEMO",
+        "TEGAMI",      "VHOST",      "CERTADD",   "CERTLIST", "CERTDEL", "SESSIONTOKEN",
+    };
+    inline for (names) |name| {
+        if (std.ascii.eqlIgnoreCase(command, name)) return true;
+    }
+    return false;
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
@@ -4798,6 +4900,132 @@ fn sessionLimitFailureNotice(
         else
             "You have joined as many rooms as the server allows.",
     };
+}
+
+fn sendOnyxServiceSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    text: []const u8,
+) !bool {
+    if (text.len < 2 or text[0] != '/') return false;
+    const body = text[1..];
+    const split = std.mem.indexOfScalar(u8, body, ' ') orelse body.len;
+    const verb = body[0..split];
+    const rest = std.mem.trim(u8, if (split < body.len) body[split + 1 ..] else "", " \t");
+    var words: [6][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.tokenizeAny(u8, rest, " \t");
+    while (it.next()) |word| {
+        if (count == words.len) break;
+        words[count] = word;
+        count += 1;
+    }
+    const client = maybe_client orelse {
+        if (!isOnyxServiceSlash(verb)) return false;
+        try appendSessionNotice(workspace, "Connect before using account commands.");
+        return true;
+    };
+    if (std.ascii.eqlIgnoreCase(verb, "identify")) {
+        if (count < 2) {
+            try appendSessionNotice(workspace, "Usage: /identify <account> <password> [code]");
+            return true;
+        }
+        client.identify(words[0], words[1], if (count > 2) words[2] else "") catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "register")) {
+        if (count < 3) {
+            try appendSessionNotice(workspace, "Usage: /register <account|*> <email|*> <password>");
+            return true;
+        }
+        const password_copy = try workspace.gpa.dupe(u8, words[2]);
+        defer workspace.gpa.free(password_copy);
+        client.accountRegister(words[0], words[1], password_copy) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "verify")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /verify [account] <code>");
+            return true;
+        }
+        const code_copy = try workspace.gpa.dupe(u8, words[count - 1]);
+        defer workspace.gpa.free(code_copy);
+        const account = if (count > 1) words[0] else "*";
+        client.accountVerify(account, code_copy) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "logout")) {
+        try client.logoutAccount();
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "accountinfo")) {
+        try client.accountInfo(if (count == 0) null else words[0]);
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "saslinfo")) {
+        try client.saslInfo();
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "ghost") or std.ascii.eqlIgnoreCase(verb, "drop")) {
+        if (count < 2) {
+            try appendSessionNotice(workspace, "Usage: /ghost|/drop <nick-or-account> <password>");
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(verb, "ghost"))
+            try client.ghost(words[0], words[1])
+        else
+            try client.dropAccount(words[0], words[1]);
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "recover") or std.ascii.eqlIgnoreCase(verb, "release") or std.ascii.eqlIgnoreCase(verb, "seen")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "That command needs a nickname or account.");
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(verb, "recover"))
+            try client.recover(words[0])
+        else if (std.ascii.eqlIgnoreCase(verb, "release"))
+            try client.release(words[0])
+        else
+            try client.sendService("SEEN", words[0..count]);
+        return true;
+    }
+    if (!isOnyxServiceSlash(verb)) return false;
+    var command_buf: [16]u8 = undefined;
+    if (verb.len > command_buf.len) return false;
+    const command = std.ascii.upperString(&command_buf, verb);
+    const mapped = if (std.ascii.eqlIgnoreCase(command, "CS"))
+        "CHANNEL"
+    else if (std.ascii.eqlIgnoreCase(command, "TEGAMI"))
+        "MEMO"
+    else
+        command;
+    try client.sendService(mapped, words[0..count]);
+    return true;
+}
+
+fn isOnyxServiceSlash(verb: []const u8) bool {
+    return isOnyxServiceReply(verb) or std.ascii.eqlIgnoreCase(verb, "identify") or
+        std.ascii.eqlIgnoreCase(verb, "session");
+}
+
+fn rejectServiceIrc(workspace: *cc.client.workspace.Workspace, err: anyerror) !void {
+    const line = switch (err) {
+        error.InvalidIrcParameter => "That account command is not allowed.",
+        error.AccountRegistrationRequiresTls => "Account commands require a TLS connection.",
+        error.AccountRegistrationNotEnabled => "This server did not advertise account registration.",
+        else => return err,
+    };
+    try appendSessionNotice(workspace, line);
 }
 
 fn requestJoinWithKey(
@@ -5700,6 +5928,11 @@ fn isSingleIrcToken(value: []const u8) bool {
     return value.len != 0 and std.mem.indexOfAny(u8, value, " \t\r\n\x00\x01") == null;
 }
 
+fn extbanMaskAllowed(extban: cc.net.irc_map.Extban, mask: []const u8) bool {
+    const parsed = extban.parseMask(mask) orelse return true;
+    return parsed.value.len != 0 and extban.allows(parsed.kind);
+}
+
 test "portable transfer and call inputs reject unsafe values" {
     var safe_name: [64]u8 = undefined;
     try std.testing.expectEqualStrings("payload.exe", safeIncomingFilename("../../payload.exe", &safe_name));
@@ -5721,6 +5954,10 @@ test "portable transfer and call inputs reject unsafe values" {
     try std.testing.expect(!isSingleIrcToken("alice smith"));
     try std.testing.expect(!isSingleIrcToken("alice!*@* extra"));
     try std.testing.expect(!isSingleIrcToken("alice\nnick"));
+    const extban = cc.net.irc_map.Extban.parse("$,acgmrz");
+    try std.testing.expect(extbanMaskAllowed(extban, "$a:alice"));
+    try std.testing.expect(extbanMaskAllowed(extban, "alice!*@*"));
+    try std.testing.expect(!extbanMaskAllowed(extban, "$x:nope"));
 }
 
 test "pending UDI is discarded and bounded" {
@@ -6596,6 +6833,18 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("733"));
     try std.testing.expect(isCommandFailureNumeric("734"));
     try std.testing.expect(!isVisibleServerWorkflowReply("734"));
+    try std.testing.expect(isCommandFailureNumeric("491"));
+    try std.testing.expect(isOnyxServiceReply("REGISTER"));
+    try std.testing.expect(isOnyxServiceReply("IDENTIFY"));
+    try std.testing.expect(isOnyxServiceReply("MEMO"));
+    try std.testing.expect(isOnyxServiceReply("CHANNEL"));
+    try std.testing.expect(isOnyxServiceReply("AUTOJOIN"));
+    try std.testing.expect(isOnyxServiceReply("CERTADD"));
+    try std.testing.expect(isVisibleServerWorkflowReply("REGISTER"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SASLINFO"));
+    try std.testing.expect(isVisibleServerWorkflowReply("MEMO"));
+    try std.testing.expect(isVisibleServerWorkflowReply("VHOST"));
+    try std.testing.expect(isVisibleServerWorkflowReply("354"));
     try std.testing.expect(isVisibleServerWorkflowReply("904"));
     try std.testing.expect(isCommandFailureNumeric("421"));
     try std.testing.expect(isNickFailureNumeric("433"));
@@ -6952,9 +7201,18 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
         client.out.deinit(gpa);
         gpa.free(owned_host);
     }
-    if (client.features) |*owned_features|
+    if (client.features) |*owned_features| {
         _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& STATUSMSG=!.@+ CHANMODES=beIZ,k,lfj,imnstCTNMSgWOAVUFD NICKLEN=4 CHANNELLEN=6 KEYLEN=3 TOPICLEN=5 AWAYLEN=3 KICKLEN=4 :are supported"));
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me NETWORK=Onyx MODES=1 MAXLIST=beIZ:100 EXTBAN=$,acgmrz BOT=B WHOX UTF8ONLY :are supported"));
+    }
     applyClientIsupport(&workspace, &client);
+    try std.testing.expect(workspace.extban.allows('a'));
+    try std.testing.expect(!workspace.extban.allows('x'));
+    try std.testing.expectEqual(@as(usize, 1), workspace.session_limits.modes);
+    try std.testing.expectEqual(@as(usize, 100), workspace.session_limits.maxlist);
+    try std.testing.expect(workspace.session_limits.whox);
+    try std.testing.expect(workspace.session_limits.utf8only);
+    try std.testing.expectEqual(@as(u8, 'B'), workspace.session_limits.bot);
     try std.testing.expectEqual(cc.net.irc_map.CaseMapping.ascii, workspace.casemapping);
     try std.testing.expect(workspace.prefixes.isSymbol('*'));
     try std.testing.expect(!workspace.prefixes.isSymbol('~'));
@@ -7069,6 +7327,49 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expect(workspace.statusmsg.contains('~'));
     try std.testing.expectEqual(@as(usize, 0), workspace.session_limits.nicklen);
     try std.testing.expectEqual(@as(usize, 0), workspace.session_limits.chanlimit);
+}
+
+test "Onyx account slashes and session-sync skip a JOIN storm" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const owned_host = try gpa.dupe(u8, "eshmaki.me");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/identify alice secret"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "IDENTIFY alice") != null);
+    var password = [_]u8{ 'h', 'o', 'r', 's', 'e' };
+    try client.accountRegister("alice", "*", &password);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "REGISTER alice *") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/cs info #zig"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CHANNEL info") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tegami list"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MEMO") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEGAMI") == null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/session list"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SESSION") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/certadd"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CERTADD") != null);
+    try std.testing.expect(!client.projectsSessionChannels());
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

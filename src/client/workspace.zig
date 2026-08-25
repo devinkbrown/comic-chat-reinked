@@ -79,6 +79,7 @@ pub const Workspace = struct {
     chanmodes: irc_map.ChanModes = .default,
     statusmsg: irc_map.StatusMsg = .default,
     session_limits: irc_map.SessionLimits = .{},
+    extban: irc_map.Extban = .{},
 
     pub fn init(gpa: std.mem.Allocator, self_nick: []const u8) !Workspace {
         return .{ .gpa = gpa, .self_nick = try gpa.dupe(u8, self_nick) };
@@ -105,6 +106,7 @@ pub const Workspace = struct {
             .chanmodes = self.chanmodes,
             .statusmsg = self.statusmsg,
             .session_limits = self.session_limits,
+            .extban = self.extban,
         };
     }
 
@@ -196,6 +198,7 @@ pub const Workspace = struct {
         self.chanmodes = maps.chanmodes;
         self.statusmsg = maps.statusmsg;
         self.session_limits = maps.session_limits;
+        self.extban = maps.extban;
         for (self.rooms.items) |*room| room.transcript.applyIsupport(maps);
     }
 

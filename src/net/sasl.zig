@@ -15,7 +15,9 @@ const std = @import("std");
 const message = @import("message.zig");
 
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+const HmacSha512 = std.crypto.auth.hmac.sha2.HmacSha512;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha512 = std.crypto.hash.sha2.Sha512;
 const b64_encoder = std.base64.standard.Encoder;
 const b64_decoder = std.base64.standard.Decoder;
 
@@ -38,14 +40,18 @@ pub const Error = std.mem.Allocator.Error || error{
     OutputTooLong,
 };
 
-pub const Mechanism = enum(u2) {
+pub const Mechanism = enum {
+    session_token,
     scram_sha_256,
+    scram_sha_512,
     external,
     plain,
 
     pub fn wireName(self: Mechanism) []const u8 {
         return switch (self) {
+            .session_token => "SESSION-TOKEN",
             .scram_sha_256 => "SCRAM-SHA-256",
+            .scram_sha_512 => "SCRAM-SHA-512",
             .external => "EXTERNAL",
             .plain => "PLAIN",
         };
@@ -59,7 +65,7 @@ pub const Mechanism = enum(u2) {
     }
 };
 
-pub const default_preference = [_]Mechanism{ .scram_sha_256, .external, .plain };
+pub const default_preference = [_]Mechanism{ .session_token, .scram_sha_256, .scram_sha_512, .external, .plain };
 
 /// Mutable storage is supplied and remains owned by the caller. `Session`
 /// borrows these slices and wipes all three on success, terminal failure, or
@@ -68,6 +74,7 @@ pub const Credentials = struct {
     authorization_identity: []u8,
     authentication_identity: []u8,
     password: []u8,
+    session_token: []u8 = &.{},
     external_available: bool = false,
     zeroized: bool = false,
 
@@ -75,6 +82,7 @@ pub const Credentials = struct {
         std.crypto.secureZero(u8, self.authorization_identity);
         std.crypto.secureZero(u8, self.authentication_identity);
         std.crypto.secureZero(u8, self.password);
+        if (self.session_token.len != 0) std.crypto.secureZero(u8, self.session_token);
         self.zeroized = true;
     }
 };
@@ -132,7 +140,8 @@ pub const Session = struct {
     client_nonce: []const u8 = "",
     gs2_header: std.ArrayList(u8) = .empty,
     client_first_bare: std.ArrayList(u8) = .empty,
-    expected_server_signature: [Sha256.digest_length]u8 = @splat(0),
+    expected_server_signature: [Sha512.digest_length]u8 = @splat(0),
+    expected_server_signature_len: usize = 0,
     server_signature_ready: bool = false,
     server_signature_verified: bool = false,
 
@@ -184,7 +193,7 @@ pub const Session = struct {
             return .mechanisms_updated;
         }
         if (std.mem.eql(u8, msg.command, "903")) {
-            if (self.selected == .scram_sha_256 and !self.server_signature_verified) {
+            if ((self.selected == .scram_sha_256 or self.selected == .scram_sha_512) and !self.server_signature_verified) {
                 // A success numeric without a verified server-final is a
                 // hard auth failure. Return `.failed` so registration can
                 // still emit CAP END instead of stalling in waiting_sasl.
@@ -236,7 +245,10 @@ pub const Session = struct {
     fn mechanismUsable(self: *const Session, mechanism: Mechanism) bool {
         return switch (mechanism) {
             .external => self.credentials.external_available,
-            .plain, .scram_sha_256 => self.credentials.authentication_identity.len != 0,
+            .session_token => self.credentials.session_token.len != 0 and
+                self.credentials.authentication_identity.len != 0,
+            .plain, .scram_sha_256, .scram_sha_512 => self.credentials.authentication_identity.len != 0 and
+                self.credentials.password.len != 0,
         };
     }
 
@@ -276,16 +288,19 @@ pub const Session = struct {
             .awaiting_initial => switch (selected) {
                 .plain => if (challenge.len == 0) self.sendPlain(out) else error.InvalidScramMessage,
                 .external => if (challenge.len == 0) self.sendExternal(out) else error.InvalidScramMessage,
-                .scram_sha_256 => if (challenge.len == 0) self.sendScramFirst(out) else error.InvalidScramMessage,
+                .session_token => if (challenge.len == 0) self.sendSessionToken(out) else error.InvalidScramMessage,
+                .scram_sha_256, .scram_sha_512 => if (challenge.len == 0) self.sendScramFirst(out) else error.InvalidScramMessage,
             },
-            .awaiting_server_first => if (selected == .scram_sha_256)
-                self.sendScramFinal(out, challenge)
-            else
-                error.InvalidState,
-            .awaiting_server_final => if (selected == .scram_sha_256)
-                self.verifyScramFinal(out, challenge)
-            else
-                error.InvalidState,
+            .awaiting_server_first => switch (selected) {
+                .scram_sha_256 => self.sendScramFinal(out, challenge, Sha256, HmacSha256),
+                .scram_sha_512 => self.sendScramFinal(out, challenge, Sha512, HmacSha512),
+                else => error.InvalidState,
+            },
+            .awaiting_server_final => switch (selected) {
+                .scram_sha_256 => self.verifyScramFinal(out, challenge),
+                .scram_sha_512 => self.verifyScramFinal(out, challenge),
+                else => error.InvalidState,
+            },
             else => error.InvalidState,
         };
     }
@@ -324,6 +339,24 @@ pub const Session = struct {
         return .response_sent;
     }
 
+    fn sendSessionToken(self: *Session, out: *std.ArrayList(u8)) Error!Event {
+        const credentials = self.credentials;
+        try validatePlainField(credentials.authentication_identity, false);
+        try validatePlainField(credentials.session_token, false);
+        const length = credentials.authentication_identity.len + 1 + credentials.session_token.len;
+        const raw = try self.gpa.alloc(u8, length);
+        defer {
+            std.crypto.secureZero(u8, raw);
+            self.gpa.free(raw);
+        }
+        @memcpy(raw[0..credentials.authentication_identity.len], credentials.authentication_identity);
+        raw[credentials.authentication_identity.len] = 0;
+        @memcpy(raw[credentials.authentication_identity.len + 1 ..], credentials.session_token);
+        try appendPayload(out, self.gpa, raw);
+        self.phase = .awaiting_result;
+        return .response_sent;
+    }
+
     fn sendScramFirst(self: *Session, out: *std.ArrayList(u8)) Error!Event {
         try validateScramPassword(self.credentials.password);
         self.gs2_header.clearRetainingCapacity();
@@ -349,7 +382,13 @@ pub const Session = struct {
         return .response_sent;
     }
 
-    fn sendScramFinal(self: *Session, out: *std.ArrayList(u8), server_first: []const u8) Error!Event {
+    fn sendScramFinal(
+        self: *Session,
+        out: *std.ArrayList(u8),
+        server_first: []const u8,
+        comptime Hash: type,
+        comptime Hmac: type,
+    ) Error!Event {
         const parsed = try parseServerFirst(server_first, self.client_nonce);
         const salt_len = b64_decoder.calcSizeForSlice(parsed.salt) catch return error.InvalidBase64;
         if (salt_len > 1024) return error.InvalidScramMessage;
@@ -379,36 +418,41 @@ pub const Session = struct {
         try auth_message.append(self.gpa, ',');
         try auth_message.appendSlice(self.gpa, final_without_proof.items);
 
-        var salted_password: [Sha256.digest_length]u8 = undefined;
+        var salted_password: [Hash.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &salted_password);
         std.crypto.pwhash.pbkdf2(
             &salted_password,
             self.credentials.password,
             salt,
             parsed.iterations,
-            HmacSha256,
+            Hmac,
         ) catch return error.InvalidScramIterations;
 
-        var client_key: [Sha256.digest_length]u8 = undefined;
+        var client_key: [Hash.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &client_key);
-        HmacSha256.create(&client_key, "Client Key", &salted_password);
-        var stored_key: [Sha256.digest_length]u8 = undefined;
+        Hmac.create(&client_key, "Client Key", &salted_password);
+        var stored_key: [Hash.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &stored_key);
-        Sha256.hash(&client_key, &stored_key, .{});
-        var client_signature: [Sha256.digest_length]u8 = undefined;
+        Hash.hash(&client_key, &stored_key, .{});
+        var client_signature: [Hash.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &client_signature);
-        HmacSha256.create(&client_signature, auth_message.items, &stored_key);
-        var proof: [Sha256.digest_length]u8 = undefined;
+        Hmac.create(&client_signature, auth_message.items, &stored_key);
+        var proof: [Hash.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &proof);
         for (&proof, 0..) |*byte, index| byte.* = client_key[index] ^ client_signature[index];
 
-        var server_key: [Sha256.digest_length]u8 = undefined;
+        var server_key: [Hash.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &server_key);
-        HmacSha256.create(&server_key, "Server Key", &salted_password);
-        HmacSha256.create(&self.expected_server_signature, auth_message.items, &server_key);
+        Hmac.create(&server_key, "Server Key", &salted_password);
+        var expected: [Hash.digest_length]u8 = undefined;
+        defer std.crypto.secureZero(u8, &expected);
+        Hmac.create(&expected, auth_message.items, &server_key);
+        std.crypto.secureZero(u8, &self.expected_server_signature);
+        @memcpy(self.expected_server_signature[0..Hash.digest_length], &expected);
+        self.expected_server_signature_len = Hash.digest_length;
         self.server_signature_ready = true;
 
-        var proof_encoded: [b64_encoder.calcSize(Sha256.digest_length)]u8 = undefined;
+        var proof_encoded: [b64_encoder.calcSize(Hash.digest_length)]u8 = undefined;
         const proof_text = b64_encoder.encode(&proof_encoded, &proof);
         var final: std.ArrayList(u8) = .empty;
         defer secureDeinit(&final, self.gpa);
@@ -432,11 +476,11 @@ pub const Session = struct {
             .verifier => |value| value,
         };
         const decoded_len = b64_decoder.calcSizeForSlice(verifier) catch return error.InvalidBase64;
-        if (decoded_len != Sha256.digest_length) return self.abortBadSignature(out);
-        var decoded: [Sha256.digest_length]u8 = undefined;
+        if (decoded_len != self.expected_server_signature_len) return self.abortBadSignature(out);
+        var decoded: [Sha512.digest_length]u8 = undefined;
         defer std.crypto.secureZero(u8, &decoded);
-        b64_decoder.decode(&decoded, verifier) catch return error.InvalidBase64;
-        if (!std.crypto.timing_safe.eql([Sha256.digest_length]u8, decoded, self.expected_server_signature))
+        b64_decoder.decode(decoded[0..decoded_len], verifier) catch return error.InvalidBase64;
+        if (!std.mem.eql(u8, decoded[0..decoded_len], self.expected_server_signature[0..decoded_len]))
             return self.abortBadSignature(out);
         self.server_signature_verified = true;
         try appendCommand(out, self.gpa, "+");
@@ -455,6 +499,7 @@ pub const Session = struct {
         secureClearList(&self.gs2_header);
         secureClearList(&self.client_first_bare);
         std.crypto.secureZero(u8, &self.expected_server_signature);
+        self.expected_server_signature_len = 0;
         self.server_signature_ready = false;
         self.server_signature_verified = false;
         self.selected = null;
@@ -907,6 +952,7 @@ test "SCRAM rejects a non-extending nonce and aborts a bad server signature" {
     session.phase = .awaiting_server_final;
     session.server_signature_ready = true;
     session.expected_server_signature = @splat(0xaa);
+    session.expected_server_signature_len = Sha256.digest_length;
     out.clearRetainingCapacity();
     try std.testing.expectError(
         error.ServerSignatureMismatch,
@@ -973,4 +1019,29 @@ test "secureClear wipes retained capacity, including bytes past the current leng
     secureClear(&out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     for (out.items.ptr[0..out.capacity]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+test "SESSION-TOKEN sends account and sst credential after the empty challenge" {
+    const gpa = std.testing.allocator;
+    var authzid: [0]u8 = .{};
+    var authcid = [_]u8{ 'a', 'l', 'i', 'c', 'e' };
+    var password: [0]u8 = .{};
+    var token = [_]u8{ 's', 's', 't', '_', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };
+    var credentials = Credentials{
+        .authorization_identity = &authzid,
+        .authentication_identity = &authcid,
+        .password = &password,
+        .session_token = &token,
+    };
+    const preference = [_]Mechanism{.session_token};
+    var session = Session.init(gpa, &credentials, .{ .preference = &preference });
+    defer session.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try session.start(&out, "nonce");
+    try std.testing.expectEqualStrings("AUTHENTICATE SESSION-TOKEN\r\n", out.items);
+    out.clearRetainingCapacity();
+    _ = try session.handle(&out, message.parse("AUTHENTICATE +"));
+    try std.testing.expect(std.mem.startsWith(u8, out.items, "AUTHENTICATE "));
+    try std.testing.expect(std.mem.endsWith(u8, out.items, "\r\n"));
 }
