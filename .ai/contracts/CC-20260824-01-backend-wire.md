@@ -175,6 +175,18 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 46 leftovers in scope
+
+- Inbound `workspace.ensure` on live JOIN/PRIVMSG stays a room notice
+  (`TooManyRooms` / `InvalidRoomName`); it does not tear the receive loop
+- After 001, `resubscribeSessionControls` also restores MONITOR for exact
+  notify nicks (same as away/silence)
+- Composer send with an unknown character notices instead of `UnknownAvatar`
+- `/cs SET` and `/vhost DENY` keep the rest of the line as one trailing
+  argument
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 45 leftovers in scope
 
 - CTCP replies, profile/avatar announces, and dest `MODE` after `470` ignore

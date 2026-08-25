@@ -4107,6 +4107,16 @@ fn leftoverComposerSlash(text: []const u8) bool {
     return true;
 }
 
+fn slashRestAfter(rest: []const u8, skip: usize) []const u8 {
+    var remaining = std.mem.trim(u8, rest, " \t");
+    var n: usize = 0;
+    while (n < skip) : (n += 1) {
+        const split = std.mem.indexOfScalar(u8, remaining, ' ') orelse return "";
+        remaining = std.mem.trim(u8, remaining[split + 1 ..], " \t");
+    }
+    return remaining;
+}
+
 fn joinSlashWords(buf: []u8, words: []const []const u8, sep: u8) ?[]const u8 {
     if (words.len == 0) return null;
     var len: usize = 0;
@@ -4409,8 +4419,9 @@ fn processWorkspaceMessages(
             for (workspace.rooms.items) |*room| redraw = (try room.transcript.observeIrc(&msg, room.name, nick)) or redraw;
         } else if (messageRoom(&msg, workspace)) |room_name| {
             if (room_name.len > 1 and workspace.chantypes.contains(room_name[0])) {
-                const room_index = try workspace.ensure(room_name);
-                redraw = (try workspace.rooms.items[room_index].transcript.observeIrc(&msg, room_name, nick)) or redraw;
+                if (try ensureIncomingRoom(workspace, room_name)) |room_index| {
+                    redraw = (try workspace.rooms.items[room_index].transcript.observeIrc(&msg, room_name, nick)) or redraw;
+                }
             }
         }
         if (std.ascii.eqlIgnoreCase(msg.command, "PART")) {
@@ -4567,7 +4578,7 @@ fn processWorkspaceMessages(
                 try appendSessionNotice(workspace, notice);
             state.join_requested = true;
             state.status = "joining";
-            resubscribeSessionControls(client, state, workspace);
+            resubscribeSessionControls(client, state, workspace, preferences);
             if (workspaceTranscriptRoom(workspace, channel)) |welcome_room|
                 try appendServerWorkflowReply(&welcome_room.transcript, &msg);
             redraw = true;
@@ -4581,7 +4592,10 @@ fn processWorkspaceMessages(
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "";
             const joined_channel = msg.param(0) orelse "";
             if (std.ascii.eqlIgnoreCase(who, workspace.self_nick)) {
-                const room_index = try workspace.ensure(joined_channel);
+                const room_index = try ensureIncomingRoom(workspace, joined_channel) orelse {
+                    redraw = true;
+                    continue;
+                };
                 var room = &workspace.rooms.items[room_index];
                 room.joined = true;
                 room.setWantRejoin(true);
@@ -5190,6 +5204,16 @@ fn canLeaveActiveRoom(room_count: usize) bool {
 
 fn roomNeedsReconnectJoin(room: *const cc.client.workspace.Room, client: *const cc.net.client.Client) bool {
     return room.want_rejoin and !client.restoresChannel(room.name);
+}
+
+fn ensureIncomingRoom(workspace: *cc.client.workspace.Workspace, room_name: []const u8) !?usize {
+    return workspace.ensure(room_name) catch |err| switch (err) {
+        error.TooManyRooms, error.InvalidRoomName => {
+            try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+            return null;
+        },
+        else => return err,
+    };
 }
 
 fn roomEnsureFailureNotice(err: anyerror) []const u8 {
@@ -6025,6 +6049,40 @@ fn sendOnyxServiceSlash(
         try appendSessionNotice(workspace, "Usage: /memo|/tegami LIST|CLEAR|SEND|FORWARD|IGNORE ...");
         return true;
     }
+    if ((std.ascii.eqlIgnoreCase(verb, "cs") or std.ascii.eqlIgnoreCase(verb, "channel")) and
+        count >= 1 and std.ascii.eqlIgnoreCase(words[0], "SET"))
+    {
+        if (count < 3) {
+            try appendSessionNotice(workspace, "Usage: /cs SET <#channel> <field> <value>");
+            return true;
+        }
+        const value = slashRestAfter(rest, 3);
+        if (value.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /cs SET <#channel> <field> <value>");
+            return true;
+        }
+        client.sendService("CHANNEL", &.{ "SET", words[1], words[2], value }) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "vhost") and count >= 1 and std.ascii.eqlIgnoreCase(words[0], "DENY")) {
+        if (count < 2) {
+            try appendSessionNotice(workspace, "Usage: /vhost DENY <account> [reason]");
+            return true;
+        }
+        const reason = slashRestAfter(rest, 2);
+        const send = if (reason.len == 0)
+            client.sendService("VHOST", &.{ "DENY", words[1] })
+        else
+            client.sendService("VHOST", &.{ "DENY", words[1], reason });
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
     if (overflow and isOnyxServiceSlash(verb)) {
         try appendSessionNotice(workspace, "That command has too many arguments.");
         return true;
@@ -6505,8 +6563,9 @@ fn observeSilenceState(gpa: std.mem.Allocator, state: *ChatState, msg: *const cc
 
 fn resubscribeSessionControls(
     client: *cc.net.client.Client,
-    state: *const ChatState,
+    state: *ChatState,
     workspace: *const cc.client.workspace.Workspace,
+    preferences: ?*const cc.client.preferences.Store,
 ) void {
     for (state.silence_masks.items) |mask| {
         client.silence(.add, mask) catch {};
@@ -6516,6 +6575,13 @@ fn resubscribeSessionControls(
         for (workspace.rooms.items) |*room| {
             if (room.joined or client.restoresChannel(room.name))
                 client.sendAwayControl(room.name, message) catch {};
+        }
+    }
+    if (preferences) |prefs| {
+        if (monitorAvailable(client)) {
+            subscribeMonitorTargets(client, prefs) catch {};
+            client.monitor(.status, null) catch {};
+            state.monitor_subscribed = true;
         }
     }
 }
@@ -7416,7 +7482,10 @@ fn handleInputKey(
                 break :talk_tos &talk_to_storage;
             };
             const avatar_name = transcript.resolvedAvatar(nick);
-            const avatar = cc.comic.strip.avatarByName(avatar_name) orelse return error.UnknownAvatar;
+            const avatar = cc.comic.strip.avatarByName(avatar_name) orelse {
+                try transcript.addWithOptions("Server", "That character is not available.", .{ .modes = cc.proto.udi.bm_action });
+                return true;
+            };
             const selected_emotion = view.shell.selectedEmotion();
             const pose_state = if (selected_emotion == .neutral)
                 try cc.comic.figure.poseStateForText(gpa, avatar, visible_text)
@@ -8450,6 +8519,7 @@ test "silence, modern events, and leftover session numerics stay live" {
         .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
     };
     defer {
+        if (client.features) |*owned_features| owned_features.deinit();
         if (client.restoration) |*restoration| restoration.deinit();
         client.aggregator.deinit();
         client.tx.deinit();
@@ -8460,7 +8530,7 @@ test "silence, modern events, and leftover session numerics stay live" {
     try applySilenceOperation(&client, &state, gpa, .list, "");
     try applySilenceOperation(&client, &state, gpa, .add, "quiet!*@*");
     try applySilenceOperation(&client, &state, gpa, .delete, "*!*@bad.example");
-    resubscribeSessionControls(&client, &state, &workspace);
+    resubscribeSessionControls(&client, &state, &workspace, null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "SILENCE\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "SILENCE +quiet!*@*\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "SILENCE -*!*@bad.example\r\n") != null);
@@ -8470,12 +8540,34 @@ test "silence, modern events, and leftover session numerics stay live" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[4].bytes, "AWAY :back later") != null);
     try client.join("#root");
     const before_restore = client.tx.items.items.len;
-    resubscribeSessionControls(&client, &state, &workspace);
+    resubscribeSessionControls(&client, &state, &workspace, null);
     var saw_away_control = false;
     for (client.tx.items.items[before_restore..]) |item| {
         if (std.mem.indexOf(u8, item.bytes, "PRIVMSG #root :\x01AWAY back later\x01") != null) saw_away_control = true;
     }
     try std.testing.expect(saw_away_control);
+
+    client.features = try cc.net.features.State.init(gpa, "me", .{});
+    if (client.features) |*owned_features|
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me MONITOR=100 :are supported"));
+    var prefs = cc.client.preferences.Store.init(gpa);
+    defer prefs.deinit();
+    try prefs.upsertNotification(.{
+        .nickname = "alice",
+        .user_mask = "*",
+        .host_mask = "*",
+        .network = "",
+        .enabled = true,
+    });
+    state.monitor_subscribed = false;
+    const before_monitor = client.tx.items.items.len;
+    resubscribeSessionControls(&client, &state, &workspace, &prefs);
+    try std.testing.expect(state.monitor_subscribed);
+    var saw_monitor = false;
+    for (client.tx.items.items[before_monitor..]) |item| {
+        if (std.mem.indexOf(u8, item.bytes, "MONITOR + alice") != null) saw_monitor = true;
+    }
+    try std.testing.expect(saw_monitor);
 }
 
 test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
@@ -8621,8 +8713,14 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     applyClientIsupport(&workspace, &client);
     try std.testing.expectError(error.InvalidIrcParameter, client.join("#x"));
     try std.testing.expectError(error.TooManyRooms, workspace.ensure("#x"));
+    try std.testing.expect((try ensureIncomingRoom(&workspace, "#x")) == null);
     try std.testing.expectEqualStrings("You have joined as many rooms as the server allows.", sessionLimitFailureNotice(.join, &workspace, "#x", ""));
     try std.testing.expectEqualStrings("You have opened as many rooms as the server allows.", roomEnsureFailureNotice(error.TooManyRooms));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        workspace.activeRoom().?.transcript.lines.items[workspace.activeRoom().?.transcript.lines.items.len - 1].text,
+        "as many rooms",
+    ) != null);
 
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expect(!workspace.rooms.items[old].want_rejoin);
@@ -8668,6 +8766,10 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "REGISTER alice *") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/cs info #zig"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CHANNEL info") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/cs SET #zig DESC My channel rules"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CHANNEL SET #zig DESC :My channel rules") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/vhost DENY alice was abusive"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "VHOST DENY alice :was abusive") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tegami list"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MEMO") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEGAMI") == null);
