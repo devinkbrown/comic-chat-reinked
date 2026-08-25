@@ -180,7 +180,7 @@ pub fn isHtmlMime(mime: []const u8) bool {
 /// Last-resort clipboard/drop payload: strip tags from `text/html`.
 /// Leaves already-plain text unchanged. Script/style bodies are dropped.
 pub fn htmlToPlainText(gpa: std.mem.Allocator, html: []const u8) ![]u8 {
-    if (std.mem.indexOfScalar(u8, html, '<') == null) {
+    if (std.mem.indexOfScalar(u8, html, '<') == null and std.mem.indexOfScalar(u8, html, '&') == null) {
         return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, html));
     }
     var out: std.ArrayList(u8) = .empty;
