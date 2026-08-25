@@ -4612,10 +4612,7 @@ fn processWorkspaceMessages(
                 republishRoomClientData(client, room, state.ircx_data);
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
-                sendAutomaticGreeting(client, preferences, joined_channel, who) catch |err| switch (err) {
-                    error.InvalidUtf8, error.TxBackpressure => {},
-                    else => return err,
-                };
+                sendAutomaticGreeting(client, preferences, joined_channel, who) catch |err| try ignoreTransientSend(err);
                 _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Join", who, joined_channel, "");
                 redraw = true;
             }
@@ -4637,7 +4634,7 @@ fn processWorkspaceMessages(
             const kind = msg.param(1) orelse continue;
             const wire = msg.param(2) orelse continue;
             if (!std.mem.eql(u8, kind, "CCUDI1")) continue;
-            const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
+            const room_index = try workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
             if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, false, nick, workspace.rooms.items[room_index].name, state.ircx_data, preferences, state)) {
                 redraw = true;
@@ -4650,7 +4647,7 @@ fn processWorkspaceMessages(
             // list. The server has already filtered delivery to us; retain
             // the channel context and render it as a private comic line.
             const target = msg.param(0) orelse continue;
-            const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
+            const room_index = try workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             const text = msg.param(2) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             var room = &workspace.rooms.items[room_index];
@@ -4676,7 +4673,7 @@ fn processWorkspaceMessages(
                 redraw = true;
                 continue;
             }
-            const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
+            const room_index = try workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             var room = &workspace.rooms.items[room_index];
             const transcript = &room.transcript;
             const text = msg.param(1) orelse continue;
@@ -4779,10 +4776,10 @@ fn workspaceRoomForIncoming(
     workspace: *cc.client.workspace.Workspace,
     target: []const u8,
     self_nick: []const u8,
-) ?usize {
+) !?usize {
     const resolved = stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes);
     if (resolved.len > 1 and workspace.chantypes.contains(resolved[0]))
-        return workspace.ensure(resolved) catch null;
+        return ensureIncomingRoom(workspace, resolved);
     if (cc.net.irc_map.eql(workspace.casemapping, resolved, self_nick)) return workspace.active;
     return workspace.find(resolved) orelse workspace.active;
 }
@@ -6282,7 +6279,7 @@ fn appendSessionNotice(workspace: *cc.client.workspace.Workspace, line: []const 
 
 fn ignoreTransientSend(err: anyerror) !void {
     switch (err) {
-        error.TxBackpressure, error.InvalidUtf8 => {},
+        error.TxBackpressure, error.InvalidUtf8, error.InvalidIrcParameter => {},
         else => return err,
     }
 }
@@ -6617,7 +6614,7 @@ fn modernEventText(msg: *const cc.net.message.Message, who: []const u8, buf: *[2
 
 fn appendModernEventLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
     const target = msg.param(0) orelse return false;
-    const room_index = workspaceRoomForIncoming(workspace, target, workspace.self_nick) orelse return false;
+    const room_index = try workspaceRoomForIncoming(workspace, target, workspace.self_nick) orelse return false;
     const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "someone";
     var buf: [280]u8 = undefined;
     const text = modernEventText(msg, who, &buf) orelse return false;
@@ -6971,24 +6968,15 @@ fn runPersistentRules(
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Notify")) {
             try transcript.addWithOptions("Automation", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Reply")) {
-            if (value.len != 0) client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value) catch |err| switch (err) {
-                error.InvalidUtf8, error.TxBackpressure => {},
-                else => return err,
-            };
+            if (value.len != 0) client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value) catch |err| try ignoreTransientSend(err);
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Action")) {
             if (value.len != 0) {
                 const wire = try std.fmt.allocPrint(gpa, "\x01ACTION {s}\x01", .{value});
                 defer gpa.free(wire);
-                client.privmsg(channel, wire) catch |err| switch (err) {
-                    error.InvalidUtf8, error.TxBackpressure => {},
-                    else => return err,
-                };
+                client.privmsg(channel, wire) catch |err| try ignoreTransientSend(err);
             }
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Sound")) {
-            if (value.len != 0) client.sendSound(channel, value, "") catch |err| switch (err) {
-                error.InvalidUtf8, error.TxBackpressure => {},
-                else => return err,
-            };
+            if (value.len != 0) client.sendSound(channel, value, "") catch |err| try ignoreTransientSend(err);
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Join room")) {
             if (value.len != 0) {
                 const index = workspace.ensure(value) catch |err| {
@@ -7511,6 +7499,10 @@ fn handleInputKey(
             client.privmsg(target, comic_message.items) catch |err| switch (err) {
                 error.InvalidUtf8 => {
                     try transcript.addWithOptions("Server", "That message is not valid UTF-8.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                },
+                error.InvalidIrcParameter => {
+                    try transcript.addWithOptions("Server", "That message is not allowed.", .{ .modes = cc.proto.udi.bm_action });
                     return true;
                 },
                 error.TxBackpressure => {
@@ -8190,6 +8182,7 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(dialogIrcNotice(error.OutOfMemory, "nope") == null);
     try ignoreTransientSend(error.TxBackpressure);
     try ignoreTransientSend(error.InvalidUtf8);
+    try ignoreTransientSend(error.InvalidIrcParameter);
     try std.testing.expectError(error.OutOfMemory, ignoreTransientSend(error.OutOfMemory));
     try std.testing.expect(isVisibleServerWorkflowReply("REGISTER"));
     try std.testing.expect(isVisibleServerWorkflowReply("SASLINFO"));
@@ -8223,9 +8216,9 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     defer workspace.deinit();
     const root = try workspace.ensure("#root");
     workspace.rooms.items[root].joined = true;
-    try std.testing.expectEqual(@as(usize, 1), workspaceRoomForIncoming(&workspace, "@#late", "me").?);
+    try std.testing.expectEqual(@as(usize, 1), (try workspaceRoomForIncoming(&workspace, "@#late", "me")).?);
     try std.testing.expectEqual(@as(usize, 1), workspace.find("#late").?);
-    try std.testing.expectEqual(@as(usize, 0), workspaceRoomForIncoming(&workspace, "me", "me").?);
+    try std.testing.expectEqual(@as(usize, 0), (try workspaceRoomForIncoming(&workspace, "me", "me")).?);
 
     var transcript = cc.comic.session.Transcript.init(gpa);
     defer transcript.deinit();
@@ -8716,6 +8709,7 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expectError(error.InvalidIrcParameter, client.join("#x"));
     try std.testing.expectError(error.TooManyRooms, workspace.ensure("#x"));
     try std.testing.expect((try ensureIncomingRoom(&workspace, "#x")) == null);
+    try std.testing.expect((try workspaceRoomForIncoming(&workspace, "@#x", "me")) == null);
     try std.testing.expectEqualStrings("You have joined as many rooms as the server allows.", sessionLimitFailureNotice(.join, &workspace, "#x", ""));
     try std.testing.expectEqualStrings("You have opened as many rooms as the server allows.", roomEnsureFailureNotice(error.TooManyRooms));
     try std.testing.expect(std.mem.indexOf(

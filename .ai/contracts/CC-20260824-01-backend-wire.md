@@ -175,6 +175,16 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 47 leftovers in scope
+
+- Inbound PRIVMSG/NOTICE/WHISPER/DATA `workspaceRoomForIncoming` uses
+  `ensureIncomingRoom` so CHANLIMIT/bad names notice instead of vanishing
+- Greeting and persistent-rule Reply/Action/Sound swallow
+  `InvalidIrcParameter` with other transient send errors
+- Comic composer `InvalidIrcParameter` stays English
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 46 leftovers in scope
 
 - Inbound `workspace.ensure` on live JOIN/PRIVMSG stays a room notice
