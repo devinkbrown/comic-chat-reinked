@@ -242,10 +242,29 @@ fn recognizableGroundInset(unit_height: i32) i32 {
 }
 
 /// Keep `speaker_box.top + 200` balloon tails inside the panel and leave
-/// enough empty panel above a generated standing dest that a short balloon
-/// sits on the face instead of covering it. Testdata dests do not use this.
+/// empty panel above a generated standing dest so a 2-line balloon sits
+/// above the face. Taller balloons call `nudgeRecognizableDestBelow`.
+/// Testdata dests do not use this.
 fn recognizableHeadroom(unit_height: i32) i32 {
-    return @max(700, @divTrunc(unit_height, 3));
+    return @max(900, @divTrunc(unit_height * 2, 5));
+}
+
+/// Slide a generated standing dest down so its head starts below `clear_above`
+/// (top-down). Used after balloon layout so a 3-line cloud does not cover the
+/// face. Testdata dests are never passed here.
+pub fn nudgeRecognizableDestBelow(rect: *Rect, clear_above: i32, unit_height: i32) void {
+    if (unit_height <= 0) return;
+    const inset = recognizableGroundInset(unit_height);
+    const min_h = @max(@divTrunc(unit_height, 2), @divTrunc(recognizableStandingHeight(unit_height), 2));
+    if (clear_above <= rect.y) return;
+    rect.y = clear_above;
+    const max_bottom = unit_height - inset;
+    if (rect.y >= max_bottom) {
+        rect.y = @max(0, max_bottom - min_h);
+    }
+    rect.h = @max(min_h, max_bottom - rect.y);
+    if (rect.y + rect.h > max_bottom) rect.h = @max(1, max_bottom - rect.y);
+    if (rect.h < 1) rect.h = 1;
 }
 
 /// Taller than `unit_height/1.9` so a standing Color card fills most of the
@@ -479,6 +498,14 @@ test "containRecognizableDest pulls an oversized feet crop back into the panel" 
     try std.testing.expectEqual(recognizableHeadroom(default_unit_height), feet.y);
     try std.testing.expectEqual(recognizableStandingHeight(default_unit_height), feet.h);
     try std.testing.expect(feet.y + feet.h < default_unit_height);
+}
+
+test "nudgeRecognizableDestBelow slides a standing dest under a tall balloon" {
+    var dest = Rect{ .x = 100, .y = 400, .w = 500, .h = 1600 };
+    nudgeRecognizableDestBelow(&dest, 1100, default_unit_height);
+    try std.testing.expectEqual(@as(i32, 1100), dest.y);
+    try std.testing.expect(dest.y + dest.h <= default_unit_height - recognizableGroundInset(default_unit_height));
+    try std.testing.expect(dest.h >= @divTrunc(default_unit_height, 3));
 }
 
 test "source AddLine preflight preserves title-panel and repeat-speaker rules" {

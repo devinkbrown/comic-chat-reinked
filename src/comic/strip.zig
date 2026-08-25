@@ -686,6 +686,22 @@ fn renderScene(
     );
     defer balloon_layout.deinit(gpa);
 
+    var clear_above: i32 = 0;
+    for (balloon_layout.balloons) |balloon| {
+        const cloud_bottom_down = -balloon.cloud_bbox.bottom;
+        if (cloud_bottom_down > 0) clear_above = @max(clear_above, cloud_bottom_down + 40);
+    }
+    if (clear_above > 0) {
+        for (layout.placements) |*placement| {
+            if (!bodies[placement.body_index].keep_recognizable) continue;
+            original_layout.nudgeRecognizableDestBelow(
+                &placement.rect,
+                clear_above,
+                original_layout.default_unit_height,
+            );
+        }
+    }
+
     var canvas = try Canvas.init(gpa, panel_width, panel_height);
     defer canvas.deinit(gpa);
     canvas.clear(white);
@@ -1650,6 +1666,22 @@ test "Anna Color continuation keeps her head in the panel" {
             try std.testing.expect(ink_max_y - ink_min_y >= (panel_height * 45) / 100);
             try std.testing.expect(ink_min_y < panel_height / 3);
             try std.testing.expect(ink_max_y > (panel_height * 7) / 10);
+            // Face sits below a 3-line balloon, not under it.
+            var face_peach: usize = 0;
+            var y_face: u32 = panel_height / 4;
+            while (y_face < (panel_height * 6) / 10) : (y_face += 1) {
+                var x: u32 = 0;
+                while (x < panel_width) : (x += 1) {
+                    const pixel = image.pixels[(y0 + y_face) * image.width + x0 + x];
+                    const red: i32 = @as(u8, @truncate(pixel >> 16));
+                    const green: i32 = @as(u8, @truncate(pixel >> 8));
+                    const blue: i32 = @as(u8, @truncate(pixel));
+                    if (red > green + 15 and red > blue + 15 and green + 25 > blue and
+                        red > 90 and red < 230 and green > 60 and blue > 40)
+                        face_peach += 1;
+                }
+            }
+            try std.testing.expect(face_peach > 8);
             checked += 1;
         }
     }
@@ -1689,4 +1721,39 @@ test "Color cafe and apartment keep wood plants and sky" {
         try std.testing.expect(blue > 40);
         try std.testing.expect(brown + green + blue > purple);
     }
+}
+
+test "every Color default chrome portrait stays a standing silhouette" {
+    const gpa = std.testing.allocator;
+    const names = [_][]const u8{
+        "anna color",     "armando color", "bolo color",     "cro color",     "dan color",   "denise color",
+        "hugh color",     "jordan color",  "kevin color",    "kwensa color",  "lance color", "lynnea color",
+        "margaret color", "maynard color", "mike color",     "rebecca color", "sage color",  "scotty color",
+        "susan color",    "tiki color",    "tongtyed color", "xeno color",
+    };
+    for (names) |name| {
+        const data = avatarByName(name) orelse return error.TestUnexpectedResult;
+        var portrait = try figure.chromePortrait(gpa, data);
+        defer portrait.deinit(gpa);
+        try std.testing.expect(portrait.height >= 120);
+        try std.testing.expect(portrait.height + 16 > portrait.width);
+        var colorful = false;
+        for (portrait.pixels) |pixel| {
+            if (pixel >> 24 == 0) continue;
+            const red: u8 = @truncate(pixel >> 16);
+            const green: u8 = @truncate(pixel >> 8);
+            const blue: u8 = @truncate(pixel);
+            if (red != green or green != blue) {
+                colorful = true;
+                break;
+            }
+        }
+        try std.testing.expect(colorful);
+    }
+}
+
+test "testdata anna mapping is unchanged for Microsoft goldens" {
+    const testdata = avatarByName("anna") orelse return error.TestUnexpectedResult;
+    const color = avatarByName("anna color") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(testdata.ptr != color.ptr);
 }
