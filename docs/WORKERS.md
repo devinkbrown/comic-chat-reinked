@@ -83,9 +83,11 @@ hash.
   keymap arrives or for an out-of-scope keysym. Do not claim a full
   input-method editor — committed IME text uses text-input-v3 when
   advertised, with a multiline hint and a bounded composer-strip cursor
-  rectangle. X11 claims focus via `WM_TAKE_FOCUS` / FocusIn, resets compose
-  on FocusOut, honors group bits 13–14, and refreshes GetKeyboardMapping on
-  MappingNotify without dropping queued events. Wayland restores held
+  rectangle.   X11 claims focus via `WM_TAKE_FOCUS` / FocusIn, resets compose
+  on FocusOut, honors group bits 13–14, refreshes GetKeyboardMapping on
+  MappingNotify without dropping queued events, and reads GetModifierMapping
+  so Caps Lock, NumLock, Mode_switch, AltGr, and Super follow the server's
+  modifier map (including MappingNotify request 0). Wayland restores held
   Shift/Ctrl/Alt/Super from the keyboard-enter keys array and Caps Lock
   from the conventional Lock modifier bit when the compositor reports it,
   honors XKB groups 3–4 with wrap, and refreshes text-input on keyboard enter

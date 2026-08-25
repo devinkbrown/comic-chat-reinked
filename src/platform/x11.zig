@@ -10,7 +10,8 @@
 //!     keypress / close.
 //!   * `Window` — interactive: open/present/nextEvent/fd, with keyboard
 //!     translation (GetKeyboardMapping, including Mod5/AltGr, group bits
-//!     13–14, MappingNotify refresh that does not drop queued events, and
+//!     13–14, MappingNotify keyboard/modifier refresh that does not drop queued events, GetModifierMapping
+//!     for Caps/NumLock/Mode_switch/AltGr/Super bits, and
 //!     bounded dead-key/Multi_key compose plus optional XCompose locale
 //!     tables; compose resets on FocusOut), integer HiDPI scale (env +
 //!     `Xft.dpi`, refreshed on root `RESOURCE_MANAGER` changes, XSETTINGS
@@ -307,12 +308,48 @@ pub const Event = shared_event.Event;
 
 // --- Keyboard mapping --------------------------------------------------------
 
+/// Conventional X modifier bits, overridden by `GetModifierMapping` when the
+/// server puts Caps_Lock / Num_Lock / Mode_switch / ISO_Level3_Shift / Super
+/// on a different modifier.
+pub const ModifierMasks = struct {
+    shift: u16 = 0x1,
+    lock: u16 = 0x2,
+    control: u16 = 0x4,
+    alt: u16 = 0x8,
+    num_lock: u16 = 0x10,
+    mode_switch: u16 = 0x20,
+    super: u16 = 0x40,
+    level3: u16 = 0x80,
+};
+
+const xk_shift_l: u32 = 0xffe1;
+const xk_shift_r: u32 = 0xffe2;
+const xk_control_l: u32 = 0xffe3;
+const xk_control_r: u32 = 0xffe4;
+const xk_caps_lock: u32 = 0xffe5;
+const xk_shift_lock: u32 = 0xffe6;
+const xk_meta_l: u32 = 0xffe7;
+const xk_meta_r: u32 = 0xffe8;
+const xk_alt_l: u32 = 0xffe9;
+const xk_alt_r: u32 = 0xffea;
+const xk_super_l: u32 = 0xffeb;
+const xk_super_r: u32 = 0xffec;
+const xk_hyper_l: u32 = 0xffed;
+const xk_hyper_r: u32 = 0xffee;
+const xk_num_lock: u32 = 0xff7f;
+const xk_mode_switch: u32 = 0xff7e;
+const xk_iso_level3_shift: u32 = 0xfe03;
+
+const mapping_modifier: u8 = 0;
+const mapping_keyboard: u8 = 1;
+
 /// Keycode → keysym table fetched with GetKeyboardMapping. Translation itself
 /// is pure and testable without a server.
 pub const Keymap = struct {
     syms: []u32,
     per: u8,
     min: u8,
+    masks: ModifierMasks = .{},
 
     pub fn deinit(self: *Keymap, gpa: std.mem.Allocator) void {
         gpa.free(self.syms);
@@ -328,12 +365,12 @@ pub const Keymap = struct {
         const s2 = if (self.per > 2 and idx + 2 < self.syms.len) self.syms[idx + 2] else 0;
         const s3 = if (self.per > 3 and idx + 3 < self.syms.len) self.syms[idx + 3] else 0;
 
-        const shift = (state & 0x1) != 0;
-        const lock = (state & 0x2) != 0;
-        const num_lock = (state & xkb.x11_mod2_num_lock) != 0;
-        const level3 = (state & 0x80) != 0; // Mod5 / ISO_Level3_Shift
+        const shift = (state & self.masks.shift) != 0;
+        const lock = (state & self.masks.lock) != 0;
+        const num_lock = (state & self.masks.num_lock) != 0;
+        const level3 = (state & self.masks.level3) != 0;
         var group = (state >> 13) & 0x3;
-        if (group == 0 and (state & xkb.x11_mod3_mode_switch) != 0) group = 1;
+        if (group == 0 and (state & self.masks.mode_switch) != 0) group = 1;
 
         if (group != 0) {
             const g0_idx = idx + @as(usize, group) * 2;
@@ -622,6 +659,7 @@ pub const Window = struct {
         self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, self.scale, env, &self.pending_events) catch 0;
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
+        self.refreshModifierMap();
         try mapWindow(&self.conn, self.window);
         sendStartupRemove(&self.conn, self.window, env) catch {};
         self.refreshRandrCrtcs();
@@ -755,10 +793,10 @@ pub const Window = struct {
                 const keycode = event[1];
                 const state = get16(event[28..30]);
                 const modifiers = shared_event.Modifiers{
-                    .shift = state & 1 != 0,
-                    .control = state & 4 != 0,
-                    .alt = state & 8 != 0 or state & 0x80 != 0,
-                    .super = state & 64 != 0,
+                    .shift = state & self.keymap.masks.shift != 0,
+                    .control = state & self.keymap.masks.control != 0,
+                    .alt = state & self.keymap.masks.alt != 0 or state & self.keymap.masks.level3 != 0,
+                    .super = state & self.keymap.masks.super != 0,
                 };
                 if (xkb.isClipboardPasteKeysym(self.keymap.keysym(keycode, state), modifiers.shift, modifiers.control)) {
                     if (self.pasteClipboardAsKeys()) |ev| return ev;
@@ -869,7 +907,8 @@ pub const Window = struct {
                 return .other;
             },
             34 => { // MappingNotify
-                if (event[1] == 1) self.refreshKeymap();
+                if (event[1] == mapping_keyboard) self.refreshKeymap();
+                if (event[1] == mapping_modifier) self.refreshModifierMap();
                 return .other;
             },
             12 => { // Expose
@@ -2139,6 +2178,11 @@ pub const Window = struct {
         const next = fetchKeymapStashing(self.gpa, &self.conn, &self.pending_events) catch return;
         self.keymap.deinit(self.gpa);
         self.keymap = next;
+        self.refreshModifierMap();
+    }
+
+    fn refreshModifierMap(self: *Window) void {
+        self.keymap.masks = fetchModifierMasksStashing(self.gpa, &self.conn, &self.keymap, &self.pending_events) catch .{};
     }
 };
 
@@ -2536,6 +2580,82 @@ fn finishKeymap(gpa: std.mem.Allocator, conn: *XConn, header: [32]u8, min: u8) !
     try readExact(conn, raw);
     for (syms, 0..) |*s, i| s.* = get32(raw[i * 4 .. i * 4 + 4]);
     return .{ .syms = syms, .per = per, .min = min };
+}
+
+fn firstKeysym(keymap: *const Keymap, keycode: u8) u32 {
+    if (keycode < keymap.min or keymap.per == 0) return 0;
+    const idx = @as(usize, keycode - keymap.min) * keymap.per;
+    if (idx >= keymap.syms.len) return 0;
+    return keymap.syms[idx];
+}
+
+fn fetchModifierMasksStashing(
+    gpa: std.mem.Allocator,
+    conn: *XConn,
+    keymap: *const Keymap,
+    stash: *std.ArrayList([32]u8),
+) !ModifierMasks {
+    var req: [4]u8 = @splat(0);
+    req[0] = 119; // GetModifierMapping
+    put16(req[2..4], 1);
+    try writeAll(conn, &req);
+    const header = try readReplyStashing(gpa, conn, stash);
+    return finishModifierMasks(gpa, conn, keymap, header);
+}
+
+fn finishModifierMasks(gpa: std.mem.Allocator, conn: *XConn, keymap: *const Keymap, header: [32]u8) !ModifierMasks {
+    const per_mod = header[1];
+    const extra = @as(usize, get32(header[4..8])) * 4;
+    if (per_mod == 0 or extra == 0) return .{};
+    const raw = try gpa.alloc(u8, extra);
+    defer gpa.free(raw);
+    try readExact(conn, raw);
+    return modifierMasksFromMapping(keymap, per_mod, raw);
+}
+
+fn modifierMasksFromMapping(keymap: *const Keymap, per_mod: u8, keycodes: []const u8) ModifierMasks {
+    var found = ModifierMasks{
+        .shift = 0,
+        .lock = 0,
+        .control = 0,
+        .alt = 0,
+        .num_lock = 0,
+        .mode_switch = 0,
+        .super = 0,
+        .level3 = 0,
+    };
+    const n = @as(usize, per_mod);
+    var mod_i: u4 = 0;
+    while (mod_i < 8) : (mod_i += 1) {
+        const bit: u16 = @as(u16, 1) << @intCast(mod_i);
+        const start = @as(usize, mod_i) * n;
+        if (start >= keycodes.len) break;
+        const slot = keycodes[start..@min(keycodes.len, start + n)];
+        for (slot) |code| {
+            if (code == 0) continue;
+            switch (firstKeysym(keymap, code)) {
+                xk_shift_l, xk_shift_r => found.shift |= bit,
+                xk_control_l, xk_control_r => found.control |= bit,
+                xk_caps_lock, xk_shift_lock => found.lock |= bit,
+                xk_alt_l, xk_alt_r, xk_meta_l, xk_meta_r => found.alt |= bit,
+                xk_super_l, xk_super_r, xk_hyper_l, xk_hyper_r => found.super |= bit,
+                xk_num_lock => found.num_lock |= bit,
+                xk_mode_switch => found.mode_switch |= bit,
+                xk_iso_level3_shift => found.level3 |= bit,
+                else => {},
+            }
+        }
+    }
+    var masks = ModifierMasks{};
+    if (found.shift != 0) masks.shift = found.shift;
+    if (found.lock != 0) masks.lock = found.lock;
+    if (found.control != 0) masks.control = found.control;
+    if (found.alt != 0) masks.alt = found.alt;
+    if (found.num_lock != 0) masks.num_lock = found.num_lock;
+    if (found.mode_switch != 0) masks.mode_switch = found.mode_switch;
+    if (found.super != 0) masks.super = found.super;
+    if (found.level3 != 0) masks.level3 = found.level3;
+    return masks;
 }
 
 /// Wait for the next reply, skipping (discarding) any events that arrive
@@ -4309,6 +4429,37 @@ test "Keymap.translate uses Mod3 Mode_switch as group 2" {
     try std.testing.expectEqual(Key{ .char = 'a' }, km.translate(38, 0));
     try std.testing.expectEqual(Key{ .char = 0x0444 }, km.translate(38, xkb.x11_mod3_mode_switch));
     try std.testing.expectEqual(Key{ .char = 0x0424 }, km.translate(38, xkb.x11_mod3_mode_switch | 1));
+}
+
+test "GetModifierMapping puts Caps_Lock on Mod3 and Num_Lock off Mod2" {
+    var table: [128]u32 = @splat(0);
+    table[66 - 8] = xk_caps_lock;
+    table[77 - 8] = xk_num_lock;
+    table[50 - 8] = xk_shift_l;
+    table[37 - 8] = xk_control_l;
+    table[64 - 8] = xk_alt_l;
+    table[108 - 8] = xk_iso_level3_shift;
+    const km = Keymap{ .syms = &table, .per = 1, .min = 8 };
+    const codes = [_]u8{ 50, 0, 37, 64, 0, 66, 77, 108 };
+    const masks = modifierMasksFromMapping(&km, 1, &codes);
+    try std.testing.expectEqual(@as(u16, 0x1), masks.shift);
+    try std.testing.expectEqual(@as(u16, 0x20), masks.lock);
+    try std.testing.expectEqual(@as(u16, 0x4), masks.control);
+    try std.testing.expectEqual(@as(u16, 0x8), masks.alt);
+    try std.testing.expectEqual(@as(u16, 0x40), masks.num_lock);
+    try std.testing.expectEqual(@as(u16, 0x80), masks.level3);
+
+    const remapped = [_]u8{ 50, 66, 37, 64, 77, 0, 0, 108 };
+    const found = modifierMasksFromMapping(&km, 1, &remapped);
+    try std.testing.expectEqual(@as(u16, 0x2), found.lock);
+    try std.testing.expectEqual(@as(u16, 0x10), found.num_lock);
+
+    var keypad = [_]u32{ 0xff95, 0xffb7 };
+    const km_kp = Keymap{ .syms = &keypad, .per = 2, .min = 79, .masks = .{ .num_lock = 0x20 } };
+    try std.testing.expectEqual(Key{ .char = '7' }, km_kp.translate(79, 0x20));
+    try std.testing.expectEqual(Key.home, km_kp.translate(79, 0x10));
+    try std.testing.expectEqual(@as(u8, 0), mapping_modifier);
+    try std.testing.expectEqual(@as(u8, 1), mapping_keyboard);
 }
 
 test "Keymap.translate uses Mod5 for ISO Level3 when a third keysym exists" {
