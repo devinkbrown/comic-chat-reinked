@@ -1655,3 +1655,38 @@ test "Anna Color continuation keeps her head in the panel" {
     }
     try std.testing.expect(checked >= 2);
 }
+
+test "Color cafe and apartment keep wood plants and sky" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-apartment.bgb"),
+    };
+    for (rooms) |data| {
+        var image = try bgb.decodeBackground(gpa, data);
+        defer image.deinit(gpa);
+        var brown: usize = 0;
+        var green: usize = 0;
+        var blue: usize = 0;
+        var purple: usize = 0;
+        for (image.pixels) |pixel| {
+            const red: i32 = @as(u8, @truncate(pixel >> 16));
+            const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+            const blue_ch: i32 = @as(u8, @truncate(pixel));
+            if (red == green_ch and green_ch == blue_ch) continue;
+            if (red > green_ch + 15 and red > blue_ch + 10 and green_ch > 40 and green_ch + 40 > blue_ch)
+                brown += 1;
+            if (green_ch > red + 15 and green_ch > blue_ch + 10)
+                green += 1;
+            if (blue_ch > red + 15 and blue_ch + 10 > green_ch)
+                blue += 1;
+            if (blue_ch + 10 > red and (blue_ch > green_ch + 20 or red > green_ch + 20) and
+                @abs(red - blue_ch) < 60)
+                purple += 1;
+        }
+        try std.testing.expect(brown > 80);
+        try std.testing.expect(green > 40);
+        try std.testing.expect(blue > 40);
+        try std.testing.expect(brown + green + blue > purple);
+    }
+}

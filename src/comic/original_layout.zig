@@ -241,9 +241,11 @@ fn recognizableGroundInset(unit_height: i32) i32 {
     return @max(120, @divTrunc(unit_height, 16));
 }
 
-/// Keep `speaker_box.top + 200` balloon tails inside the panel.
+/// Keep `speaker_box.top + 200` balloon tails inside the panel and leave
+/// enough empty panel above a generated standing dest that a short balloon
+/// sits on the face instead of covering it. Testdata dests do not use this.
 fn recognizableHeadroom(unit_height: i32) i32 {
-    return @max(360, @divTrunc(unit_height, 6));
+    return @max(700, @divTrunc(unit_height, 3));
 }
 
 /// Taller than `unit_height/1.9` so a standing Color card fills most of the

@@ -735,7 +735,7 @@ fn cropHeadPortrait(gpa: std.mem.Allocator, image: Image, head_height: i32) !Ima
     // Generated standing figures are taller than a mugshot slot. Returning the
     // full silhouette lets CAST/gallery contain-fit the whole woman instead of
     // a waist-cut head band or a 5:4 side clip.
-    if (bbox.h >= 160 and bbox.w >= 80) {
+    if (bbox.h >= 140 and (bbox.w >= 80 or bbox.h > bbox.w + 20)) {
         return copyRect(gpa, image, bbox.x, bbox.y, bbox.w, bbox.h);
     }
     const band = opaqueBoundsIn(image, bbox.x, bbox.y, bbox.w, crop_h) orelse bbox;
@@ -1330,6 +1330,59 @@ test "Anna Color uses peach skin and a red top instead of a purple wash" {
     try std.testing.expect(red > 40);
     try std.testing.expect(peach > purple);
     try std.testing.expect(red > purple);
+}
+
+test "Color default-cast cards are standing silhouettes with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/anna-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kevin-color-hd-v1.avb"),
+        @embedFile("../assets/generated/denise-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tiki-color-hd-v2.avb"),
+    };
+    for (blobs) |avb_data| {
+        var assembled = try assembleDetailedForText(gpa, avb_data, "");
+        defer assembled.deinit(gpa);
+        try std.testing.expect(assembled.generated_standing);
+        try std.testing.expect(assembled.image.height >= 140);
+        try std.testing.expect(assembled.image.height + 20 > assembled.image.width);
+        const ink = paperInkBounds(assembled.image) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(ink.h * 5 >= assembled.image.height * 3);
+        const band = @max(@as(u32, 4), ink.h / 10);
+        var top_edge: usize = 0;
+        var bot_edge: usize = 0;
+        var colorful: usize = 0;
+        var purple: usize = 0;
+        var y: u32 = 0;
+        while (y < assembled.image.height) : (y += 1) {
+            var x: u32 = 0;
+            while (x < assembled.image.width) : (x += 1) {
+                if (!paperInkPixel(assembled.image, x, y)) continue;
+                if (y >= ink.y and y < ink.y + band) top_edge += 1;
+                if (y + band >= ink.y + ink.h and y < ink.y + ink.h) bot_edge += 1;
+                const pixel = assembled.image.pixels[y * assembled.image.width + x];
+                const red_ch: i32 = @as(u8, @truncate(pixel >> 16));
+                const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue_ch: i32 = @as(u8, @truncate(pixel));
+                if (red_ch == green_ch and green_ch == blue_ch) continue;
+                colorful += 1;
+                if (blue_ch + 10 > red_ch and (blue_ch > green_ch + 20 or red_ch > green_ch + 20) and
+                    @abs(red_ch - blue_ch) < 60)
+                    purple += 1;
+            }
+        }
+        try std.testing.expect(top_edge > 4);
+        try std.testing.expect(bot_edge > 4);
+        try std.testing.expect(colorful > 80);
+        try std.testing.expect(colorful > purple);
+
+        var portrait = try chromePortrait(gpa, avb_data);
+        defer portrait.deinit(gpa);
+        try std.testing.expect(portrait.height >= 140);
+        try std.testing.expect(portrait.height + 10 > portrait.width);
+    }
 }
 
 test "simple SetIndices uses gesture ordinal while OTHERMAPPED uses expression" {

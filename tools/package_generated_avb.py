@@ -58,6 +58,45 @@ def variable_record(tag: int, payload: bytes) -> bytes:
     return u16(tag) + u16(len(payload)) + payload
 
 
+def _column_has_ink(pixels, width: int, height: int, x: int) -> bool:
+    for y in range(height):
+        red, green, blue = pixels[x, y]
+        if red < 245 or green < 245 or blue < 245:
+            return True
+    return False
+
+
+def largest_ink_bbox(image: Image.Image) -> tuple[int, int, int, int]:
+    """Widest non-white column-run. Ignores a wrap sliver on the right."""
+    pixels = image.load()
+    width, height = image.size
+    best: tuple[int, int] | None = None
+    x = 0
+    while x < width:
+        if not _column_has_ink(pixels, width, height, x):
+            x += 1
+            continue
+        x1 = x + 1
+        while x1 < width and _column_has_ink(pixels, width, height, x1):
+            x1 += 1
+        if best is None or (x1 - x) > (best[1] - best[0]):
+            best = (x, x1)
+        x = x1
+    if best is None:
+        raise ValueError("image contains no visible pose")
+    x0, x1 = best
+    top, bottom = height, 0
+    for y in range(height):
+        for col in range(x0, x1):
+            red, green, blue = pixels[col, y]
+            if red < 245 or green < 245 or blue < 245:
+                top = min(top, y)
+                bottom = max(bottom, y + 1)
+    if top >= bottom:
+        raise ValueError("image contains no visible pose")
+    return (x0, top, x1, bottom)
+
+
 def normalize_pose(path: Path) -> Image.Image:
     """Crop a nearly-white generated card and return a compact white-matte pose."""
     source = Image.open(path).convert("RGB")
@@ -70,11 +109,7 @@ def normalize_pose(path: Path) -> Image.Image:
             if red >= 245 and green >= 245 and blue >= 245:
                 pixels[x, y] = (255, 255, 255)
 
-    inverted = ImageChops.invert(source)
-    bbox = inverted.getbbox()
-    if bbox is None:
-        raise ValueError(f"{path} contains no visible pose")
-    left, top, right, bottom = bbox
+    left, top, right, bottom = largest_ink_bbox(source)
     pad = 12
     crop = source.crop((max(0, left - pad), max(0, top - pad), min(source.width, right + pad), min(source.height, bottom + pad)))
     crop.thumbnail((210, 260), Image.Resampling.LANCZOS)
