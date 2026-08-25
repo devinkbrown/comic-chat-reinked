@@ -1452,11 +1452,28 @@ test "Color default-cast cards are standing silhouettes with local color" {
 }
 
 test "leftover Color pose cards keep one paper-ink column-run" {
+    // Frozen Anna/Kevin/Denise Color and Tiki Color v2 stay on their accepted
+    // hashes. Every other Color pack is scanned so a packaged wrap sliver
+    // cannot return.
     const gpa = std.testing.allocator;
     const blobs = [_][]const u8{
         @embedFile("../assets/generated/armando-color-hd-v1.avb"),
         @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
         @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
         @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
     };
     const emotions = [_]u16{ 9, 8, 7, 2, 4, 10 };
