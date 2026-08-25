@@ -1,7 +1,7 @@
 d17ddc297cf8f8c6baf7f60088ea0c13047dae6b3417bbe6cef98c34ba340fef  src/assets/generated/anna-reimagined-hd-v1.avb
 12f0f2d919a9e60611690578dc51de0d15f827aa5110e0cb7dc76d26ddb665de  src/assets/generated/armando-reimagined-hd-v1.avb
 7cd2c1990cb84e6fd5b1355de15ae2f8cb415620937e91e6d5c6f30dc967c0e2  src/assets/generated/bolo-reimagined-hd-v1.avb
-460fff57a1bac4aaa634beec9dfb009ff803b157f03b27a7b732c9871ba8c61b  src/assets/generated/cro-reimagined-hd-v1.avb
+23ae4cd37cd750f93f51bba56b7952d6a59d7536491233ecb76c64c0202b9ef4  src/assets/generated/cro-reimagined-hd-v1.avb
 74b18d8c8997a5a3c941af1fbd1ade4e101a774547e6b94c3e563027b4766eb5  src/assets/generated/dan-reimagined-hd-v1.avb
 7a578608ec018d2872913c654d7f48d94fa6c0e0db76ef60df16e20249f476fe  src/assets/generated/denise-reimagined-hd-v1.avb
 dedca77b4eb6c9de5ff3d2365031e2c828502580f0bd735bea83abbc25ee6601  src/assets/generated/hugh-reimagined-hd-v1.avb
@@ -11,7 +11,7 @@ c24ebac71908b87e25c99210f6ee9bc60d7b0f3d82adac3026584fa4dd5b45a1  src/assets/gen
 447c7ae95d2b3001f33520302d5d93cff8fa892ace657ad8480d28aa6638bdde  src/assets/generated/lance-reimagined-hd-v1.avb
 7c1abc1d966eee6aee1fbb21471603e46cdcc11447b1506f67652bc38b92841c  src/assets/generated/lynnea-reimagined-hd-v1.avb
 beac410f1fd5655d1974df875286635c6d63996ddf64f2e10e55eac437c19caf  src/assets/generated/margaret-reimagined-hd-v1.avb
-085ae204d61410c8c808c5b34c58277410e3ee7e2b1e3e3649cf3fb528262a94  src/assets/generated/maynard-reimagined-hd-v1.avb
+750acad6504c8f101239de7340d1de2b807d128e0ccd50d3f2f7c5eea98ab657  src/assets/generated/maynard-reimagined-hd-v1.avb
 671f7aa1460fa642eb0bcf56c0678ac1e4e05ba0c981929a61e5d85bc282f058  src/assets/generated/mike-reimagined-hd-v1.avb
 589ac8701851d6dfdad07212a768f821d4cccad3d54b68608d0565a848598f48  src/assets/generated/rebecca-reimagined-hd-v1.avb
 081787256a801ec06ef9f332f38c298a79b7f164ecb52749a917db3fd4255070  src/assets/generated/sage-reimagined-hd-v1.avb

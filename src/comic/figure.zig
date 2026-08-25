@@ -1488,6 +1488,30 @@ test "leftover Color pose cards keep one paper-ink column-run" {
     }
 }
 
+test "Maynard Color keeps pose-authored cool paint without a tan wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var cool: usize = 0;
+    var tan: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+        if (red > 180 and green > 120 and blue < 90 and red > blue + 40) tan += 1;
+    }
+    try std.testing.expect(cool > 400);
+    try std.testing.expect(cool > tan * 4);
+}
+
 test "simple SetIndices uses gesture ordinal while OTHERMAPPED uses expression" {
     const gpa = std.testing.allocator;
     var table = try avb_asset.parsePoseTable(gpa, @embedFile("../assets/testdata/jordan.avb"));

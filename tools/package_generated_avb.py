@@ -197,13 +197,19 @@ def _chromatic_hue_bins(image: Image.Image) -> dict[int, int]:
 
 
 def has_local_color(image: Image.Image) -> bool:
-    """True when the pose already has independently painted regions."""
+    """True when the pose already has authored paint, including one hue.
+
+    A blue rabbit or a yellow tunic is local color. Requiring two strong
+    hue bins treated those cards as grayscale and washed a second
+    portrait over them. A true grayscale pose stays below the chromatic
+    floor and still takes the color reference.
+    """
     bins = _chromatic_hue_bins(image)
     chromatic = sum(bins.values())
     if chromatic < 200:
         return False
     strong = sum(1 for count in bins.values() if count >= max(80, chromatic * 0.03))
-    return strong >= 2
+    return strong >= 1
 
 
 def _silhouette_bbox(image: Image.Image) -> tuple[int, int, int, int]:
@@ -248,6 +254,8 @@ def transfer_local_color(pose: Image.Image, reference: Path) -> Image.Image:
             sample = ref_px[rx, ry]
             hue, saturation, _ = colorsys.rgb_to_hsv(sample[0] / 255, sample[1] / 255, sample[2] / 255)
             if saturation < 0.08:
+                gray = int(min(0.94, value * 1.04) * 255)
+                pixels[x, y] = (gray, gray, gray)
                 continue
             colored = colorsys.hsv_to_rgb(hue, min(0.85, saturation), min(0.94, value * 1.04))
             pixels[x, y] = tuple(round(channel * 255) for channel in colored)
