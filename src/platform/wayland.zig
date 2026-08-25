@@ -39,9 +39,10 @@
 //! while this client still owns the clipboard source. A copy before the
 //! first seat serial is stored and advertised once a serial arrives.
 //! Pointer leave and incoming DnD motion emit pointer moves so hover
-//! tracks the seat. NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
+//! tracks the seat; a held button emits `.up` before the `(-1,-1)` clear.
+//! NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
 //! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
-//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/15 and Windows-1250/1251/1252 `text/plain` charset MIME,
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/13/15 and Windows-1250/1251/1252/1253/1254/1255/1256/1257 `text/plain` charset MIME,
 //! Markdown, and extra KDE5/Mozilla-priv/KDE suggested-filename file MIME are accepted.
 //! `present()` skips
 //! commits while the toplevel is suspended; leaving suspended or gaining
@@ -267,6 +268,18 @@ const latin_mime_types = [_][]const u8{
     "text/plain;charset=cp1251",
     "text/plain;charset=windows-1250",
     "text/plain;charset=cp1250",
+    "text/plain;charset=ISO-8859-13",
+    "text/plain;charset=iso-8859-13",
+    "text/plain;charset=windows-1253",
+    "text/plain;charset=cp1253",
+    "text/plain;charset=windows-1254",
+    "text/plain;charset=cp1254",
+    "text/plain;charset=windows-1255",
+    "text/plain;charset=cp1255",
+    "text/plain;charset=windows-1256",
+    "text/plain;charset=cp1256",
+    "text/plain;charset=windows-1257",
+    "text/plain;charset=cp1257",
 };
 
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
@@ -560,6 +573,10 @@ pub const Window = struct {
     last_primary_click_ms: u32 = 0,
     last_primary_x: i32 = 0,
     last_primary_y: i32 = 0,
+    held_primary: bool = false,
+    held_middle: bool = false,
+    held_secondary: bool = false,
+    pending_pointer: ?Event = null,
     surface_id: u32 = 0,
     xdg_wm_base_id: u32 = 0,
     xdg_surface_id: u32 = 0,
@@ -1018,8 +1035,16 @@ pub const Window = struct {
     /// as `.other`. Keeping this one-message boundary is required by poll-based
     /// callers: a release can be the only readable message, and waiting here
     /// for a later visible event would starve the IRC socket indefinitely.
+    /// Drain a decoded key or pointer event without reading the Wayland socket.
+    pub fn pollEvent(self: *Window) !?Event {
+        if (self.takeCommittedKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
+        return null;
+    }
+
     pub fn nextEvent(self: *Window) !Event {
         if (self.takeCommittedKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
         const msg = try self.conn.readMessage(self.gpa);
         defer msg.deinit(self.gpa);
         return try self.dispatch(msg) orelse .other;
@@ -1036,6 +1061,7 @@ pub const Window = struct {
     /// a burst of catch-up repeats once it resumes.
     pub fn checkRepeat(self: *Window) ?Event {
         if (self.takeCommittedKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
         if (self.ime_composing) return null;
         const code = self.held_key_code orelse return null;
         if (self.repeat_rate_per_sec <= 0) return null;
@@ -1332,12 +1358,14 @@ pub const Window = struct {
                 self.touch_contact = getI32(body[12..16]);
                 self.pointer_x = @divTrunc(getI32(body[16..20]), 256);
                 self.pointer_y = @divTrunc(getI32(body[20..24]), 256);
+                self.noteHeldButton(.primary, true);
                 return .{ .pointer = .{ .kind = .down, .x = self.pointer_x, .y = self.pointer_y, .button = .primary } };
             },
             1 => { // up(serial, time, id)
                 if (body.len != 12) return error.InvalidWaylandMessage;
                 if (self.touch_contact == null or self.touch_contact.? != getI32(body[8..12])) return null;
                 self.touch_contact = null;
+                self.noteHeldButton(.primary, false);
                 return .{ .pointer = .{ .kind = .up, .x = self.pointer_x, .y = self.pointer_y, .button = .primary } };
             },
             2 => { // motion(time, id, x, y)
@@ -1351,6 +1379,7 @@ pub const Window = struct {
                 if (body.len != 0) return error.InvalidWaylandMessage;
                 if (self.touch_contact == null) return null;
                 self.touch_contact = null;
+                self.noteHeldButton(.primary, false);
                 return .{ .pointer = .{ .kind = .up, .x = self.pointer_x, .y = self.pointer_y, .button = .primary } };
             },
             3, 5, 6 => return null,
@@ -1441,6 +1470,31 @@ pub const Window = struct {
         return .{ .key = .{ .key = .{ .char = codepoint }, .modifiers = .{} } };
     }
 
+    fn takePendingPointer(self: *Window) ?Event {
+        const event = self.pending_pointer orelse return null;
+        self.pending_pointer = null;
+        return event;
+    }
+
+    fn noteHeldButton(self: *Window, button: shared_event.PointerButton, down: bool) void {
+        switch (button) {
+            .primary => self.held_primary = down,
+            .middle => self.held_middle = down,
+            .secondary => self.held_secondary = down,
+            .none => {},
+        }
+    }
+
+    fn pointerLeave(self: *Window) Event {
+        const held = shared_event.firstHeldPointerButton(self.held_primary, self.held_middle, self.held_secondary);
+        self.held_primary = false;
+        self.held_middle = false;
+        self.held_secondary = false;
+        const sequence = shared_event.pointerLeaveSequence(held);
+        self.pending_pointer = sequence.queued;
+        return sequence.first;
+    }
+
     fn pointerEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
         switch (opcode) {
             0 => { // enter(serial, surface, x, y)
@@ -1454,7 +1508,7 @@ pub const Window = struct {
             1 => { // leave(serial, surface)
                 if (body.len != 8) return error.InvalidWaylandMessage;
                 self.noteSerial(get32(body[0..4]));
-                return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
+                return self.pointerLeave();
             },
             2 => { // motion(time, x, y)
                 if (body.len != 12) return error.InvalidWaylandMessage;
@@ -1483,6 +1537,7 @@ pub const Window = struct {
                     self.middle_paste = false;
                     return null;
                 }
+                self.noteHeldButton(button, pressed);
                 var clicks: u8 = 1;
                 if (pressed and button == .primary) {
                     const now = get32(body[4..8]);
@@ -3699,6 +3754,12 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1252"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1251"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1250"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-13"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1253"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1254"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1255"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1256"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1257"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-8"));
     try std.testing.expect(isPlainTextMime("text/markdown"));
     try std.testing.expect(isPlainTextMime("text/x-markdown"));

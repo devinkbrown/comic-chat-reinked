@@ -111,9 +111,10 @@ hash.
   keys. CLIPBOARD paste does not fall through to PRIMARY, and local
   CLIPBOARD text is used only while this client still owns CLIPBOARD. A
   Wayland copy before the first seat serial is advertised once a serial
-  arrives. Pointer leave and incoming DnD motion emit pointer moves so
-  hover tracks the seat; LeaveNotify / `wl_pointer.leave` / XdndLeave
-  move to `(-1,-1)` to clear hover. X11 Enter/Leave ignore grab/ungrab
+  arrives.   Pointer leave and incoming DnD motion emit pointer moves so
+  hover tracks the seat; LeaveNotify / `wl_pointer.leave` emit `.up` for a
+  held button before `(-1,-1)`, and XdndLeave
+  moves to `(-1,-1)` to clear hover. X11 Enter/Leave ignore grab/ungrab
   modes, and FocusIn/Out ignore grab/ungrab plus pointer-focus details.
   X11 wheel button releases do not emit pointer up. NumLock XOR Shift selects keypad
   digits on both backends. X11 Mod3 Mode_switch selects group 2.
@@ -122,7 +123,7 @@ hash.
   ISO-8859-15, `ESC - M` ISO-8859-9, `ESC - L` ISO-8859-5, `ESC - F`
   ISO-8859-7, `ESC - G` ISO-8859-6, and `ESC - H` ISO-8859-8. Invalid UTF-8 clipboard bytes
   decode as Latin-1, including incoming DnD and Shift+Insert / middle-click
-  paste-as-keys. Receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15 and Windows-1250/1251/1252 `text/plain` charset MIME
+  paste-as-keys. Receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15 and Windows-1250/1251/1252/1253/1254/1255/1256/1257 `text/plain` charset MIME
   (both common casings on X11) and Markdown decode to UTF-8. X11 extra
   mouse buttons 6–9 do not synthesize pointer clicks. Extra KDE5 / Mozilla-priv / KDE suggested-filename file MIME yields a local
   path. Receive-only `text/html` strips tags to plain text.
@@ -157,7 +158,8 @@ hash.
   When advertised, Wayland requests server-side decorations and
   re-requests SSD once if the compositor configures client-side mode.
   `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor, `_NET_WM_ICON` at 16/32/64/128, and an ICCCM `WM_HINTS` icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), and
-  `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
+  `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn or
+  gaining `_NET_WM_STATE_FOCUSED`.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
   `xdg_toplevel_icon_v1` (32@1 plus 64@2, reinstalled on integer scale change) when advertised. Wayland consumes
   `XDG_ACTIVATION_TOKEN` via `xdg_activation_v1` and requests a fresh token

@@ -32,10 +32,10 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15, Windows-1250/1251/1252, and Markdown MIME,
+//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
-//!     hover clear,
+//!     hover clear (a held button emits `.up` first),
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
@@ -43,7 +43,7 @@
 //!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes), a scaled
 //!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 plus ICCCM `WM_HINTS`
 //!     icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), urgency on `notify` (cleared on
-//!     FocusIn), EWMH ping/type/icon name/user time (`_NET_WM_USER_TIME` plus
+//!     FocusIn and gaining `_NET_WM_STATE_FOCUSED`), EWMH ping/type/icon name/user time (`_NET_WM_USER_TIME` plus
 //!     `_NET_WM_USER_TIME_WINDOW`) /startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
 //!     for `xdg-open`, EnterNotify cursor restore and pointer move
@@ -227,6 +227,18 @@ const XConn = struct {
     mime_text_cp1251_alt: u32 = 0,
     mime_text_cp1250: u32 = 0,
     mime_text_cp1250_alt: u32 = 0,
+    mime_text_latin7: u32 = 0,
+    mime_text_latin7_alt: u32 = 0,
+    mime_text_cp1253: u32 = 0,
+    mime_text_cp1253_alt: u32 = 0,
+    mime_text_cp1254: u32 = 0,
+    mime_text_cp1254_alt: u32 = 0,
+    mime_text_cp1255: u32 = 0,
+    mime_text_cp1255_alt: u32 = 0,
+    mime_text_cp1256: u32 = 0,
+    mime_text_cp1256_alt: u32 = 0,
+    mime_text_cp1257: u32 = 0,
+    mime_text_cp1257_alt: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -453,6 +465,10 @@ pub const Window = struct {
     last_user_time: u32,
     selection_time: u32,
     middle_paste: bool,
+    held_primary: bool,
+    held_middle: bool,
+    held_secondary: bool,
+    pending_pointer: ?Event,
     compose_table: ?xkb.ComposeTable,
     compose: xkb.Compose,
     pending_chars: std.ArrayList(u21),
@@ -527,6 +543,10 @@ pub const Window = struct {
             .last_user_time = 0,
             .selection_time = 0,
             .middle_paste = false,
+            .held_primary = false,
+            .held_middle = false,
+            .held_secondary = false,
+            .pending_pointer = null,
             .compose_table = null,
             .compose = .{},
             .pending_chars = .empty,
@@ -698,8 +718,20 @@ pub const Window = struct {
 
     /// Blocking read of the next event. Call only when data is available
     /// (after poll) to avoid stalling, or when blocking is intended.
+    /// Drain a decoded key or pointer event without reading the X socket.
+    pub fn pollEvent(self: *Window) !?Event {
+        if (self.takePendingKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
+        if (self.pending_events.items.len != 0) {
+            const raw = self.pending_events.orderedRemove(0);
+            return self.decode(raw);
+        }
+        return null;
+    }
+
     pub fn nextEvent(self: *Window) !Event {
         if (self.takePendingKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
         if (self.pending_events.items.len != 0) {
             const raw = self.pending_events.orderedRemove(0);
             return self.decode(raw);
@@ -769,6 +801,8 @@ pub const Window = struct {
                     self.middle_paste = false;
                     return .other;
                 }
+                if (kind == 4) self.noteHeldButton(button, true);
+                if (kind == 5) self.noteHeldButton(button, false);
                 var clicks: u8 = 1;
                 if (kind == 4 and button == .primary) {
                     const now = get32(event[4..8]);
@@ -801,7 +835,7 @@ pub const Window = struct {
             },
             8 => { // LeaveNotify
                 if (x11NotifyModeIsGrab(event[30])) return .other;
-                return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
+                return self.pointerLeave();
             },
             9 => { // FocusIn
                 if (x11NotifyModeIsGrab(event[8]) or x11FocusDetailIsPointer(event[1])) return .other;
@@ -892,6 +926,7 @@ pub const Window = struct {
                     const was_hidden = self.wm_hidden;
                     const was_focused = self.wm_focused;
                     self.readNetWmState();
+                    if (!was_focused and self.wm_focused) self.clearAttention();
                     if (netStateExpose(was_hidden, self.wm_hidden, was_focused, self.wm_focused)) return .expose;
                 }
                 if (window == self.window and atom == self.conn.wm_state) {
@@ -935,6 +970,7 @@ pub const Window = struct {
                     const was_hidden = self.wm_hidden;
                     const was_focused = self.wm_focused;
                     self.applyNetWmStateMessage(event);
+                    if (!was_focused and self.wm_focused) self.clearAttention();
                     if (netStateExpose(was_hidden, self.wm_hidden, was_focused, self.wm_focused)) return .expose;
                 } else if (typ == self.conn.wm_change_state) {
                     const was_hidden = self.wm_hidden;
@@ -1096,6 +1132,18 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1251_alt, "windows-1251")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1250, "windows-1250")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1250_alt, "windows-1250")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin7, "ISO-8859-13")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin7_alt, "ISO-8859-13")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1253, "windows-1253")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1253_alt, "windows-1253")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1254, "windows-1254")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1254_alt, "windows-1254")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1255, "windows-1255")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1255_alt, "windows-1255")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1256, "windows-1256")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1256_alt, "windows-1256")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1257, "windows-1257")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1257_alt, "windows-1257")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1232,6 +1280,36 @@ pub const Window = struct {
         }
         if (isCp1250Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1250") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isLatin7Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-13") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCp1253Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1253") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCp1254Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1254") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCp1255Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1255") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCp1256Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1256") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCp1257Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1257") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
@@ -1506,6 +1584,7 @@ pub const Window = struct {
             self.touch_contact = touch_id;
             self.noteUserTime(get32(event[12..16]));
             self.claimFocus(get32(event[12..16]));
+            self.noteHeldButton(.primary, true);
             return .{ .pointer = .{ .kind = .down, .x = x, .y = y, .button = .primary } };
         }
         if (self.touch_contact == null or self.touch_contact.? != touch_id) return .other;
@@ -1513,6 +1592,7 @@ pub const Window = struct {
             return .{ .pointer = .{ .kind = .move, .x = x, .y = y } };
         }
         self.touch_contact = null;
+        self.noteHeldButton(.primary, false);
         return .{ .pointer = .{ .kind = .up, .x = x, .y = y, .button = .primary } };
     }
 
@@ -1702,6 +1782,31 @@ pub const Window = struct {
         if (self.pending_chars.items.len == 0) return null;
         const ch = self.pending_chars.orderedRemove(0);
         return .{ .key = .{ .key = .{ .char = ch } } };
+    }
+
+    fn takePendingPointer(self: *Window) ?Event {
+        const event = self.pending_pointer orelse return null;
+        self.pending_pointer = null;
+        return event;
+    }
+
+    fn noteHeldButton(self: *Window, button: shared_event.PointerButton, down: bool) void {
+        switch (button) {
+            .primary => self.held_primary = down,
+            .middle => self.held_middle = down,
+            .secondary => self.held_secondary = down,
+            .none => {},
+        }
+    }
+
+    fn pointerLeave(self: *Window) Event {
+        const held = shared_event.firstHeldPointerButton(self.held_primary, self.held_middle, self.held_secondary);
+        self.held_primary = false;
+        self.held_middle = false;
+        self.held_secondary = false;
+        const sequence = shared_event.pointerLeaveSequence(held);
+        self.pending_pointer = sequence.queued;
+        return sequence.first;
     }
 
     fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
@@ -2790,6 +2895,18 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_cp1251_alt = try internAtom(conn, "text/plain;charset=cp1251");
     conn.mime_text_cp1250 = try internAtom(conn, "text/plain;charset=windows-1250");
     conn.mime_text_cp1250_alt = try internAtom(conn, "text/plain;charset=cp1250");
+    conn.mime_text_latin7 = try internAtom(conn, "text/plain;charset=ISO-8859-13");
+    conn.mime_text_latin7_alt = try internAtom(conn, "text/plain;charset=iso-8859-13");
+    conn.mime_text_cp1253 = try internAtom(conn, "text/plain;charset=windows-1253");
+    conn.mime_text_cp1253_alt = try internAtom(conn, "text/plain;charset=cp1253");
+    conn.mime_text_cp1254 = try internAtom(conn, "text/plain;charset=windows-1254");
+    conn.mime_text_cp1254_alt = try internAtom(conn, "text/plain;charset=cp1254");
+    conn.mime_text_cp1255 = try internAtom(conn, "text/plain;charset=windows-1255");
+    conn.mime_text_cp1255_alt = try internAtom(conn, "text/plain;charset=cp1255");
+    conn.mime_text_cp1256 = try internAtom(conn, "text/plain;charset=windows-1256");
+    conn.mime_text_cp1256_alt = try internAtom(conn, "text/plain;charset=cp1256");
+    conn.mime_text_cp1257 = try internAtom(conn, "text/plain;charset=windows-1257");
+    conn.mime_text_cp1257_alt = try internAtom(conn, "text/plain;charset=cp1257");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3523,7 +3640,8 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom) or isLatin5Atom(conn, atom) or
         isCyrillicAtom(conn, atom) or isGreekAtom(conn, atom) or isLatin3Atom(conn, atom) or isLatin4Atom(conn, atom) or
         isArabicAtom(conn, atom) or isHebrewAtom(conn, atom) or isCp1252Atom(conn, atom) or isCp1251Atom(conn, atom) or
-        isCp1250Atom(conn, atom)) return 3;
+        isCp1250Atom(conn, atom) or isLatin7Atom(conn, atom) or isCp1253Atom(conn, atom) or isCp1254Atom(conn, atom) or
+        isCp1255Atom(conn, atom) or isCp1256Atom(conn, atom) or isCp1257Atom(conn, atom)) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3594,6 +3712,30 @@ fn isCp1250Atom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_cp1250 or atom == conn.mime_text_cp1250_alt);
 }
 
+fn isLatin7Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_latin7 or atom == conn.mime_text_latin7_alt);
+}
+
+fn isCp1253Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cp1253 or atom == conn.mime_text_cp1253_alt);
+}
+
+fn isCp1254Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cp1254 or atom == conn.mime_text_cp1254_alt);
+}
+
+fn isCp1255Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cp1255 or atom == conn.mime_text_cp1255_alt);
+}
+
+fn isCp1256Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cp1256 or atom == conn.mime_text_cp1256_alt);
+}
+
+fn isCp1257Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cp1257 or atom == conn.mime_text_cp1257_alt);
+}
+
 fn x11NotifyModeIsGrab(mode: u8) bool {
     return mode == notify_mode_grab or mode == notify_mode_ungrab;
 }
@@ -3640,7 +3782,10 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         isLatin3Atom(conn, target) or isLatin4Atom(conn, target) or
         isArabicAtom(conn, target) or isHebrewAtom(conn, target) or
         isCp1252Atom(conn, target) or isCp1251Atom(conn, target) or
-        isCp1250Atom(conn, target) or isMarkdownAtom(conn, target);
+        isCp1250Atom(conn, target) or isLatin7Atom(conn, target) or
+        isCp1253Atom(conn, target) or isCp1254Atom(conn, target) or
+        isCp1255Atom(conn, target) or isCp1256Atom(conn, target) or
+        isCp1257Atom(conn, target) or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3973,6 +4118,18 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_cp1251_alt = 148,
         .mime_text_cp1250 = 149,
         .mime_text_cp1250_alt = 150,
+        .mime_text_latin7 = 151,
+        .mime_text_latin7_alt = 152,
+        .mime_text_cp1253 = 153,
+        .mime_text_cp1253_alt = 154,
+        .mime_text_cp1254 = 155,
+        .mime_text_cp1254_alt = 156,
+        .mime_text_cp1255 = 157,
+        .mime_text_cp1255_alt = 158,
+        .mime_text_cp1256 = 159,
+        .mime_text_cp1256_alt = 160,
+        .mime_text_cp1257 = 161,
+        .mime_text_cp1257_alt = 162,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -4065,6 +4222,18 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isCp1250Atom(&conn, 149));
     try std.testing.expect(isClipboardTextTarget(&conn, 149));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 149));
+    try std.testing.expect(isLatin7Atom(&conn, 151));
+    try std.testing.expect(isCp1253Atom(&conn, 153));
+    try std.testing.expect(isCp1254Atom(&conn, 155));
+    try std.testing.expect(isCp1255Atom(&conn, 157));
+    try std.testing.expect(isCp1256Atom(&conn, 159));
+    try std.testing.expect(isCp1257Atom(&conn, 161));
+    try std.testing.expect(isClipboardTextTarget(&conn, 151));
+    try std.testing.expect(isClipboardTextTarget(&conn, 153));
+    try std.testing.expect(isClipboardTextTarget(&conn, 161));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 151));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 155));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 161));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));

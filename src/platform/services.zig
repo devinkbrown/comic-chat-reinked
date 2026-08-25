@@ -7,7 +7,8 @@
 //! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
 //! printing. `xdg-open` can carry an outgoing activation / startup token.
 //! Incoming desktop file-list MIME, receive-only RTF, receive-only
-//! COMPOUND_TEXT (including ISO-8859-2/3/4/5/6/7/8/9/15), ISO-8859 charset MIME, Markdown,
+//! COMPOUND_TEXT (including ISO-8859-2/3/4/5/6/7/8/9/15), ISO-8859 charset MIME
+//! (including ISO-8859-13), Windows-1250/1251/1252/1253/1254/1255/1256/1257, Markdown,
 //! and invalid-UTF-8 Latin-1 fallback are parsed here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
 //! internal application fallback.
@@ -511,8 +512,9 @@ pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
 }
 
-/// Receive-only `text/plain;charset=...` (ISO-8859-1/2/3/4/5/6/7/8/9/15 and
-/// Windows-1250/1251/1252). Other charsets fall back to `clipboardBytesToUtf8`.
+/// Receive-only `text/plain;charset=...` (ISO-8859-1/2/3/4/5/6/7/8/9/13/15 and
+/// Windows-1250/1251/1252/1253/1254/1255/1256/1257). Other charsets fall back
+/// to `clipboardBytesToUtf8`.
 pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: []const u8) ![]u8 {
     if (isUtf8Charset(charset) or isAsciiCharset(charset)) {
         return clipboardBytesToUtf8(gpa, bytes);
@@ -530,6 +532,12 @@ pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: 
     if (isWindows1252Charset(charset)) return windows1252ToUtf8(gpa, bytes);
     if (isWindows1251Charset(charset)) return windows1251ToUtf8(gpa, bytes);
     if (isWindows1250Charset(charset)) return windows1250ToUtf8(gpa, bytes);
+    if (isIso885913Charset(charset)) return iso885913ToUtf8(gpa, bytes);
+    if (isWindows1253Charset(charset)) return windows1253ToUtf8(gpa, bytes);
+    if (isWindows1254Charset(charset)) return windows1254ToUtf8(gpa, bytes);
+    if (isWindows1255Charset(charset)) return windows1255ToUtf8(gpa, bytes);
+    if (isWindows1256Charset(charset)) return windows1256ToUtf8(gpa, bytes);
+    if (isWindows1257Charset(charset)) return windows1257ToUtf8(gpa, bytes);
     return clipboardBytesToUtf8(gpa, bytes);
 }
 
@@ -557,8 +565,11 @@ pub fn isLatinPlainMime(mime: []const u8) bool {
         isIso88595Charset(charset) or isIso88597Charset(charset) or
         isIso88593Charset(charset) or isIso88594Charset(charset) or
         isIso88596Charset(charset) or isIso88598Charset(charset) or
+        isIso885913Charset(charset) or
         isWindows1252Charset(charset) or isWindows1251Charset(charset) or
-        isWindows1250Charset(charset);
+        isWindows1250Charset(charset) or isWindows1253Charset(charset) or
+        isWindows1254Charset(charset) or isWindows1255Charset(charset) or
+        isWindows1256Charset(charset) or isWindows1257Charset(charset);
 }
 
 pub fn decodePlainMime(gpa: std.mem.Allocator, mime: []const u8, bytes: []const u8) ![]u8 {
@@ -660,6 +671,48 @@ fn isWindows1250Charset(charset: []const u8) bool {
         std.ascii.eqlIgnoreCase(charset, "windows1250") or
         std.ascii.eqlIgnoreCase(charset, "cp1250") or
         std.ascii.eqlIgnoreCase(charset, "cp-1250");
+}
+
+fn isIso885913Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-13") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-13") or
+        std.ascii.eqlIgnoreCase(charset, "latin7") or
+        std.ascii.eqlIgnoreCase(charset, "latin-7");
+}
+
+fn isWindows1253Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1253") or
+        std.ascii.eqlIgnoreCase(charset, "windows1253") or
+        std.ascii.eqlIgnoreCase(charset, "cp1253") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1253");
+}
+
+fn isWindows1254Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1254") or
+        std.ascii.eqlIgnoreCase(charset, "windows1254") or
+        std.ascii.eqlIgnoreCase(charset, "cp1254") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1254");
+}
+
+fn isWindows1255Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1255") or
+        std.ascii.eqlIgnoreCase(charset, "windows1255") or
+        std.ascii.eqlIgnoreCase(charset, "cp1255") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1255");
+}
+
+fn isWindows1256Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1256") or
+        std.ascii.eqlIgnoreCase(charset, "windows1256") or
+        std.ascii.eqlIgnoreCase(charset, "cp1256") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1256");
+}
+
+fn isWindows1257Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1257") or
+        std.ascii.eqlIgnoreCase(charset, "windows1257") or
+        std.ascii.eqlIgnoreCase(charset, "cp1257") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1257");
 }
 
 /// Receive-only ICCCM COMPOUND_TEXT. Default charset is ISO-8859-1. `ESC % G`
@@ -889,6 +942,48 @@ fn windows1250ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
 }
 
+fn iso885913ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso885913Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1253ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1253Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1254ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1254Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1255ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1255Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1256ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1256Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1257ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1257Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
 fn appendLatin1(out: *std.ArrayList(u8), gpa: std.mem.Allocator, c: u8) !void {
     try appendCodepoint(out, gpa, c);
 }
@@ -1020,6 +1115,146 @@ const windows1250_80 = [_]u21{
     0x010d, 0x00e9, 0x0119, 0x00eb, 0x011b, 0x00ed, 0x00ee, 0x010f,
     0x0111, 0x0144, 0x0148, 0x00f3, 0x00f4, 0x0151, 0x00f6, 0x00f7,
     0x0159, 0x016f, 0x00fa, 0x0171, 0x00fc, 0x00fd, 0x0163, 0x02d9,
+};
+
+fn iso885913Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso885913_a0[c - 0xa0];
+}
+
+fn windows1253Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1253_80[c - 0x80];
+}
+
+fn windows1254Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1254_80[c - 0x80];
+}
+
+fn windows1255Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1255_80[c - 0x80];
+}
+
+fn windows1256Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1256_80[c - 0x80];
+}
+
+fn windows1257Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1257_80[c - 0x80];
+}
+
+const iso885913_a0 = [_]u21{
+    0x00a0, 0x201d, 0x00a2, 0x00a3, 0x00a4, 0x201e, 0x00a6, 0x00a7,
+    0x00d8, 0x00a9, 0x0156, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00c6,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x201c, 0x00b5, 0x00b6, 0x00b7,
+    0x00f8, 0x00b9, 0x0157, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00e6,
+    0x0104, 0x012e, 0x0100, 0x0106, 0x00c4, 0x00c5, 0x0118, 0x0112,
+    0x010c, 0x00c9, 0x0179, 0x0116, 0x0122, 0x0136, 0x012a, 0x013b,
+    0x0160, 0x0143, 0x0145, 0x00d3, 0x014c, 0x00d5, 0x00d6, 0x00d7,
+    0x0172, 0x0141, 0x015a, 0x016a, 0x00dc, 0x017b, 0x017d, 0x00df,
+    0x0105, 0x012f, 0x0101, 0x0107, 0x00e4, 0x00e5, 0x0119, 0x0113,
+    0x010d, 0x00e9, 0x017a, 0x0117, 0x0123, 0x0137, 0x012b, 0x013c,
+    0x0161, 0x0144, 0x0146, 0x00f3, 0x014d, 0x00f5, 0x00f6, 0x00f7,
+    0x0173, 0x0142, 0x015b, 0x016b, 0x00fc, 0x017c, 0x017e, 0x2019,
+};
+
+const windows1253_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0xfffd, 0x2030, 0xfffd, 0x2039, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0xfffd, 0x2122, 0xfffd, 0x203a, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0x00a0, 0x0385, 0x0386, 0x00a3, 0x00a4, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0xfffd, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x2015,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x0384, 0x00b5, 0x00b6, 0x00b7,
+    0x0388, 0x0389, 0x038a, 0x00bb, 0x038c, 0x00bd, 0x038e, 0x038f,
+    0x0390, 0x0391, 0x0392, 0x0393, 0x0394, 0x0395, 0x0396, 0x0397,
+    0x0398, 0x0399, 0x039a, 0x039b, 0x039c, 0x039d, 0x039e, 0x039f,
+    0x03a0, 0x03a1, 0xfffd, 0x03a3, 0x03a4, 0x03a5, 0x03a6, 0x03a7,
+    0x03a8, 0x03a9, 0x03aa, 0x03ab, 0x03ac, 0x03ad, 0x03ae, 0x03af,
+    0x03b0, 0x03b1, 0x03b2, 0x03b3, 0x03b4, 0x03b5, 0x03b6, 0x03b7,
+    0x03b8, 0x03b9, 0x03ba, 0x03bb, 0x03bc, 0x03bd, 0x03be, 0x03bf,
+    0x03c0, 0x03c1, 0x03c2, 0x03c3, 0x03c4, 0x03c5, 0x03c6, 0x03c7,
+    0x03c8, 0x03c9, 0x03ca, 0x03cb, 0x03cc, 0x03cd, 0x03ce, 0xfffd,
+};
+
+const windows1254_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0xfffd, 0xfffd, 0xfffd,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0xfffd, 0xfffd, 0x0178,
+    0x00a0, 0x00a1, 0x00a2, 0x00a3, 0x00a4, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x00aa, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00af,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x00b9, 0x00ba, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00bf,
+    0x00c0, 0x00c1, 0x00c2, 0x00c3, 0x00c4, 0x00c5, 0x00c6, 0x00c7,
+    0x00c8, 0x00c9, 0x00ca, 0x00cb, 0x00cc, 0x00cd, 0x00ce, 0x00cf,
+    0x011e, 0x00d1, 0x00d2, 0x00d3, 0x00d4, 0x00d5, 0x00d6, 0x00d7,
+    0x00d8, 0x00d9, 0x00da, 0x00db, 0x00dc, 0x0130, 0x015e, 0x00df,
+    0x00e0, 0x00e1, 0x00e2, 0x00e3, 0x00e4, 0x00e5, 0x00e6, 0x00e7,
+    0x00e8, 0x00e9, 0x00ea, 0x00eb, 0x00ec, 0x00ed, 0x00ee, 0x00ef,
+    0x011f, 0x00f1, 0x00f2, 0x00f3, 0x00f4, 0x00f5, 0x00f6, 0x00f7,
+    0x00f8, 0x00f9, 0x00fa, 0x00fb, 0x00fc, 0x0131, 0x015f, 0x00ff,
+};
+
+const windows1255_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x02c6, 0x2030, 0xfffd, 0x2039, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x02dc, 0x2122, 0xfffd, 0x203a, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0x00a0, 0x00a1, 0x00a2, 0x00a3, 0x20aa, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x00d7, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00af,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x00b9, 0x00f7, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00bf,
+    0x05b0, 0x05b1, 0x05b2, 0x05b3, 0x05b4, 0x05b5, 0x05b6, 0x05b7,
+    0x05b8, 0x05b9, 0xfffd, 0x05bb, 0x05bc, 0x05bd, 0x05be, 0x05bf,
+    0x05c0, 0x05c1, 0x05c2, 0x05c3, 0x05f0, 0x05f1, 0x05f2, 0x05f3,
+    0x05f4, 0xfffd, 0xfffd, 0xfffd, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0x05d0, 0x05d1, 0x05d2, 0x05d3, 0x05d4, 0x05d5, 0x05d6, 0x05d7,
+    0x05d8, 0x05d9, 0x05da, 0x05db, 0x05dc, 0x05dd, 0x05de, 0x05df,
+    0x05e0, 0x05e1, 0x05e2, 0x05e3, 0x05e4, 0x05e5, 0x05e6, 0x05e7,
+    0x05e8, 0x05e9, 0x05ea, 0xfffd, 0xfffd, 0x200e, 0x200f, 0xfffd,
+};
+
+const windows1256_80 = [_]u21{
+    0x20ac, 0x067e, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x02c6, 0x2030, 0x0679, 0x2039, 0x0152, 0x0686, 0x0698, 0x0688,
+    0x06af, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x06a9, 0x2122, 0x0691, 0x203a, 0x0153, 0x200c, 0x200d, 0x06ba,
+    0x00a0, 0x060c, 0x00a2, 0x00a3, 0x00a4, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x06be, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00af,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x00b9, 0x061b, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x061f,
+    0x06c1, 0x0621, 0x0622, 0x0623, 0x0624, 0x0625, 0x0626, 0x0627,
+    0x0628, 0x0629, 0x062a, 0x062b, 0x062c, 0x062d, 0x062e, 0x062f,
+    0x0630, 0x0631, 0x0632, 0x0633, 0x0634, 0x0635, 0x0636, 0x00d7,
+    0x0637, 0x0638, 0x0639, 0x063a, 0x0640, 0x0641, 0x0642, 0x0643,
+    0x00e0, 0x0644, 0x00e2, 0x0645, 0x0646, 0x0647, 0x0648, 0x00e7,
+    0x00e8, 0x00e9, 0x00ea, 0x00eb, 0x0649, 0x064a, 0x00ee, 0x00ef,
+    0x064b, 0x064c, 0x064d, 0x064e, 0x00f4, 0x064f, 0x0650, 0x00f7,
+    0x0651, 0x00f9, 0x0652, 0x00fb, 0x00fc, 0x200e, 0x200f, 0x06d2,
+};
+
+const windows1257_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0xfffd, 0x201e, 0x2026, 0x2020, 0x2021,
+    0xfffd, 0x2030, 0xfffd, 0x2039, 0xfffd, 0x00a8, 0x02c7, 0x00b8,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0xfffd, 0x2122, 0xfffd, 0x203a, 0xfffd, 0x00af, 0x02db, 0xfffd,
+    0x00a0, 0xfffd, 0x00a2, 0x00a3, 0x00a4, 0xfffd, 0x00a6, 0x00a7,
+    0x00d8, 0x00a9, 0x0156, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00c6,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00f8, 0x00b9, 0x0157, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00e6,
+    0x0104, 0x012e, 0x0100, 0x0106, 0x00c4, 0x00c5, 0x0118, 0x0112,
+    0x010c, 0x00c9, 0x0179, 0x0116, 0x0122, 0x0136, 0x012a, 0x013b,
+    0x0160, 0x0143, 0x0145, 0x00d3, 0x014c, 0x00d5, 0x00d6, 0x00d7,
+    0x0172, 0x0141, 0x015a, 0x016a, 0x00dc, 0x017b, 0x017d, 0x00df,
+    0x0105, 0x012f, 0x0101, 0x0107, 0x00e4, 0x00e5, 0x0119, 0x0113,
+    0x010d, 0x00e9, 0x017a, 0x0117, 0x0123, 0x0137, 0x012b, 0x013c,
+    0x0161, 0x0144, 0x0146, 0x00f3, 0x014d, 0x00f5, 0x00f6, 0x00f7,
+    0x0173, 0x0142, 0x015b, 0x016b, 0x00fc, 0x017c, 0x017e, 0x02d9,
 };
 
 fn windows1251Codepoint(c: u8) u21 {
@@ -2083,6 +2318,33 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     try std.testing.expect(isLatinPlainMime("text/plain;charset=latin3"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=arabic"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=hebrew"));
+    const ogonek13 = try decodePlainByCharset(gpa, "\xc0", "ISO-8859-13");
+    defer gpa.free(ogonek13);
+    try std.testing.expectEqualStrings("Ą", ogonek13);
+    const ogonek13_lc = try decodePlainByCharset(gpa, "\xc0", "latin7");
+    defer gpa.free(ogonek13_lc);
+    try std.testing.expectEqualStrings("Ą", ogonek13_lc);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=iso-8859-13"));
+    const alpha1253 = try decodePlainByCharset(gpa, "\xc1", "windows-1253");
+    defer gpa.free(alpha1253);
+    try std.testing.expectEqualStrings("Α", alpha1253);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1253"));
+    const gbreve = try decodePlainByCharset(gpa, "\xd0", "windows-1254");
+    defer gpa.free(gbreve);
+    try std.testing.expectEqualStrings("Ğ", gbreve);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1254"));
+    const alef1255 = try decodePlainByCharset(gpa, "\xe0", "windows-1255");
+    defer gpa.free(alef1255);
+    try std.testing.expectEqualStrings("א", alef1255);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1255"));
+    const alef1256 = try decodePlainByCharset(gpa, "\xc7", "windows-1256");
+    defer gpa.free(alef1256);
+    try std.testing.expectEqualStrings("ا", alef1256);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1256"));
+    const ogonek1257 = try decodePlainByCharset(gpa, "\xc0", "windows-1257");
+    defer gpa.free(ogonek1257);
+    try std.testing.expectEqualStrings("Ą", ogonek1257);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1257"));
 }
 
 test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n sets" {
