@@ -106,10 +106,13 @@ hash.
   user timestamp rather than CurrentTime. XDND also prefers TARGETS and
   uses the drop timestamp. Middle-click pastes PRIMARY as typed keys, with
   `wl-paste --primary` / `xclip`/`xsel` PRIMARY fallback when the native
-  protocol is missing. Receive-only `text/html` strips tags to plain text.
+  protocol is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed
+  keys. Receive-only `text/html` strips tags to plain text.
   Clipboard text normalizes
-  CR/LF to LF. `notify-send` uses `--urgency=normal`.   Central European Latin-2, Latin-3, Latin-4, Latin-9, Greek, Hebrew, Arabic,
-  Armenian, Georgian, Thai,
+  CR/LF to LF. `notify-send` uses `--urgency=normal` and
+  `--icon=applications-internet`.   Central European Latin-2, Latin-3, Latin-4, Latin-9, Greek, Hebrew, Arabic,
+  Armenian, Georgian, Thai, extra Ukrainian/Belarusian/Serbian/Macedonian
+  Cyrillic,
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
   requests.   X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`

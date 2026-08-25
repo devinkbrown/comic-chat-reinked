@@ -34,7 +34,8 @@
 //! file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
 //! `application/x-moz-file`). Middle-click pastes PRIMARY as typed keys
 //! and falls back to `wl-paste --primary` when the native primary protocol
-//! is missing. `present()` skips commits while the toplevel is suspended.
+//! is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed keys.
+//! `present()` skips commits while the toplevel is suspended.
 //! Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
@@ -1529,6 +1530,16 @@ pub const Window = struct {
                 if (self.ime_composing) return null;
                 const shifted = self.shift_left or self.shift_right;
                 const control = self.control_left or self.control_right;
+                const paste = if (self.currentKeysymName(code, shifted)) |name|
+                    xkb.isClipboardPasteKeyName(name, shifted, control)
+                else
+                    isClipboardPasteEvdev(code, shifted, control);
+                if (paste) {
+                    if (self.pasteClipboardAsKeys()) |ev| {
+                        self.held_key_code = null;
+                        return ev;
+                    }
+                }
                 const key = self.translateComposed(code, shifted, control);
                 if (key) |translated| {
                     if (shouldSuppressImeDuplicate(self.last_committed, translated)) {
@@ -1764,6 +1775,19 @@ pub const Window = struct {
             }
         } else |_| {}
         const fallback = services.readPrimary(self.gpa, self.conn.io, .wayland) catch return null;
+        const bytes = fallback orelse return null;
+        defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn pasteClipboardAsKeys(self: *Window) ?Event {
+        if (self.readClipboardNative(self.gpa)) |text| {
+            if (text) |bytes| {
+                defer self.gpa.free(bytes);
+                return self.enqueueDropText(bytes) catch null;
+            }
+        } else |_| {}
+        const fallback = services.readClipboard(self.gpa, self.conn.io, .wayland) catch return null;
         const bytes = fallback orelse return null;
         defer self.gpa.free(bytes);
         return self.enqueueDropText(bytes) catch null;
@@ -2651,6 +2675,15 @@ fn heldModsFromKeyArray(keys: []const u8) HeldMods {
     return mods;
 }
 
+const evdev_insert: u32 = 110;
+const evdev_paste: u32 = 135;
+
+fn isClipboardPasteEvdev(code: u32, shift: bool, control: bool) bool {
+    if (control) return false;
+    if (code == evdev_paste) return true;
+    return shift and code == evdev_insert;
+}
+
 fn isModifierEvdev(code: u32) bool {
     return switch (code) {
         29, 42, 54, 56, 58, 97, 100, 125, 126 => true,
@@ -3401,6 +3434,14 @@ test "keyboard-enter key array restores held modifiers" {
     put32(mixed[4..8], 30);
     try std.testing.expectEqual(@as(u32, 30), heldNonModifierFromKeyArray(&mixed).?);
     try std.testing.expect(heldNonModifierFromKeyArray(keys[0..4]) == null);
+}
+
+test "Shift+Insert and XF86Paste evdev codes are clipboard paste keys" {
+    try std.testing.expect(isClipboardPasteEvdev(110, true, false));
+    try std.testing.expect(isClipboardPasteEvdev(135, false, false));
+    try std.testing.expect(!isClipboardPasteEvdev(110, false, false));
+    try std.testing.expect(!isClipboardPasteEvdev(110, true, true));
+    try std.testing.expect(!isClipboardPasteEvdev(135, false, true));
 }
 
 test "IME cursor rectangle sits on the bottom composer strip" {

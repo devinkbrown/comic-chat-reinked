@@ -26,7 +26,8 @@
 //!     receive-only `text/x-uri-list`, receive-only `text/rtf`,
 //!     receive-only desktop file-list MIME, and
 //!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, Armenian/Georgian
-//!     keysyms, receive-only
+//!     keysyms, extra Ukrainian/Belarusian/Serbian/Macedonian Cyrillic,
+//!     Shift+Insert / XF86Paste CLIPBOARD paste as typed keys, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback), TARGETS-first XDND,
 //!     clipboard-manager handoff, UTF-8 BOM
@@ -635,6 +636,9 @@ pub const Window = struct {
                     .alt = state & 8 != 0 or state & 0x80 != 0,
                     .super = state & 64 != 0,
                 };
+                if (xkb.isClipboardPasteKeysym(self.keymap.keysym(keycode, state), modifiers.shift, modifiers.control)) {
+                    if (self.pasteClipboardAsKeys()) |ev| return ev;
+                }
                 const key = self.translateComposed(keycode, state, modifiers.control);
                 if (key == null) return .other;
                 return .{ .key = .{ .key = key.?, .modifiers = modifiers } };
@@ -1040,6 +1044,19 @@ pub const Window = struct {
         const bytes = self.takePrimaryBytes() orelse return null;
         defer self.gpa.free(bytes);
         return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn pasteClipboardAsKeys(self: *Window) ?Event {
+        const bytes = self.takeClipboardBytes() orelse return null;
+        defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn takeClipboardBytes(self: *Window) ?[]u8 {
+        if (self.readClipboardNative(self.gpa)) |text| {
+            if (text) |bytes| return bytes;
+        } else |_| {}
+        return services.readClipboard(self.gpa, self.conn.io, .x11) catch null;
     }
 
     fn takePrimaryBytes(self: *Window) ?[]u8 {
@@ -3449,6 +3466,8 @@ test "keysymToKey maps printable ASCII and editing keys" {
     try std.testing.expectEqual(Key.page_up, keysymToKey(0xff55));
     try std.testing.expectEqual(Key{ .char = '5' }, keysymToKey(0xffb5));
     try std.testing.expectEqual(Key.other, keysymToKey(0xffe1)); // Shift_L
+    try std.testing.expectEqual(Key{ .char = 0x0456 }, keysymToKey(0x06a6));
+    try std.testing.expectEqual(Key{ .char = 0x0406 }, keysymToKey(0x06b6));
 }
 
 test "Keymap.translate: shift columns and alpha case rules" {

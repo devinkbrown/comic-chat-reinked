@@ -287,10 +287,12 @@ decode including receive-only `text/plain;charset=utf-16`, `text/html`,
 `text/rtf`, `text/x-uri-list`, and
 desktop file-list MIME, and CR/LF
 normalized to LF), skips `present()` while suspended, pastes PRIMARY on
-middle-click as typed keys (`wl-paste --primary` fallback), injects
+middle-click as typed keys (`wl-paste --primary` fallback), pastes CLIPBOARD on
+Shift+Insert / XF86Paste as typed keys, injects
 text/`file:` drops as typed keys with `data_offer.set_actions(copy)`, shows
 a `wp_cursor_shape_v1` or scaled shm pointer, and sets
-`xdg_toplevel_icon_v1` when advertised. Armenian, Georgian, Thai, Latin-3, and
+`xdg_toplevel_icon_v1` when advertised. Armenian, Georgian, Thai, extra
+Cyrillic (Ukrainian/Belarusian/Serbian/Macedonian), Latin-3, and
 Latin-4 keysyms type
 without an IME.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
@@ -306,12 +308,12 @@ CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
 `text/uri-list`, receive-only `text/x-uri-list` / `text/rtf`, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
 TARGETS list and sending a user ConvertSelection timestamp), accepts XDND text/`file:`
 drops as typed keys (TARGETS-first, drop timestamp), pastes PRIMARY on
-middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback), accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
+middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE` (skipping `present()` while hidden or
 fully obscured; MapNotify exposes), honors keyboard group bits and
 MappingNotify without dropping queued events, resets compose on FocusOut,
 installs a scaled core pointer and `_NET_WM_ICON`, raises urgency on
-`notify` until FocusIn (`notify-send --urgency=normal`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
+`notify` until FocusIn (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
 present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
 `_NET_WM_USER_TIME`, `_NET_STARTUP_ID` plus a startup-notification remove
 after map, EnterNotify cursor restore, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and

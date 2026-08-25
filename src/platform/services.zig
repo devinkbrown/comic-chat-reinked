@@ -4,7 +4,7 @@
 //! primary clipboard path. These helpers are the fallback when a compositor or
 //! X server cannot complete the native transfer (including `wl-paste --primary`
 //! / `xclip -selection primary` when PRIMARY is missing), plus notifications
-//! (`notify-send --urgency=normal`), file selection, document opening, and
+//! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
 //! printing. Incoming desktop file-list MIME and receive-only RTF are parsed
 //! here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
@@ -1051,11 +1051,12 @@ fn chooseFileKdialog(gpa: std.mem.Allocator, io: std.Io, save: bool, title: []co
 }
 
 const notify_urgency_flag = "--urgency=normal";
+const notify_icon_flag = "--icon=applications-internet";
 
 pub fn notify(gpa: std.mem.Allocator, io: std.Io, title: []const u8, body: []const u8) !void {
     if (title.len > 256 or body.len > 4096) return error.NotificationTooLarge;
     var result = try std.process.run(gpa, io, .{
-        .argv = &.{ "notify-send", notify_urgency_flag, "--app-name=Comic Chat", title, body },
+        .argv = &.{ "notify-send", notify_urgency_flag, notify_icon_flag, "--app-name=Comic Chat", title, body },
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
     });
@@ -1299,6 +1300,7 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
 
 test "notify-send uses a normal urgency hint" {
     try std.testing.expectEqualStrings("--urgency=normal", notify_urgency_flag);
+    try std.testing.expectEqualStrings("--icon=applications-internet", notify_icon_flag);
 }
 
 test "isHtmlMime accepts charset parameters" {

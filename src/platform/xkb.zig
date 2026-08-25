@@ -17,7 +17,9 @@
 //! Latin-3 (`0x02a1`–`0x02fe`), Latin-4 (`0x03a2`–`0x03fe`),
 //! Latin-9 OE/Ydiaeresis, Greek, Hebrew, Arabic, Armenian, Georgian, and Thai
 //! letters resolve to
-//! characters without an IME. A
+//! characters without an IME. Extra Ukrainian, Belarusian, Serbian, and
+//! Macedonian Cyrillic names and `0x06a1`–`0x06af` / `0x06b1`–`0x06bf`
+//! keysyms type without an IME. A
 //! bounded dead-key / Multi_key composer plus optional XCompose locale
 //! tables (`~/.XCompose`,
 //! `XCOMPOSEFILE`, `%L`) cover European accents (see `Compose`). A
@@ -605,6 +607,34 @@ const named_cyrillic_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Cyrillic_HARDSIGN", 0x042a },
     .{ "Cyrillic_io", 0x0451 },
     .{ "Cyrillic_IO", 0x0401 },
+    .{ "Ukrainian_ie", 0x0454 },
+    .{ "Ukrainian_IE", 0x0404 },
+    .{ "Ukrainian_i", 0x0456 },
+    .{ "Ukrainian_I", 0x0406 },
+    .{ "Ukrainian_yi", 0x0457 },
+    .{ "Ukrainian_YI", 0x0407 },
+    .{ "Ukrainian_ghe_with_upturn", 0x0491 },
+    .{ "Ukrainian_GHE_WITH_UPTURN", 0x0490 },
+    .{ "Byelorussian_shortu", 0x045e },
+    .{ "Byelorussian_SHORTU", 0x040e },
+    .{ "Serbian_dje", 0x0452 },
+    .{ "Serbian_DJE", 0x0402 },
+    .{ "Macedonia_gje", 0x0453 },
+    .{ "Macedonia_GJE", 0x0403 },
+    .{ "Macedonia_dse", 0x0455 },
+    .{ "Macedonia_DSE", 0x0405 },
+    .{ "Macedonia_kje", 0x045c },
+    .{ "Macedonia_KJE", 0x040c },
+    .{ "Serbian_tshe", 0x045b },
+    .{ "Serbian_TSHE", 0x040b },
+    .{ "Cyrillic_je", 0x0458 },
+    .{ "Cyrillic_JE", 0x0408 },
+    .{ "Cyrillic_lje", 0x0459 },
+    .{ "Cyrillic_LJE", 0x0409 },
+    .{ "Cyrillic_nje", 0x045a },
+    .{ "Cyrillic_NJE", 0x040a },
+    .{ "Cyrillic_dzhe", 0x045f },
+    .{ "Cyrillic_DZHE", 0x040f },
 });
 
 /// Central European XKB names (Polish, Hungarian, Czech, Slovak, Romanian).
@@ -1150,15 +1180,45 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     return null;
 }
 
+/// Legacy X11 Cyrillic extras (`0x06a1`–`0x06af` / `0x06b1`–`0x06bf`):
+/// Ukrainian, Belarusian, Serbian, and Macedonian letters plus `io`.
+const cyrillic_06a1 = [_]u21{
+    0x0452, 0x0453, 0x0451, 0x0454, 0x0455, 0x0456, 0x0457, 0x0458,
+    0x0459, 0x045a, 0x045b, 0x045c, 0x0491, 0x045e, 0x045f,
+};
+
+const cyrillic_06b1 = [_]u21{
+    0x0402, 0x0403, 0x0401, 0x0404, 0x0405, 0x0406, 0x0407, 0x0408,
+    0x0409, 0x040a, 0x040b, 0x040c, 0x0490, 0x040e, 0x040f,
+};
+
 /// Legacy X11 Cyrillic keysyms used by a second keyboard group.
 pub fn charForX11Cyrillic(sym: u32) ?u21 {
-    if (sym == 0x06a3) return 0x0451;
-    if (sym == 0x06b3) return 0x0401;
+    if (sym >= 0x06a1 and sym <= 0x06af) return cyrillic_06a1[sym - 0x06a1];
+    if (sym >= 0x06b1 and sym <= 0x06bf) return cyrillic_06b1[sym - 0x06b1];
     if (sym >= 0x06c0 and sym <= 0x06ff) {
         const lower = cyrillic_06c0[(sym - 0x06c0) & 0x1f];
         return if (sym >= 0x06e0) lower - 0x20 else lower;
     }
     return null;
+}
+
+pub const x11_insert: u32 = 0xff63;
+pub const x11_kp_insert: u32 = 0xff9e;
+pub const x11_xf86_paste: u32 = 0x1008ff6d;
+
+/// Shift+Insert / KP_Insert and XF86Paste paste CLIPBOARD. Ctrl+Insert is
+/// left for chrome copy and is not treated as paste.
+pub fn isClipboardPasteKeysym(sym: u32, shift: bool, control: bool) bool {
+    if (control or sym == 0) return false;
+    if (sym == x11_xf86_paste) return true;
+    return shift and (sym == x11_insert or sym == x11_kp_insert);
+}
+
+pub fn isClipboardPasteKeyName(name: []const u8, shift: bool, control: bool) bool {
+    if (control or name.len == 0) return false;
+    if (std.mem.eql(u8, name, "XF86Paste")) return true;
+    return shift and (std.mem.eql(u8, name, "Insert") or std.mem.eql(u8, name, "KP_Insert"));
 }
 
 /// Legacy X11 Latin-2 keysyms used by Central European layouts.
@@ -1864,6 +1924,33 @@ test "parse keeps a second keysym list as keyboard group 2" {
     try std.testing.expectEqual(@as(u21, 0x0424), charForKeysym("Cyrillic_EF").?);
     try std.testing.expectEqual(@as(u21, 0x0444), charForX11Cyrillic(0x06c6).?);
     try std.testing.expectEqual(@as(u21, 0x0424), charForX11Cyrillic(0x06e6).?);
+    try std.testing.expectEqual(@as(u21, 0x0456), charForKeysym("Ukrainian_i").?);
+    try std.testing.expectEqual(@as(u21, 0x0406), charForKeysym("Ukrainian_I").?);
+    try std.testing.expectEqual(@as(u21, 0x0457), charForKeysym("Ukrainian_yi").?);
+    try std.testing.expectEqual(@as(u21, 0x0491), charForKeysym("Ukrainian_ghe_with_upturn").?);
+    try std.testing.expectEqual(@as(u21, 0x045e), charForKeysym("Byelorussian_shortu").?);
+    try std.testing.expectEqual(@as(u21, 0x0452), charForKeysym("Serbian_dje").?);
+    try std.testing.expectEqual(@as(u21, 0x0456), charForX11Cyrillic(0x06a6).?);
+    try std.testing.expectEqual(@as(u21, 0x0406), charForX11Cyrillic(0x06b6).?);
+    try std.testing.expectEqual(@as(u21, 0x0491), charForX11Cyrillic(0x06ad).?);
+    try std.testing.expectEqual(@as(u21, 0x0490), charForX11Cyrillic(0x06bd).?);
+    try std.testing.expectEqual(@as(u21, 0x0451), charForX11Cyrillic(0x06a3).?);
+    try std.testing.expect(charForX11Cyrillic(0x06a0) == null);
+}
+
+test "Shift+Insert and XF86Paste are clipboard paste keys" {
+    try std.testing.expect(isClipboardPasteKeysym(x11_insert, true, false));
+    try std.testing.expect(isClipboardPasteKeysym(x11_kp_insert, true, false));
+    try std.testing.expect(isClipboardPasteKeysym(x11_xf86_paste, false, false));
+    try std.testing.expect(isClipboardPasteKeysym(x11_xf86_paste, true, false));
+    try std.testing.expect(!isClipboardPasteKeysym(x11_insert, false, false));
+    try std.testing.expect(!isClipboardPasteKeysym(x11_insert, true, true));
+    try std.testing.expect(!isClipboardPasteKeysym(x11_xf86_paste, false, true));
+    try std.testing.expect(isClipboardPasteKeyName("Insert", true, false));
+    try std.testing.expect(isClipboardPasteKeyName("KP_Insert", true, false));
+    try std.testing.expect(isClipboardPasteKeyName("XF86Paste", false, false));
+    try std.testing.expect(!isClipboardPasteKeyName("Insert", false, false));
+    try std.testing.expect(!isClipboardPasteKeyName("Insert", true, true));
 }
 
 test "parse rejects an unsupported keymap format" {
