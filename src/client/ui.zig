@@ -1732,10 +1732,10 @@ pub fn drawStatusBar(c: *Canvas, x: i32, y: i32, width: i32, height: i32, status
 
 pub fn statusTone(status: []const u8) NoticeTone {
     if (std.mem.eql(u8, status, "On the wire")) return .success;
-    if (std.mem.indexOf(u8, status, "connected") != null and std.mem.indexOf(u8, status, "reconnecting") == null) return .success;
     if (std.mem.indexOf(u8, status, "error") != null or std.mem.indexOf(u8, status, "failed") != null) return .failure;
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return .warning;
     if (std.mem.indexOf(u8, status, "reconnect") != null or std.mem.indexOf(u8, status, "offline") != null or std.mem.indexOf(u8, status, "Disconnected") != null or std.mem.indexOf(u8, status, "disconnected") != null) return .warning;
+    if (std.mem.indexOf(u8, status, "connected") != null) return .success;
     return .info;
 }
 

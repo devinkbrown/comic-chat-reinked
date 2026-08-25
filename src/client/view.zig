@@ -2407,22 +2407,31 @@ fn contextSemanticId(kind: ContextKind, item: u8) []const u8 {
 }
 
 fn firstEnabledContextItem(kind: ContextKind, can_moderate: bool, connected: bool) u8 {
-    return nextEnabledContextItem(kind, 0, true, can_moderate, connected);
+    var item: u8 = 0;
+    while (item < contextItemCount(kind)) : (item += 1) {
+        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
+    }
+    return 0;
 }
 
 fn lastEnabledContextItem(kind: ContextKind, can_moderate: bool, connected: bool) u8 {
-    return nextEnabledContextItem(kind, contextItemCount(kind) - 1, false, can_moderate, connected);
+    var item = contextItemCount(kind);
+    while (item > 0) {
+        item -= 1;
+        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
+    }
+    return 0;
 }
 
 fn nextEnabledContextItem(kind: ContextKind, start: u8, forward: bool, can_moderate: bool, connected: bool) u8 {
     const count = contextItemCount(kind);
     var item = start % count;
-    var attempts: u8 = 0;
-    while (attempts < count) : (attempts += 1) {
-        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
+    var checked: u8 = 0;
+    while (checked < count) : (checked += 1) {
         item = if (forward) (item + 1) % count else (item + count - 1) % count;
+        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
     }
-    return 0;
+    return start % count;
 }
 
 fn drawToolBar(c: *Canvas, rect: Rect, comic_mode: bool, hovered: ?u8, focused: ?u8, connected: bool) void {
