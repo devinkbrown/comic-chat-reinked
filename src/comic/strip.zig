@@ -2410,9 +2410,9 @@ test "leftover dests keep pose-authored face color on unused Color and HD rooms"
                         if (image.pixels[i] == empty.pixels[i]) continue;
                         dest_min = @min(dest_min, y);
                         dest_max = @max(dest_max, y);
-                        const red: u8 = @truncate(image.pixels[i] >> 16);
-                        const green: u8 = @truncate(image.pixels[i] >> 8);
-                        const blue: u8 = @truncate(image.pixels[i]);
+                        const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
+                        const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
+                        const blue: i32 = @as(u8, @truncate(image.pixels[i]));
                         const mx = @max(red, @max(green, blue));
                         const mn = @min(red, @min(green, blue));
                         if (mx > mn + 18 and mx > 40) dest_chrom += 1;

@@ -1844,9 +1844,9 @@ test "leftover Color dest cards keep authored chromatic ink" {
         defer card.deinit(gpa);
         var chromatic: usize = 0;
         for (card.pixels) |pixel| {
-            const red: u8 = @truncate(pixel >> 16);
-            const green: u8 = @truncate(pixel >> 8);
-            const blue: u8 = @truncate(pixel);
+            const red: i32 = @as(u8, @truncate(pixel >> 16));
+            const green: i32 = @as(u8, @truncate(pixel >> 8));
+            const blue: i32 = @as(u8, @truncate(pixel));
             if (red >= 245 and green >= 245 and blue >= 245) continue;
             const mx = @max(red, @max(green, blue));
             const mn = @min(red, @min(green, blue));
