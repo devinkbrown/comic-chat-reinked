@@ -720,6 +720,8 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Save how", &.{ "After save", "Save how" }));
     try std.testing.expect(matchesAny("None", &.{ "Off", "None" }));
     try std.testing.expect(matchesAny("Disabled", &.{ "Off", "Disabled" }));
+    try std.testing.expect(matchesAny("The room could not open on its own.", &.{ "The room could not open aside.", "The room could not open on its own." }));
+    try std.testing.expect(matchesAny("None yet", &.{ "None on this wire yet", "None yet" }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 

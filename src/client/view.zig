@@ -1001,7 +1001,12 @@ pub const View = struct {
                 editor.delete();
                 self.dialog_notice = "";
             },
-            .left => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+            .left => {
+                if (self.dialog_action_focus) |button| {
+                    if (button == .cancel) self.dialog_action_focus = .primary;
+                    return .none;
+                }
+                if (self.dialog_browse_focus) return .none;
                 if (self.dialog_gallery_focus) |gallery_focus| {
                     if (self.dialog_field == 0) {
                         switch (gallery_focus) {
@@ -1017,7 +1022,12 @@ pub const View = struct {
                 else if (dialogs.fieldAcceptsText(id, self.dialog_field))
                     if (modifiers.shift) editor.extendLeft() else editor.left();
             },
-            .right => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+            .right => {
+                if (self.dialog_action_focus) |button| {
+                    if (button == .primary and dialogs.showsCancel(id)) self.dialog_action_focus = .cancel;
+                    return .none;
+                }
+                if (self.dialog_browse_focus) return .none;
                 if (self.dialog_gallery_focus) |gallery_focus| {
                     if (self.dialog_field == 0) {
                         switch (gallery_focus) {
@@ -1068,9 +1078,13 @@ pub const View = struct {
                 if (dialogs.fields(id)[self.dialog_field].kind == .choice)
                     self.cycleDialogChoiceDirection(id, self.dialog_field, false);
             },
-            .down => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
-                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
+            .down => {
+                if (self.dialog_action_focus != null or self.dialog_browse_focus) return .none;
+                if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
                     self.cycleDialogChoiceDirection(id, self.dialog_field, true);
+                } else if (isLastFocusableDialogField(id, self.dialog_field)) {
+                    self.dialog_action_focus = .primary;
+                }
             },
             .page_up => {
                 if (self.dialog_gallery_focus != null) {
@@ -1107,6 +1121,17 @@ pub const View = struct {
             return;
         }
         self.dialog_action_focus = .primary;
+    }
+
+    fn isLastFocusableDialogField(id: dialogs.Id, field: usize) bool {
+        var last: usize = 0;
+        var found = false;
+        for (dialogs.fields(id), 0..) |item, index| {
+            if (!dialogFieldFocusable(item)) continue;
+            last = index;
+            found = true;
+        }
+        return found and field == last;
     }
 
     fn focusDialogLastField(self: *View, id: dialogs.Id) void {
@@ -3652,6 +3677,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .choose_color => "Ink for typed text",
         .text_font, .set_text_font => "Type on the Sunday page",
         .about => "Portable Ink Sunday client",
+        .motd => "From the wire",
         else => "",
     };
 }
@@ -3670,7 +3696,7 @@ fn dialogJumpsFieldExtreme(id: dialogs.Id, index: usize) bool {
 }
 
 fn isOfflineFeatureStatus(value: []const u8) bool {
-    return std.mem.eql(u8, value, "Offline") or std.mem.eql(u8, value, "Disconnected") or std.mem.eql(u8, value, "Off the wire");
+    return isOfflineStatus(value) or std.mem.eql(u8, value, "Offline") or std.mem.eql(u8, value, "Off the wire");
 }
 
 fn dialogGroupText(id: dialogs.Id) []const u8 {
@@ -4969,6 +4995,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Offline"));
     try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Disconnected"));
     try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Off the wire"));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "offline"));
+    try std.testing.expectEqualStrings("From the wire", dialogHelper(.motd, "Welcome"));
     try std.testing.expectEqualStrings("What this wire is offering", dialogHelper(.connection_features, "Verified TLS"));
     try std.testing.expectEqualStrings("Used on the wire and the Sunday page", dialogGroupText(.nickname));
     try std.testing.expectEqualStrings("Greeting and repeat cap", dialogGroupText(.automation));
@@ -5297,6 +5325,36 @@ test "dialog Home and End jump first field and last button from leftover chrome"
     try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
     _ = try view.handleDialogKey(.home, .{});
     try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "dialog leftover buttons move with Left and Right" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.right, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+    _ = try view.handleDialogKey(.left, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+    _ = try view.handleDialogKey(.left, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "dialog Down from leftover last text jumps to the primary button" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.ban);
+    view.dialog_field = 0;
+    view.dialog_action_focus = null;
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+    view.openDialog(.room_access);
+    view.dialog_field = 1;
+    view.dialog_action_focus = null;
+    try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
 }
 
 test "dialog Up from leftover buttons jumps to the last field" {

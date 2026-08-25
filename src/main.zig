@@ -1984,7 +1984,7 @@ fn handleWindowEvent(
                     .child_window => child: {
                         spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                             view.openDialog(.channel);
-                            view.setDialogNotice("The room could not open on its own.");
+                            view.setDialogNotice("The room could not open aside.");
                         };
                         break :child true;
                     },
@@ -2089,7 +2089,7 @@ fn handleWindowEvent(
                 .child_window => child: {
                     spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                         view.openDialog(.channel);
-                        view.setDialogNotice("The room could not open on its own.");
+                        view.setDialogNotice("The room could not open aside.");
                     };
                     break :child true;
                 },
@@ -2266,7 +2266,7 @@ fn prefillOpenedDialog(
                 var capabilities: std.ArrayList(u8) = .empty;
                 defer capabilities.deinit(view.gpa);
                 try connected.appendEnabledCapabilities(&capabilities, view.gpa);
-                try view.setDialogValueAt(3, if (capabilities.items.len == 0) "None yet" else capabilities.items);
+                try view.setDialogValueAt(3, if (capabilities.items.len == 0) "None on this wire yet" else capabilities.items);
             } else {
                 try view.setDialogValueAt(3, "Hold on the wire");
             }
