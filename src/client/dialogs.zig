@@ -207,7 +207,7 @@ pub fn fields(id: Id) []const Field {
         .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban pattern", .hint = "Optional" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
         .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
-        .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "Member", .hint = "Select an online nickname" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Room", .hint = "For Join room, for example #root" } },
+        .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "Member", .hint = "Select an online CAST member" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Room", .hint = "For Join room, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound file", .kind = .choice }, .{ .label = "Accompanying message", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
@@ -481,6 +481,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Enabled features", fields(.connection_features)[3].label);
     try std.testing.expectEqualStrings("Away message", get(.away).title);
     try std.testing.expectEqualStrings("Online CAST", get(.notification_users).title);
+    try std.testing.expectEqualStrings("Select an online CAST member", fields(.notification_users)[1].hint);
     try std.testing.expectEqualStrings("Rename open set", get(.rename_loaded_set).title);
     try std.testing.expectEqualStrings("Page mode", fields(.comics_view)[0].label);
     try std.testing.expectEqualStrings("Sunday page or conversation", fields(.settings)[3].hint);

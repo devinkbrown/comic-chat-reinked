@@ -3363,7 +3363,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .notifications, .notification_users => "Watch who comes online after the wire is live",
         .sound => "Play a sound after the wire is live",
         .personal => "Shown on your CAST card",
-        .nickname => "Visible on the Sunday page",
+        .nickname => "Used on the wire and the Sunday page",
         .away => "Posted while you are away",
         .settings => "Ink Sunday chrome, page density, and CAST",
         .comics_view => "Sunday page or conversation",
@@ -4462,6 +4462,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Room events", menuItemLabel(4, 8));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
     try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 6));
+    try std.testing.expectEqualStrings("Used on the wire and the Sunday page", dialogHelper(.nickname, ""));
     try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 6, true));
     try std.testing.expectEqualStrings("Wire", toolbarHint(0));
