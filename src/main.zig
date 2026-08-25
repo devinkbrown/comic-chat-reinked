@@ -4391,6 +4391,8 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "441") or
         std.mem.eql(u8, command, "442") or
         std.mem.eql(u8, command, "467") or
+        std.mem.eql(u8, command, "476") or
+        std.mem.eql(u8, command, "477") or
         std.mem.eql(u8, command, "472") or
         std.mem.eql(u8, command, "478") or
         std.mem.eql(u8, command, "481") or
@@ -4547,8 +4549,6 @@ fn isJoinDeniedNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "473") or
         std.mem.eql(u8, command, "474") or
         std.mem.eql(u8, command, "475") or
-        std.mem.eql(u8, command, "476") or
-        std.mem.eql(u8, command, "477") or
         std.mem.eql(u8, command, "480") or
         std.mem.eql(u8, command, "520");
 }
@@ -4557,7 +4557,9 @@ fn isJoinDeniedReply(msg: *const cc.net.message.Message, workspace: *const cc.cl
     if (isJoinDeniedNumeric(msg.command)) return true;
     const target = msg.param(1) orelse return false;
     if (!cc.net.irc_map.isChannelName(workspace.chantypes, target)) return false;
-    if (std.mem.eql(u8, msg.command, "437")) return true;
+    if (std.mem.eql(u8, msg.command, "437") or
+        std.mem.eql(u8, msg.command, "476") or
+        std.mem.eql(u8, msg.command, "477")) return true;
     if (!std.mem.eql(u8, msg.command, "489")) return false;
     if (workspace.find(target)) |index| return !workspace.rooms.items[index].joined;
     return true;
@@ -5965,6 +5967,27 @@ test "self leave and join denial clear membership without a live socket" {
     try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
     try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &secure));
     try std.testing.expect(!client.restoresChannel("#secure"));
+
+    const need_reg = cc.net.message.parse(":server 477 me #locked :Cannot join channel (+a)");
+    try std.testing.expect(isJoinDeniedReply(&need_reg, &workspace));
+    workspace.rooms.items[locked].setWantRejoin(true);
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &need_reg));
+    try std.testing.expect(!workspace.rooms.items[locked].want_rejoin);
+
+    const plus_r = cc.net.message.parse(":server 477 me alice :Cannot message this user (+R)");
+    try std.testing.expect(!isJoinDeniedReply(&plus_r, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("477"));
+    workspace.rooms.items[root].setWantRejoin(true);
+    workspace.rooms.items[root].joined = true;
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &plus_r));
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[root].joined);
+
+    const bad_mask = cc.net.message.parse(":server 476 me evil!*@* :Invalid channel mask");
+    try std.testing.expect(!isJoinDeniedReply(&bad_mask, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("476"));
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &bad_mask));
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
 }
 
 test "reconnect joins only rooms that still want rejoin" {
