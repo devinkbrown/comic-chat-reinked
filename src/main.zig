@@ -29,6 +29,16 @@ fn ircxNumericEnabled(msg: *const cc.net.message.Message) bool {
         std.mem.eql(u8, msg.params[1], "1");
 }
 
+fn ircxSupportAdvertised(client: *const cc.net.client.Client) bool {
+    const features = client.featureState() orelse return false;
+    return features.isupport("IRCX") != null;
+}
+
+fn isServerSourced(msg: *const cc.net.message.Message) bool {
+    const prefix = msg.prefix orelse return true;
+    return std.mem.indexOfAny(u8, prefix, "!@") == null;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const minimal = init.minimal;
@@ -106,8 +116,8 @@ pub fn main(init: std.process.Init) !void {
         const display = if (comptime builtin.os.tag == .windows) null else minimal.environ.getPosix("DISPLAY");
         try runInteractive(
             gpa,
-            connection.host,
-            connection.port,
+            runtime.resolved_host,
+            runtime.resolved_port,
             connection.nick,
             connection.channel,
             prefer_wayland,
@@ -134,8 +144,8 @@ pub fn main(init: std.process.Init) !void {
         try runChatComic(
             gpa,
             init.io,
-            connection.host,
-            connection.port,
+            runtime.resolved_host,
+            runtime.resolved_port,
             connection.nick,
             connection.channel,
             maxlines,
@@ -156,8 +166,8 @@ pub fn main(init: std.process.Init) !void {
         try runConnect(
             gpa,
             init.io,
-            connection.host,
-            connection.port,
+            runtime.resolved_host,
+            runtime.resolved_port,
             connection.nick,
             connection.channel,
             runtime.connect_options,
@@ -179,6 +189,7 @@ const default_server = "eshmaki.me";
 const default_server_alternative = "ircx.us";
 const default_channel = "#root";
 const default_nick = "comicchat";
+const default_sasl_password_file = ".comicchat-sasl";
 
 const AuthArgs = struct {
     user: ?[]const u8 = null,
@@ -193,6 +204,51 @@ const AuthArgs = struct {
     }
 };
 
+const ResolvedSaslAuth = struct {
+    user: []const u8,
+    password_file: []const u8,
+};
+
+fn resolveSaslAuth(
+    auth: AuthArgs,
+    stored_user: []const u8,
+    stored_file: []const u8,
+    nick: []const u8,
+    default_exists: bool,
+) ?ResolvedSaslAuth {
+    if (auth.password_file) |path| {
+        if (path.len != 0) return .{ .user = auth.user orelse nick, .password_file = path };
+    }
+    if (stored_file.len != 0) {
+        const user = auth.user orelse (if (stored_user.len != 0) stored_user else nick);
+        return .{ .user = user, .password_file = stored_file };
+    }
+    if (default_exists) return .{ .user = auth.user orelse nick, .password_file = default_sasl_password_file };
+    return null;
+}
+
+fn saslPasswordFileExists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
+}
+
+fn applyResolvedSaslAuth(
+    auth: *AuthArgs,
+    preferences: *const cc.client.preferences.Store,
+    nick: []const u8,
+    io: std.Io,
+) void {
+    const resolved = resolveSaslAuth(
+        auth.*,
+        preferences.sasl_user.items,
+        preferences.sasl_password_file.items,
+        nick,
+        saslPasswordFileExists(io, default_sasl_password_file),
+    ) orelse return;
+    auth.user = resolved.user;
+    auth.password_file = resolved.password_file;
+}
+
 const ConnectionArgs = struct {
     host: []const u8,
     port: u16 = default_tls_port,
@@ -203,6 +259,7 @@ const ConnectionArgs = struct {
     auth: AuthArgs = .{},
     sts_file: []const u8 = ".comicchat-sts",
     session_file: []const u8 = ".comicchat-session",
+    used_default_endpoint: bool = false,
 };
 
 fn parseConnectionArgs(args: []const []const u8, allow_extra: bool) ?ConnectionArgs {
@@ -354,6 +411,7 @@ fn parseConnectionArgs(args: []const []const u8, allow_extra: bool) ?ConnectionA
             .auth = auth,
             .sts_file = sts_file,
             .session_file = session_file,
+            .used_default_endpoint = true,
         };
     } else if (positional_count == 1) {
         result = .{
@@ -364,6 +422,7 @@ fn parseConnectionArgs(args: []const []const u8, allow_extra: bool) ?ConnectionA
             .auth = auth,
             .sts_file = sts_file,
             .session_file = session_file,
+            .used_default_endpoint = true,
         };
     } else if (positional_count == 2) {
         result = .{
@@ -434,7 +493,7 @@ fn parseProxyEndpoint(raw: []const u8) ?cc.net.transport.ProxyEndpoint {
 
 fn printConnectionUsage(command: []const u8, allow_extra: bool) void {
     std.debug.print(
-        "usage: reinked {s} <nick> (hosts: eshmaki.me or ircx.us; default: eshmaki.me #root) | <host> <nick> [#channel] | <host> [port=6697] <nick> <#channel>{s} [--ca-file <pem>] [--tls-cert <cert-and-key.pem>] [--plaintext] [--socks5 host:port|--http-proxy host:port] [--connect-timeout-ms <ms>] [--sasl-user <name> --sasl-password-file <path>] [--sasl-mechanism SCRAM-SHA-256|EXTERNAL|PLAIN] [--sts-file <path>] [--session-file <path>]\n",
+        "usage: reinked {s} <nick> (hosts: eshmaki.me or ircx.us; default: eshmaki.me #root) | <host> <nick> [#channel] | <host> [port=6697] <nick> <#channel>{s} [--ca-file <pem>] [--tls-cert <cert-and-key.pem>] [--plaintext] [--socks5 host:port|--http-proxy host:port] [--connect-timeout-ms <ms>] [--sasl-user <name> --sasl-password-file <path>] [--sasl-mechanism SCRAM-SHA-256|SCRAM-SHA-512|EXTERNAL|PLAIN|SESSION-TOKEN] [--sts-file <path>] [--session-file <path>]\n",
         .{ command, if (allow_extra) " [maxlines]" else "" },
     );
 }
@@ -488,7 +547,10 @@ const ConnectionRuntime = struct {
     authzid_storage: ?[]u8 = null,
     authcid_storage: ?[]u8 = null,
     password_storage: ?[]u8 = null,
+    session_token_storage: ?[]u8 = null,
     credentials: ?cc.net.sasl.Credentials = null,
+    resolved_host: []const u8 = "",
+    resolved_port: u16 = default_tls_port,
     preference: [1]cc.net.sasl.Mechanism = undefined,
     preference_len: usize = 0,
     executable: []const u8,
@@ -496,6 +558,20 @@ const ConnectionRuntime = struct {
     fn init(gpa: std.mem.Allocator, io: std.Io, args: *const ConnectionArgs, executable: []const u8) !ConnectionRuntime {
         const wall_seconds = std.Io.Clock.real.now(io).toSeconds();
         const now_seconds: u64 = if (wall_seconds > 0) @intCast(wall_seconds) else 0;
+        var preferences = try cc.client.preferences.Store.loadFile(gpa, io, ".comicchat-preferences");
+        errdefer preferences.deinit();
+        var auth = args.auth;
+        applyResolvedSaslAuth(&auth, &preferences, args.nick, io);
+
+        var host = args.host;
+        var port = args.port;
+        var options = args.options;
+        if (args.used_default_endpoint and preferences.server_host.items.len != 0) {
+            host = preferences.server_host.items;
+            if (preferences.server_port != 0) port = preferences.server_port;
+            options.security = if (preferences.server_tls) .tls else .plaintext;
+        }
+
         const stores = stores: {
             var sts = try cc.net.sts_store.Store.loadFile(gpa, io, args.sts_file);
             errdefer sts.deinit();
@@ -503,12 +579,11 @@ const ConnectionRuntime = struct {
                 gpa,
                 io,
                 args.session_file,
-                args.host,
-                args.auth.user orelse args.nick,
+                host,
+                auth.user orelse args.nick,
             );
             errdefer session.deinit();
-            const preferences = try cc.client.preferences.Store.loadFile(gpa, io, ".comicchat-preferences");
-            break :stores .{ .sts = sts, .session = session, .preferences = preferences };
+            break :stores .{ .sts = sts, .session = session };
         };
         var runtime = ConnectionRuntime{
             .gpa = gpa,
@@ -518,33 +593,42 @@ const ConnectionRuntime = struct {
             .session_path = args.session_file,
             .session = stores.session,
             .preferences_path = ".comicchat-preferences",
-            .preferences = stores.preferences,
-            .connect_options = args.options,
+            .preferences = preferences,
+            .connect_options = options,
             .now_seconds = now_seconds,
-            .auth = args.auth,
+            .auth = auth,
             .nick = args.nick,
             .executable = executable,
+            .resolved_host = host,
+            .resolved_port = port,
         };
         errdefer runtime.deinit();
 
         // A cached STS policy always overrides a plaintext command-line
         // request. This is the downgrade protection the persisted policy is
         // intended to provide.
-        if (runtime.sts.requiresTls(args.host, now_seconds)) runtime.connect_options.security = .tls;
+        if (runtime.sts.requiresTls(host, now_seconds)) runtime.connect_options.security = .tls;
         try runtime.loadCredentials();
+        runtime.persistSaslAuthPaths();
         return runtime;
     }
 
     fn loadCredentials(self: *ConnectionRuntime) !void {
-        if (!self.auth.enabled()) return;
+        const have_sasl_token = if (self.session.sasl) |token| token.len != 0 else false;
+        if (!self.auth.enabled() and !have_sasl_token) return;
         if (self.connect_options.security == .plaintext) return error.SaslRequiresTls;
 
         const selected = self.auth.mechanism;
-        const external_available = self.auth.external or selected == .external;
-        if (!external_available and self.auth.password_file == null) return error.MissingSaslPasswordFile;
+        const wants_external = self.auth.external or selected == .external;
+        if (wants_external and self.connect_options.client_cert_file == null)
+            return error.SaslExternalRequiresClientCertificate;
+        const external_available = wants_external;
+        if (!external_available and self.auth.password_file == null and !have_sasl_token)
+            return error.MissingSaslPasswordFile;
 
         self.authzid_storage = try self.gpa.dupe(u8, self.auth.authzid orelse "");
-        self.authcid_storage = try self.gpa.dupe(u8, self.auth.user orelse self.nick);
+        self.authcid_storage = try self.gpa.dupe(u8, self.auth.user orelse
+            (if (self.session.account.len != 0) self.session.account else self.nick));
         if (self.auth.password_file) |path| {
             self.password_storage = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(64 * 1024));
         } else {
@@ -557,16 +641,25 @@ const ConnectionRuntime = struct {
             password_len -= 1;
         }
         const password = self.password_storage.?[0..password_len];
+        if (self.session.sasl) |token| {
+            self.session_token_storage = try self.gpa.dupe(u8, token);
+        }
         self.credentials = .{
             .authorization_identity = self.authzid_storage.?,
             .authentication_identity = self.authcid_storage.?,
             .password = password,
+            .session_token = if (self.session_token_storage) |token| token else &.{},
             .external_available = external_available,
         };
         if (selected) |mechanism| {
             self.preference[0] = mechanism;
             self.preference_len = 1;
         }
+    }
+
+    fn refreshNowSeconds(self: *ConnectionRuntime) void {
+        const wall_seconds = std.Io.Clock.real.now(self.io).toSeconds();
+        if (wall_seconds > 0) self.now_seconds = @intCast(wall_seconds);
     }
 
     fn registrationOptions(self: *ConnectionRuntime) cc.net.client.RegistrationOptions {
@@ -585,6 +678,7 @@ const ConnectionRuntime = struct {
     /// password file only after the previous SASL session wiped and released
     /// its copy, so no reusable cleartext command or queue entry survives.
     fn registrationOptionsForAttempt(self: *ConnectionRuntime) !cc.net.client.RegistrationOptions {
+        self.refreshNowSeconds();
         if (self.credentials) |credentials| if (credentials.zeroized) {
             self.clearCredentialStorage();
             try self.loadCredentials();
@@ -639,7 +733,29 @@ const ConnectionRuntime = struct {
             self.gpa.free(storage);
             self.password_storage = null;
         }
+        if (self.session_token_storage) |storage| {
+            std.crypto.secureZero(u8, storage);
+            self.gpa.free(storage);
+            self.session_token_storage = null;
+        }
         self.credentials = null;
+    }
+
+    fn persistSaslAuthPaths(self: *ConnectionRuntime) void {
+        const path = self.auth.password_file orelse return;
+        if (path.len == 0 or self.credentials == null) return;
+        const user = self.auth.user orelse self.nick;
+        var user_buf: [256]u8 = undefined;
+        var path_buf: [4096]u8 = undefined;
+        if (user.len > user_buf.len or path.len > path_buf.len) return;
+        const user_copy = user_buf[0..user.len];
+        const path_copy = path_buf[0..path.len];
+        @memcpy(user_copy, user);
+        @memcpy(path_copy, path);
+        self.preferences.setSaslAuth(user_copy, path_copy) catch return;
+        self.auth.user = self.preferences.sasl_user.items;
+        self.auth.password_file = self.preferences.sasl_password_file.items;
+        self.preferences.saveFile(self.io, self.preferences_path) catch return;
     }
 };
 
@@ -1016,15 +1132,19 @@ fn runChatComic(
             const wire = msg.param(2) orelse continue;
             if (!std.ascii.eqlIgnoreCase(target, channel) or !std.mem.eql(u8, kind, "CCUDI1")) continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, &client, &transcript, who, wire, nick, metadata_state.ircx_data, null)) continue;
+            if (try processComicControl(io, &client, &transcript, who, wire, false, nick, target, metadata_state.ircx_data, null, &metadata_state)) continue;
             _ = cc.proto.udi.parseAnnotation(wire) catch continue;
             try metadata_state.rememberUdi(gpa, target, who, wire);
-        } else if (std.mem.eql(u8, msg.command, "PRIVMSG")) {
-            const target = msg.param(0) orelse continue;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) {
+            const target = stripStatusmsgTarget(msg.param(0) orelse continue);
             if (!std.ascii.eqlIgnoreCase(target, channel)) continue;
             const text = msg.param(1) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
-            if (try processComicControl(io, &client, &transcript, who, text, nick, metadata_state.ircx_data, null)) continue;
+            const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
+            if (try processComicControl(io, &client, &transcript, who, text, is_notice, nick, target, metadata_state.ircx_data, null, &metadata_state)) {
+                metadata_state.discardPendingUdi(gpa, target, who);
+                continue;
+            }
             var pending = metadata_state.takeUdi(target, who);
             defer if (pending) |*entry| entry.deinit(gpa);
             try transcript.addWireMessage(who, text, false, if (pending) |entry| entry.wire else null);
@@ -1132,6 +1252,16 @@ const PendingDcc = struct {
 };
 
 const TransferStatus = enum(u8) { waiting, running, completed, cancelled, failed };
+
+fn transferStatusLabel(status: TransferStatus) []const u8 {
+    return switch (status) {
+        .waiting => "Waiting",
+        .running => "Transferring",
+        .completed => "Completed",
+        .cancelled => "Cancelled",
+        .failed => "Failed",
+    };
+}
 
 const DccWorkerContext = struct {
     gpa: std.mem.Allocator,
@@ -1259,27 +1389,50 @@ const ChatState = struct {
     avatar_announced: bool = false,
     ircx_data: bool = false,
     pending_udi: std.ArrayList(PendingUdi) = .empty,
+    pending_profiles: std.ArrayList([]u8) = .empty,
     pending_dcc: ?PendingDcc = null,
     transfer: ?DccTransfer = null,
     last_notification_poll_ms: u64 = 0,
     notification_poll_pending: usize = 0,
     notification_current: std.ArrayList([]u8) = .empty,
     notification_previous: std.ArrayList([]u8) = .empty,
+    silence_masks: std.ArrayList([]u8) = .empty,
+    away_message: ?[]u8 = null,
+    monitor_subscribed: bool = false,
     last_transfer_bytes: u64 = 0,
     flood_entries: std.ArrayList(FloodEntry) = .empty,
     desktop_notification: ?[]u8 = null,
+    motd: std.ArrayList(u8) = .empty,
+    last_invite_channel: ?[]u8 = null,
+    last_invite_from: ?[]u8 = null,
+    last_key_channel: ?[]u8 = null,
 
     fn deinit(self: *ChatState, gpa: std.mem.Allocator) void {
         for (self.pending_udi.items) |*entry| entry.deinit(gpa);
         self.pending_udi.deinit(gpa);
+        for (self.pending_profiles.items) |nick| gpa.free(nick);
+        self.pending_profiles.deinit(gpa);
         if (self.pending_dcc) |*offer| offer.deinit(gpa);
         if (self.transfer) |*transfer| transfer.deinit();
         freeStringList(gpa, &self.notification_current);
         freeStringList(gpa, &self.notification_previous);
+        freeStringList(gpa, &self.silence_masks);
+        if (self.away_message) |value| gpa.free(value);
         for (self.flood_entries.items) |entry| gpa.free(entry.nick);
         self.flood_entries.deinit(gpa);
         if (self.desktop_notification) |message| gpa.free(message);
+        self.motd.deinit(gpa);
+        if (self.last_invite_channel) |value| gpa.free(value);
+        if (self.last_invite_from) |value| gpa.free(value);
+        if (self.last_key_channel) |value| gpa.free(value);
         self.* = undefined;
+    }
+
+    fn replaceOwned(self: *ChatState, gpa: std.mem.Allocator, slot: *?[]u8, value: []const u8) !void {
+        _ = self;
+        const owned = try gpa.dupe(u8, value);
+        if (slot.*) |old| gpa.free(old);
+        slot.* = owned;
     }
 
     fn rememberUdi(self: *ChatState, gpa: std.mem.Allocator, target: []const u8, nick: []const u8, wire: []const u8) !void {
@@ -1296,7 +1449,16 @@ const ChatState = struct {
         errdefer gpa.free(owned_nick);
         const owned_wire = try gpa.dupe(u8, wire);
         errdefer gpa.free(owned_wire);
+        if (self.pending_udi.items.len >= 64) {
+            var oldest = self.pending_udi.orderedRemove(0);
+            oldest.deinit(gpa);
+        }
         try self.pending_udi.append(gpa, .{ .target = owned_target, .nick = owned_nick, .wire = owned_wire });
+    }
+
+    fn discardPendingUdi(self: *ChatState, gpa: std.mem.Allocator, target: []const u8, nick: []const u8) void {
+        var taken = self.takeUdi(target, nick);
+        if (taken) |*entry| entry.deinit(gpa);
     }
 
     fn takeUdi(self: *ChatState, target: []const u8, nick: []const u8) ?PendingUdi {
@@ -1307,12 +1469,28 @@ const ChatState = struct {
         return null;
     }
 
+    fn rememberProfileRequest(self: *ChatState, gpa: std.mem.Allocator, nick: []const u8) !void {
+        if (nick.len == 0) return;
+        for (self.pending_profiles.items) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, nick)) return;
+        }
+        if (self.pending_profiles.items.len >= 64) {
+            gpa.free(self.pending_profiles.orderedRemove(0));
+        }
+        try self.pending_profiles.append(gpa, try gpa.dupe(u8, nick));
+    }
+
+    fn takeProfileRequest(self: *ChatState, gpa: std.mem.Allocator, nick: []const u8) bool {
+        for (self.pending_profiles.items, 0..) |existing, index| {
+            if (!std.ascii.eqlIgnoreCase(existing, nick)) continue;
+            gpa.free(self.pending_profiles.orderedRemove(index));
+            return true;
+        }
+        return false;
+    }
+
     fn setConnectionFailure(self: *ChatState, err: anyerror) void {
-        self.status = std.fmt.bufPrint(
-            &self.status_storage,
-            "Connection failed ({s}) - click for settings",
-            .{@errorName(err)},
-        ) catch "Connection failed - click for settings";
+        self.status = connectionFailureStatus(err);
     }
 
     fn rememberDccOffer(self: *ChatState, gpa: std.mem.Allocator, sender: []const u8, offer: cc.proto.dcc.SendOffer) !void {
@@ -1344,7 +1522,10 @@ fn finishJoin(
     state.joined = true;
     state.status = "connected";
     if (state.avatar_announced) return;
-    try announceRoomAvatar(client, channel, transcript.resolvedAvatar(nick), state.ircx_data);
+    announceRoomAvatar(client, channel, transcript.resolvedAvatar(nick), state.ircx_data) catch |err| switch (err) {
+        error.UnknownAvatar => {},
+        else => try ignoreTransientSend(err),
+    };
     state.avatar_announced = true;
 }
 
@@ -1380,12 +1561,13 @@ const NetworkEvent = union(enum) {
 const AsyncNetwork = struct {
     gpa: std.mem.Allocator,
     host: []u8,
-    nick: []const u8,
+    nick: []u8,
     base_options: cc.net.client.ConnectOptions,
     runtime: *ConnectionRuntime,
     reconnect: cc.net.connection_policy.ReconnectController,
     connector: ?*cc.net.transport.Connector = null,
     client: ?cc.net.client.Client = null,
+    held_restoration: cc.net.connection_policy.Restoration,
 
     fn init(
         gpa: std.mem.Allocator,
@@ -1396,13 +1578,16 @@ const AsyncNetwork = struct {
     ) !AsyncNetwork {
         const owned_host = try gpa.dupe(u8, host);
         errdefer gpa.free(owned_host);
+        const owned_nick = try gpa.dupe(u8, nick);
+        errdefer gpa.free(owned_nick);
         var self = AsyncNetwork{
             .gpa = gpa,
             .host = owned_host,
-            .nick = nick,
+            .nick = owned_nick,
             .base_options = runtime.connect_options,
             .runtime = runtime,
             .reconnect = .init(port, 0x434f4d4943434841),
+            .held_restoration = .init(gpa),
         };
         _ = self.reconnect.start();
         try self.startConnector();
@@ -1411,8 +1596,18 @@ const AsyncNetwork = struct {
 
     fn deinit(self: *AsyncNetwork) void {
         self.stop();
+        self.held_restoration.deinit();
         self.gpa.free(self.host);
+        self.gpa.free(self.nick);
         self.* = undefined;
+    }
+
+    fn adoptNick(self: *AsyncNetwork, nick: []const u8) !void {
+        if (nick.len == 0) return error.InvalidIdentityEvent;
+        if (std.mem.eql(u8, self.nick, nick)) return;
+        const owned = try self.gpa.dupe(u8, nick);
+        self.gpa.free(self.nick);
+        self.nick = owned;
     }
 
     fn stop(self: *AsyncNetwork) void {
@@ -1425,6 +1620,7 @@ const AsyncNetwork = struct {
             client.deinit();
             self.client = null;
         }
+        self.held_restoration.clear();
     }
 
     fn reconfigure(self: *AsyncNetwork, host: []const u8, port: u16, security: cc.net.client.Security, now_ms: u64) !void {
@@ -1489,6 +1685,7 @@ const AsyncNetwork = struct {
                 self.reconnect.disconnected(now_ms);
                 return .{ .retry_scheduled = err };
             };
+            client.adoptRestoration(&self.held_restoration);
             var owns_client = true;
             defer if (owns_client) client.deinit();
             const registration_options = self.runtime.registrationOptionsForAttempt() catch |err| {
@@ -1522,6 +1719,7 @@ const AsyncNetwork = struct {
         var upgrade_port: ?u16 = null;
         if (self.client) |*client| {
             upgrade_port = client.takeStsUpgradePort();
+            client.takeRestoration(&self.held_restoration);
             client.deinit();
             self.client = null;
         }
@@ -1542,7 +1740,36 @@ const AsyncNetwork = struct {
     }
 };
 
-fn applyNetworkEvent(event: NetworkEvent, state: *ChatState) bool {
+fn connectionFailureStatus(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ConnectionRefused => "Connection failed (server refused) - click for settings",
+        error.ConnectionResetByPeer => "Connection failed (reset) - click for settings",
+        error.EndOfStream => "Connection failed (closed) - click for settings",
+        error.ConnectionTimedOut, error.ConnectionDeadlineExceeded, error.Timeout => "Connection failed (timed out) - click for settings",
+        error.NameResolutionFailed, error.UnknownHost, error.UnknownHostName => "Connection failed (unknown host) - click for settings",
+        error.CertificateHostMismatch => "Connection failed (certificate host mismatch) - click for settings",
+        error.CertificateExpired => "Connection failed (certificate expired) - click for settings",
+        error.CertificateNotYetValid => "Connection failed (certificate not yet valid) - click for settings",
+        error.CertificateAuthorityLoadFailed => "Connection failed (trusted certificates unavailable) - click for settings",
+        error.TlsFailure, error.TlsAlert, error.TlsInitializationFailed, error.TlsReadFailed, error.TlsDecodeError => "Connection failed (TLS) - click for settings",
+        error.AuthenticationFailed => "Connection failed (authentication) - click for settings",
+        error.IrcServerError => "Connection failed (server closed the session) - click for settings",
+        error.UnexpectedConnectClose, error.ConnectionFailed => "Connection failed (could not connect) - click for settings",
+        error.StsUpgradeRequired => "Connection failed (TLS upgrade required) - click for settings",
+        error.ProxyConnectFailed, error.ProxyAuthenticationRequired, error.ProxyHandshakeTimeout, error.ProxyClosed, error.InvalidProxyTarget, error.InvalidProxyResponse => "Connection failed (proxy) - click for settings",
+        error.SaslRequiresTls => "Connection failed (SASL needs TLS) - click for settings",
+        error.SaslExternalRequiresClientCertificate => "Connection failed (SASL EXTERNAL needs a client certificate) - click for settings",
+        error.MissingSaslPasswordFile => "Connection failed (SASL password file missing) - click for settings",
+        else => "Connection failed - click for settings",
+    };
+}
+
+fn applyNetworkEvent(
+    event: NetworkEvent,
+    state: *ChatState,
+    workspace: ?*cc.client.workspace.Workspace,
+    gpa: std.mem.Allocator,
+) bool {
     return switch (event) {
         .none => false,
         .connecting => changed: {
@@ -1554,24 +1781,57 @@ fn applyNetworkEvent(event: NetworkEvent, state: *ChatState) bool {
             break :changed true;
         },
         .retry_scheduled => |err| changed: {
-            resetChatConnectionState(state);
+            resetChatConnectionState(state, workspace, gpa);
             state.setConnectionFailure(err);
             break :changed true;
         },
         .sts_upgrading => changed: {
-            resetChatConnectionState(state);
+            resetChatConnectionState(state, workspace, gpa);
             state.status = "upgrading to TLS";
             break :changed true;
         },
     };
 }
 
-fn resetChatConnectionState(state: *ChatState) void {
+fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.Workspace, gpa: std.mem.Allocator) void {
     state.joined = false;
     state.join_requested = false;
     state.avatar_announced = false;
+    state.ircx_data = false;
     state.notification_poll_pending = 0;
     state.last_notification_poll_ms = 0;
+    state.monitor_subscribed = false;
+    for (state.pending_udi.items) |*entry| entry.deinit(gpa);
+    state.pending_udi.clearRetainingCapacity();
+    for (state.pending_profiles.items) |nick| gpa.free(nick);
+    state.pending_profiles.clearRetainingCapacity();
+    if (state.transfer) |*transfer| transfer.requestCancel();
+    if (state.pending_dcc) |*offer| {
+        offer.deinit(gpa);
+        state.pending_dcc = null;
+    }
+    state.motd.clearRetainingCapacity();
+    for (state.notification_current.items) |entry| gpa.free(entry);
+    state.notification_current.clearRetainingCapacity();
+    if (workspace) |rooms| {
+        rooms.markDisconnected();
+        rooms.resetIsupport();
+    }
+    // Silence masks, away text, last invite/key, notify-previous, want_rejoin,
+    // and IRCX CLIENT keystrings survive reconnect so they can be resent or
+    // reused after 001/800. The current online snapshot is cleared so a nick
+    // who left during the outage is not kept online. Advertised ISUPPORT maps
+    // come back on the next 005.
+}
+
+fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
+    const connected = client orelse return;
+    if (connected.quit_requested) return;
+    connected.quit("Comic Chat") catch {};
+}
+
+fn roomCanSend(room_joined: bool, connected: bool) bool {
+    return connected and room_joined;
 }
 
 fn tickBackgroundFeatures(
@@ -1592,7 +1852,7 @@ fn tickBackgroundFeatures(
         if (view.active_dialog == .file_transfer) {
             var amount: [96]u8 = undefined;
             try view.setDialogValueAt(3, try std.fmt.bufPrint(&amount, "{d} / {d} bytes", .{ transferred, transfer.context.expected_size orelse 0 }));
-            try view.setDialogValueAt(4, @tagName(transfer_status));
+            try view.setDialogValueAt(4, transferStatusLabel(transfer_status));
         }
         if (transfer_status != .waiting and transfer_status != .running and !transfer.terminal_announced) {
             if (transfer.thread) |thread| {
@@ -1614,17 +1874,31 @@ fn tickBackgroundFeatures(
 
     const client = network.clientPtr() orelse return redraw;
     const preferences = &network.runtime.preferences;
+    if (std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled") or
+        preferences.notifications.items.len == 0)
+        return redraw;
+
+    if (monitorAvailable(client) and !state.monitor_subscribed) {
+        try subscribeMonitorTargets(client, preferences);
+        try client.monitor(.status, null);
+        state.monitor_subscribed = true;
+    }
+
     if (state.notification_poll_pending == 0 and
-        preferences.notifications.items.len != 0 and
-        !std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled") and
         (state.last_notification_poll_ms == 0 or now_ms -| state.last_notification_poll_ms >= 60_000))
     {
-        for (state.notification_current.items) |entry| workspace.gpa.free(entry);
-        state.notification_current.clearRetainingCapacity();
-        for (preferences.notifications.items) |notification| if (notification.enabled) {
+        if (state.monitor_subscribed) {
+            retainMonitorOnlineNicks(workspace.gpa, state, preferences);
+        } else {
+            for (state.notification_current.items) |entry| workspace.gpa.free(entry);
+            state.notification_current.clearRetainingCapacity();
+        }
+        for (preferences.notifications.items) |notification| {
+            if (!notification.enabled) continue;
+            if (state.monitor_subscribed and notificationUsesMonitor(&notification)) continue;
             try client.who(notification.nickname);
             state.notification_poll_pending += 1;
-        };
+        }
         state.last_notification_poll_ms = now_ms;
     }
     return redraw;
@@ -1661,7 +1935,8 @@ fn runInteractivePollBackend(
     defer view.deinit();
     var workspace = try cc.client.workspace.Workspace.init(gpa, nick);
     defer workspace.deinit();
-    _ = try workspace.ensure(channel);
+    const startup_room = try workspace.ensure(channel);
+    workspace.rooms.items[startup_room].setWantRejoin(true);
     var state: ChatState = .{};
     defer state.deinit(gpa);
     var network = try AsyncNetwork.init(gpa, host, port, nick, runtime);
@@ -1692,7 +1967,7 @@ fn runInteractivePollBackend(
         const timeout = if (has_client_side_repeat) @min(base_timeout, repeat_poll_timeout_ms) else base_timeout;
         _ = try posix.poll(&poll_fds, timeout);
         const now_ms = monotonicMilliseconds(io);
-        redraw = applyNetworkEvent(try network.tick(now_ms), &state) or redraw;
+        redraw = applyNetworkEvent(try network.tick(now_ms), &state, &workspace, gpa) or redraw;
         redraw = (try tickBackgroundFeatures(&view, &network, &state, &workspace, now_ms)) or redraw;
         poll_fds[1].fd = if (network.clientPtr()) |client| client.fd() else -1;
 
@@ -1707,10 +1982,13 @@ fn runInteractivePollBackend(
                 &network,
                 &state,
                 &workspace,
-                nick,
+                workspace.self_nick,
                 channel,
             );
-            if (!event_result.keep_running) return;
+            if (!event_result.keep_running) {
+                sendQuitBestEffort(network.clientPtr());
+                return;
+            }
             redraw = redraw or event_result.redraw;
         }
         if (has_client_side_repeat) {
@@ -1724,27 +2002,30 @@ fn runInteractivePollBackend(
                     &network,
                     &state,
                     &workspace,
-                    nick,
+                    workspace.self_nick,
                     channel,
                 );
-                if (!event_result.keep_running) return;
+                if (!event_result.keep_running) {
+                    sendQuitBestEffort(network.clientPtr());
+                    return;
+                }
                 redraw = redraw or event_result.redraw;
             }
         }
 
         if (network.clientPtr()) |client| if ((poll_fds[1].revents & posix.POLL.IN) != 0) {
             const maybe_received: ?bool = client.receive() catch |err| failed: {
-                redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                 poll_fds[1].fd = -1;
                 break :failed null;
             };
             if (maybe_received) |received| {
                 if (!received) {
-                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state) or redraw;
+                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, &workspace, gpa) or redraw;
                     poll_fds[1].fd = -1;
                 } else if (network.clientPtr()) |active| {
-                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, nick, channel, &state) catch |err| failed: {
-                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, &network, channel, &state) catch |err| failed: {
+                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                         poll_fds[1].fd = -1;
                         break :failed false;
                     };
@@ -1756,7 +2037,7 @@ fn runInteractivePollBackend(
         if (network.clientPtr() != null and
             (poll_fds[1].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL)) != 0)
         {
-            redraw = applyNetworkEvent(network.fail(now_ms, error.ConnectionResetByPeer), &state) or redraw;
+            redraw = applyNetworkEvent(network.fail(now_ms, error.ConnectionResetByPeer), &state, &workspace, gpa) or redraw;
             poll_fds[1].fd = -1;
         }
 
@@ -1773,7 +2054,8 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
     defer view.deinit();
     var workspace = try cc.client.workspace.Workspace.init(gpa, nick);
     defer workspace.deinit();
-    _ = try workspace.ensure(channel);
+    const startup_room = try workspace.ensure(channel);
+    workspace.rooms.items[startup_room].setWantRejoin(true);
     var state: ChatState = .{};
     defer state.deinit(gpa);
     var network = try AsyncNetwork.init(gpa, host, port, nick, runtime);
@@ -1785,7 +2067,7 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
     while (true) {
         var redraw = false;
         const now_ms = monotonicMilliseconds(io);
-        redraw = applyNetworkEvent(try network.tick(now_ms), &state) or redraw;
+        redraw = applyNetworkEvent(try network.tick(now_ms), &state, &workspace, gpa) or redraw;
         redraw = (try tickBackgroundFeatures(&view, &network, &state, &workspace, now_ms)) or redraw;
         while (try win.pollEvent()) |event| {
             const event_result = try handleWindowEvent(
@@ -1797,24 +2079,27 @@ fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick
                 &network,
                 &state,
                 &workspace,
-                nick,
+                workspace.self_nick,
                 channel,
             );
-            if (!event_result.keep_running) return;
+            if (!event_result.keep_running) {
+                sendQuitBestEffort(network.clientPtr());
+                return;
+            }
             redraw = redraw or event_result.redraw;
         }
 
         if (network.clientPtr()) |client| {
             const receive_result = client.receiveTimeout(16) catch |err| disconnected: {
-                redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                 break :disconnected null;
             };
             if (receive_result) |received| {
                 if (!received) {
-                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state) or redraw;
+                    redraw = applyNetworkEvent(network.fail(now_ms, error.EndOfStream), &state, &workspace, gpa) or redraw;
                 } else if (network.clientPtr()) |active| {
-                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, nick, channel, &state) catch |err| failed: {
-                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state) or redraw;
+                    const processed = processWorkspaceMessages(io, active, &view, &runtime.preferences, &workspace, &network, channel, &state) catch |err| failed: {
+                        redraw = applyNetworkEvent(network.fail(now_ms, err), &state, &workspace, gpa) or redraw;
                         break :failed false;
                     };
                     redraw = redraw or processed;
@@ -1873,7 +2158,7 @@ fn handleWindowEvent(
                         var expression_editor = cc.client.input.Editor.init(gpa);
                         defer expression_editor.deinit();
                         try expression_editor.paste("<Chr>");
-                        break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, room.joined or state.joined, state.ircx_data);
+                        break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, roomCanSend(room.joined, state.joined), state.ircx_data);
                     },
                     else => true,
                 };
@@ -1991,9 +2276,15 @@ fn handleWindowEvent(
                     if (index == 1) break :toolbar false;
                     if (index == 3) {
                         if (workspace.active) |active_index| {
-                            const active_room = &workspace.rooms.items[active_index];
-                            if (client) |connected_client| try connected_client.part(active_room.name);
-                            if (workspace.rooms.items.len > 1) _ = workspace.remove(active_index);
+                            if (canLeaveActiveRoom(workspace.rooms.items.len)) {
+                                if (client) |connected_client| {
+                                    connected_client.part(workspace.rooms.items[active_index].name) catch |err| {
+                                        try rejectServiceIrc(workspace, err);
+                                        break :toolbar true;
+                                    };
+                                }
+                                _ = workspace.remove(active_index);
+                            }
                         }
                     }
                     if (index >= 19 and index <= 22) {
@@ -2042,7 +2333,7 @@ fn handleWindowEvent(
                     var expression_editor = cc.client.input.Editor.init(gpa);
                     defer expression_editor.deinit();
                     try expression_editor.paste("<Chr>");
-                    break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, room.joined or state.joined, state.ircx_data);
+                    break :expression try handleInputKey(gpa, cc.platform.event.Key{ .enter = {} }, view, &expression_editor, client, transcript, nick, room.name, roomCanSend(room.joined, state.joined), state.ircx_data);
                 },
                 .child_window => child: {
                     spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
@@ -2095,6 +2386,7 @@ fn loadStartupDocument(
     if (locator.channel) |channel| {
         room_index = try workspace.ensure(channel);
         _ = workspace.activate(room_index);
+        workspace.rooms.items[room_index].setWantRejoin(true);
     }
     if (locator.character) |character| if (cc.comic.session.bundledAvatarByName(character)) |avatar|
         try workspace.rooms.items[room_index].transcript.setAvatar(nick, avatar);
@@ -2104,7 +2396,7 @@ fn loadStartupDocument(
     };
     if (locator.server) |server| if (!std.ascii.eqlIgnoreCase(server, network.host)) {
         try network.reconfigure(server, network.reconnect.port, network.effectiveOptions().security, monotonicMilliseconds(io));
-        resetChatConnectionState(state);
+        resetChatConnectionState(state, workspace, workspace.gpa);
     };
     try network.runtime.preferences.saveFile(io, network.runtime.preferences_path);
 }
@@ -2115,7 +2407,7 @@ fn prefillOpenedDialog(
     composer_text: []const u8,
     preferences: *const cc.client.preferences.Store,
     state: *const ChatState,
-    client: ?*const cc.net.client.Client,
+    client: ?*cc.net.client.Client,
 ) !void {
     const id = view.active_dialog orelse return;
     switch (id) {
@@ -2193,6 +2485,14 @@ fn prefillOpenedDialog(
         .print_preview => {
             try view.setDialogValueAt(0, "comicchat-print.pdf");
             try view.setDialogValueAt(1, "Save PDF");
+        },
+        .motd => {
+            try view.setDialogValueAt(0, if (state.motd.items.len == 0) "Requesting the server message of the day." else state.motd.items);
+            if (client) |connected| connected.motd(null) catch {};
+        },
+        .invitation => {
+            if (state.last_invite_channel) |channel| try view.setDialogValueAt(0, channel);
+            if (state.last_invite_from) |who| try view.setDialogValueAt(1, who);
         },
         .connection_features => {
             try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Disconnected");
@@ -2435,14 +2735,20 @@ fn applyDialogAction(
             view.setDialogNotice("Could not start that connection. Check the server and security mode.");
             return;
         };
-        resetChatConnectionState(state);
+        resetChatConnectionState(state, workspace, workspace.gpa);
         state.status = "connecting";
+        network.runtime.preferences.setServerProfile(request.host, request.port, request.security == .tls) catch {};
+        network.runtime.preferences.saveFile(io, network.runtime.preferences_path) catch {};
         _ = view.closeDialog();
         return;
     }
     if (cc.client.dialogs.requiresInput(id) and value.len == 0) {
-        view.setDialogNotice("Complete the first field before continuing.");
-        return;
+        const allow_empty = id == .ban or
+            (id == .user_list and silenceFilterToken(std.mem.trim(u8, view.dialogValueAt(1), " \t")));
+        if (!allow_empty) {
+            view.setDialogNotice("Complete the first field before continuing.");
+            return;
+        }
     }
     const maybe_client = network.clientPtr();
     const room = workspace.activeRoom() orelse return;
@@ -2478,21 +2784,38 @@ fn applyDialogAction(
                     return;
                 };
             }
-            try client.listRooms(value, limit, state.ircx_data);
+            client.listRooms(value, limit, state.ircx_data) catch |err| {
+                try rejectDialogIrc(view, err, "That room list query is not allowed.");
+                return;
+            };
             const room_to_join = std.mem.trim(u8, view.dialogValueAt(1), " \t");
             if (room_to_join.len != 0) {
-                const index = workspace.ensure(room_to_join) catch {
-                    view.setDialogNotice("Enter a valid room name beginning with # or &.");
+                const index = workspace.ensure(room_to_join) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNotice(err));
                     return;
                 };
                 _ = workspace.activate(index);
-                try client.join(room_to_join);
+                if (try requestMarkedJoinWithKey(client, workspace, index, room_to_join, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    view.setDialogNotice(notice);
+                    return;
+                }
             }
         },
         .channel => {
-            const index = workspace.ensure(value) catch return;
+            const index = workspace.ensure(value) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNotice(err));
+                return;
+            };
             _ = workspace.activate(index);
-            if (maybe_client) |client| try client.joinWithKey(value, view.dialogValueAt(1));
+            workspace.rooms.items[index].setWantRejoin(true);
+            if (maybe_client) |client| {
+                if (try requestJoinWithKey(client, workspace, value, view.dialogValueAt(1))) |notice| {
+                    workspace.rooms.items[index].setWantRejoin(false);
+                    view.setDialogNotice(notice);
+                    return;
+                }
+            }
+            try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(1));
         },
         .channel_create => {
             const creation_modes = std.mem.trim(u8, view.dialogValueAt(2), " \t");
@@ -2501,22 +2824,29 @@ fn applyDialogAction(
                 view.setDialogNotice("Enter modes as one token, for example +nt.");
                 return;
             }
-            if (limit.len != 0) {
-                for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
-                    return;
-                };
-                if ((std.fmt.parseUnsigned(u32, limit, 10) catch 0) == 0) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
+            if (limit.len != 0 and !isPositiveCount(limit)) {
+                view.setDialogNotice("Maximum users must be a positive number.");
+                return;
+            }
+            const pending_topic = view.dialogValueAt(1);
+            if (hasWireControl(pending_topic)) {
+                view.setDialogNotice("The topic must stay on one line.");
+                return;
+            }
+            const index = workspace.ensure(value) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNotice(err));
+                return;
+            };
+            _ = workspace.activate(index);
+            workspace.rooms.items[index].setWantRejoin(true);
+            if (maybe_client) |client| {
+                if (try requestCreateRoom(client, workspace, value, creation_modes, limit, view.dialogValueAt(4))) |notice| {
+                    workspace.rooms.items[index].setWantRejoin(false);
+                    view.setDialogNotice(notice);
                     return;
                 }
-            }
-            const index = workspace.ensure(value) catch return;
-            _ = workspace.activate(index);
-            if (maybe_client) |client| {
-                try client.create(value, creation_modes, limit, view.dialogValueAt(4));
-                const topic = view.dialogValueAt(1);
-                if (topic.len != 0) try client.setTopic(value, topic);
+                try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(4));
+                try workspace.rooms.items[index].setPendingTopic(workspace.gpa, pending_topic);
             }
         },
         .comics_view => {
@@ -2524,9 +2854,18 @@ fn applyDialogAction(
             view.shell.setComicColumns(comicColumnsFromDialog(view.dialogValueAt(1)));
         },
         .character => {
-            const selected = cc.comic.session.bundledAvatarByName(value) orelse return;
+            const selected = cc.comic.session.bundledAvatarByName(value) orelse {
+                view.setDialogNotice("Choose one of the bundled Comic Chat characters.");
+                return;
+            };
             try room.transcript.setAvatar(nick, selected);
-            if (maybe_client) |client| try announceRoomAvatar(client, room.name, selected, state.ircx_data);
+            if (maybe_client) |client| announceRoomAvatar(client, room.name, selected, state.ircx_data) catch |err| switch (err) {
+                error.UnknownAvatar => {},
+                else => {
+                    try rejectDialogIrc(view, err, "That character could not be announced.");
+                    return;
+                },
+            };
         },
         .background => {
             const selected = cc.comic.session.bundledBackdropByName(value) orelse {
@@ -2536,7 +2875,16 @@ fn applyDialogAction(
             try room.transcript.setBackdrop(selected);
             try preferences.setBackdrop(selected);
             try preferences.saveFile(io, network.runtime.preferences_path);
-            if (maybe_client) |client| try client.syncBackdrop(room.name, selected, null, state.ircx_data);
+            if (maybe_client) |client| {
+                client.syncBackdrop(room.name, selected, null, state.ircx_data) catch |err| {
+                    try rejectDialogIrc(view, err, "That backdrop could not be sent.");
+                    return;
+                };
+                if (state.ircx_data) publishClientBackdrop(client, room, gpa, selected) catch |err| {
+                    try rejectDialogIrc(view, err, "That backdrop could not be sent.");
+                    return;
+                };
+            }
         },
         .personal => {
             if (hasWireControl(value) or hasWireControl(view.dialogValueAt(1)) or hasWireControl(view.dialogValueAt(2)) or hasWireControl(view.dialogValueAt(3))) {
@@ -2562,13 +2910,54 @@ fn applyDialogAction(
                 view.setDialogNotice("Connect before changing room properties.");
                 return;
             };
-            try client.setTopic(room.name, value);
-            const modes = std.mem.trim(u8, view.dialogValueAt(1), " \t");
-            if (modes.len != 0) try client.setMode(room.name, modes, "");
-            const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
-            if (limit.len != 0) try client.setMode(room.name, "+l", limit);
             const key = view.dialogValueAt(3);
-            if (key.len != 0) try client.setMode(room.name, "+k", key);
+            if (hasWireControl(value)) {
+                view.setDialogNotice("The topic must stay on one line.");
+                return;
+            }
+            if (hasWireControl(key)) {
+                view.setDialogNotice("The room password must stay on one line.");
+                return;
+            }
+            if (key.len != 0 and cc.net.irc_map.SessionLimits.exceeds(workspace.session_limits.keylen, key)) {
+                view.setDialogNotice("That room password is longer than the server allows.");
+                return;
+            }
+            client.setTopic(room.name, value) catch |err| {
+                try rejectDialogIrc(view, err, "That topic is not allowed.");
+                return;
+            };
+            const modes = std.mem.trim(u8, view.dialogValueAt(1), " \t");
+            if (modes.len != 0) {
+                if (std.mem.indexOfAny(u8, modes, " \r\n\x00") != null) {
+                    view.setDialogNotice("Enter modes as one token, for example +nt.");
+                    return;
+                }
+                client.setMode(room.name, modes, "") catch |err| {
+                    try rejectDialogIrc(view, err, "That mode change is not allowed.");
+                    return;
+                };
+            }
+            const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
+            if (limit.len != 0) {
+                if (!isPositiveCount(limit)) {
+                    view.setDialogNotice("Maximum users must be a positive number.");
+                    return;
+                }
+                client.setMode(room.name, "+l", limit) catch |err| {
+                    try rejectDialogIrc(view, err, "That mode change is not allowed.");
+                    return;
+                };
+            }
+            if (key.len != 0) {
+                client.setMode(room.name, "+k", key) catch |err| {
+                    try rejectDialogIrc(view, err, "That mode change is not allowed.");
+                    return;
+                };
+                try room.setJoinKey(gpa, key);
+                client.setRestorationKey(room.name, key);
+                try state.replaceOwned(gpa, &state.last_key_channel, room.name);
+            }
         },
         .ircx_properties => {
             if (!state.ircx_data) {
@@ -2588,19 +2977,28 @@ fn applyDialogAction(
                 return;
             }
             if (std.ascii.eqlIgnoreCase(operation, "Get common")) {
-                try client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG");
+                client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG") catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a comma-separated list of property names.");
+                    return;
+                };
             } else if (std.ascii.eqlIgnoreCase(operation, "Get")) {
                 if (property.len == 0) {
                     view.setDialogNotice("Enter one or more comma-separated property names.");
                     return;
                 }
-                try client.queryProperty(entity, property);
+                client.queryProperty(entity, property) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a comma-separated list of property names.");
+                    return;
+                };
             } else {
                 if (property.len == 0) {
                     view.setDialogNotice("Enter the property to change.");
                     return;
                 }
-                try client.setProperty(entity, property, if (std.ascii.eqlIgnoreCase(operation, "Delete")) "" else property_value);
+                client.setProperty(entity, property, if (std.ascii.eqlIgnoreCase(operation, "Delete")) "" else property_value) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a comma-separated list of property names.");
+                    return;
+                };
             }
         },
         .room_access => {
@@ -2616,7 +3014,10 @@ fn applyDialogAction(
             const level = view.dialogValueAt(1);
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.ascii.eqlIgnoreCase(operation, "List")) {
-                try client.accessList(room.name);
+                client.accessList(room.name) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                    return;
+                };
             } else if (std.ascii.eqlIgnoreCase(operation, "Delete") or std.ascii.eqlIgnoreCase(operation, "Clear")) {
                 if (mask.len == 0 and !std.ascii.eqlIgnoreCase(operation, "Clear")) {
                     view.setDialogNotice("Enter the nickname mask to delete.");
@@ -2627,9 +3028,15 @@ fn applyDialogAction(
                     return;
                 }
                 if (std.ascii.eqlIgnoreCase(operation, "Clear"))
-                    try client.accessClear(room.name, level)
+                    client.accessClear(room.name, level) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                        return;
+                    }
                 else
-                    try client.accessDelete(room.name, level, mask);
+                    client.accessDelete(room.name, level, mask) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                        return;
+                    };
             } else {
                 if (mask.len == 0) {
                     view.setDialogNotice("Enter a nickname mask such as nick!*@*.");
@@ -2644,7 +3051,10 @@ fn applyDialogAction(
                     view.setDialogNotice("Use a single nickname mask and a one-line reason.");
                     return;
                 }
-                try client.accessAdd(room.name, level, mask, view.dialogValueAt(3), view.dialogValueAt(4));
+                client.accessAdd(room.name, level, mask, view.dialogValueAt(3), view.dialogValueAt(4)) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                    return;
+                };
             }
         },
         .ircx_events => {
@@ -2664,13 +3074,19 @@ fn applyDialogAction(
                 return;
             }
             if (std.ascii.eqlIgnoreCase(operation, "List")) {
-                try client.eventList(event);
+                client.eventList(event) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter one IRCX event name.");
+                    return;
+                };
             } else {
                 if (event.len == 0 or std.mem.indexOfAny(u8, event, " \r\n\x00") != null) {
                     view.setDialogNotice("Enter one IRCX event name.");
                     return;
                 }
-                try client.eventChange(std.ascii.eqlIgnoreCase(operation, "Add"), event, mask);
+                client.eventChange(std.ascii.eqlIgnoreCase(operation, "Add"), event, mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter one IRCX event name.");
+                    return;
+                };
             }
         },
         .automation => {
@@ -2809,12 +3225,26 @@ fn applyDialogAction(
             });
             try preferences.saveFile(io, network.runtime.preferences_path);
             state.last_notification_poll_ms = 0;
+            if (std.ascii.eqlIgnoreCase(delivery, "Disabled")) {
+                if (maybe_client) |client| if (state.monitor_subscribed) {
+                    client.monitor(.clear, null) catch {};
+                    state.monitor_subscribed = false;
+                };
+            } else if (maybe_client) |client| {
+                if (state.monitor_subscribed and notificationUsesMonitorValues(value, view.dialogValueAt(1), view.dialogValueAt(2))) {
+                    client.monitor(.add, value) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter one nickname without commas or spaces.");
+                        return;
+                    };
+                }
+            }
         },
         .notification_users => {
             const operation = view.dialogValueAt(2);
             if (std.ascii.eqlIgnoreCase(operation, "Refresh")) {
                 state.notification_poll_pending = 0;
                 state.last_notification_poll_ms = 0;
+                if (maybe_client) |client| if (state.monitor_subscribed) client.monitor(.status, null) catch {};
                 view.setDialogNotice("The saved notification rules will be queried now.");
                 return;
             }
@@ -2829,12 +3259,15 @@ fn applyDialogAction(
                     return;
                 };
                 const target_room = std.mem.trim(u8, view.dialogValueAt(3), " \t");
-                const index = workspace.ensure(target_room) catch {
-                    view.setDialogNotice("Enter a valid room beginning with # or &.");
+                const index = workspace.ensure(target_room) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid room beginning with # or &."));
                     return;
                 };
                 _ = workspace.activate(index);
-                try client.join(target_room);
+                if (try requestMarkedJoinWithKey(client, workspace, index, target_room, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    view.setDialogNotice(notice);
+                    return;
+                }
             } else {
                 const member = std.mem.trim(u8, view.dialogValueAt(1), " \t");
                 if (!containsIgnoreCase(state.notification_current.items, member)) {
@@ -2853,7 +3286,14 @@ fn applyDialogAction(
                         view.setDialogNotice("Connect before sending an invitation.");
                         return;
                     };
-                    try client.invite(member, room.name);
+                    if (!isSingleIrcToken(member)) {
+                        view.setDialogNotice("Enter one nickname without spaces.");
+                        return;
+                    }
+                    client.invite(member, room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter one nickname without spaces.");
+                        return;
+                    };
                 }
             }
         },
@@ -2872,7 +3312,10 @@ fn applyDialogAction(
                 view.setDialogNotice("That member is not in the current room.");
                 return;
             }
-            try client.sendCallLink(value, link);
+            client.sendCallLink(value, link) catch |err| {
+                try rejectDialogIrc(view, err, "That call link could not be sent.");
+                return;
+            };
         },
         .member_profile => {
             const client = maybe_client orelse {
@@ -2883,7 +3326,11 @@ fn applyDialogAction(
                 view.setDialogNotice("That member is not in the current room.");
                 return;
             }
-            try client.requestProfile(value, state.ircx_data);
+            try state.rememberProfileRequest(gpa, value);
+            client.requestProfile(value, state.ircx_data) catch |err| {
+                try rejectDialogIrc(view, err, "That profile request could not be sent.");
+                return;
+            };
             try room.transcript.addWithOptions("Profile", "Profile request sent; the reply will appear here.", .{ .modes = cc.proto.udi.bm_action });
         },
         .sound => {
@@ -2896,6 +3343,10 @@ fn applyDialogAction(
                 return;
             }
             const accompanying_message = view.dialogValueAt(1);
+            if (hasWireControl(accompanying_message)) {
+                view.setDialogNotice("The accompanying message must stay on one line.");
+                return;
+            }
             const is_private = view.shell.say_mode == .whisper;
             const target = if (is_private) target: {
                 const member_index = view.shell.selected_member orelse {
@@ -2908,7 +3359,10 @@ fn applyDialogAction(
                 }
                 break :target room.transcript.roster.items[member_index].nick;
             } else room.name;
-            try client.sendSound(target, value, accompanying_message);
+            client.sendSound(target, value, accompanying_message) catch |err| {
+                try rejectDialogIrc(view, err, "That sound could not be sent.");
+                return;
+            };
 
             var display: std.ArrayList(u8) = .empty;
             defer display.deinit(gpa);
@@ -2927,21 +3381,206 @@ fn applyDialogAction(
             view.shell.setSayMode(.say);
             view.jumpLatest();
         },
-        .nickname => if (maybe_client) |client| try client.changeNick(value),
+        .nickname => if (maybe_client) |client| {
+            if (try requestNickChange(client, workspace, value)) |notice| {
+                view.setDialogNotice(notice);
+                return;
+            }
+        },
         .away => if (maybe_client) |client| {
-            try client.setAway(value);
+            if (std.mem.indexOfAny(u8, value, "\r\n\x00\x01") != null) {
+                view.setDialogNotice("The away message must stay on one line.");
+                return;
+            }
+            client.setAway(value) catch |err| {
+                try rejectDialogIrc(view, err, "The away message must stay on one line.");
+                return;
+            };
+            if (value.len == 0) {
+                if (state.away_message) |old| {
+                    gpa.free(old);
+                    state.away_message = null;
+                }
+            } else try state.replaceOwned(gpa, &state.away_message, value);
             for (workspace.rooms.items) |*joined_room| {
-                if (joined_room.joined) try client.sendAwayControl(joined_room.name, value);
+                if (joined_room.joined) client.sendAwayControl(joined_room.name, value) catch {};
             }
         },
         .kick => if (maybe_client) |client| {
+            if (!isSingleIrcToken(value)) {
+                view.setDialogNotice("Enter one nickname without spaces.");
+                return;
+            }
+            const reason = view.dialogValueAt(1);
+            if (hasWireControl(reason)) {
+                view.setDialogNotice("The kick reason must stay on one line.");
+                return;
+            }
             const ban_mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
-            if (ban_mask.len != 0) try client.setBan(room.name, ban_mask);
-            try client.kick(room.name, value, view.dialogValueAt(1));
+            if (ban_mask.len != 0) {
+                if (!isSingleIrcToken(ban_mask)) {
+                    view.setDialogNotice("Use one nickname mask without spaces.");
+                    return;
+                }
+                client.setBan(room.name, ban_mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                    return;
+                };
+            }
+            client.kick(room.name, value, reason) catch |err| {
+                try rejectDialogIrc(view, err, "Enter one nickname without spaces.");
+                return;
+            };
         },
-        .ban => if (maybe_client) |client| try client.setBan(room.name, value),
-        .invite => if (maybe_client) |client| try client.invite(value, room.name),
+        .ban => if (maybe_client) |client| {
+            const list = classifyChannelListMask(value);
+            const mask = channelListMaskArgument(value, list.kind);
+            if (list.kind == .silence) {
+                if (list.action != .list and mask.len == 0) {
+                    view.setDialogNotice("Enter the mask to silence or unsilence, for example s:nick!*@* or -s:nick!*@*.");
+                    return;
+                }
+                applySilenceOperation(client, state, gpa, list.action, mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid silence mask without spaces.");
+                    return;
+                };
+                return;
+            }
+            switch (list.action) {
+                .list => switch (list.kind) {
+                    .ban => client.listBans(room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                        return;
+                    },
+                    .except => client.listExceptions(room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                        return;
+                    },
+                    .invite => client.listInviteMasks(room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                        return;
+                    },
+                    .silence => unreachable,
+                },
+                .delete => {
+                    if (mask.len == 0) {
+                        view.setDialogNotice("Enter the mask to remove, for example -nick!*@* or -e:nick!*@*.");
+                        return;
+                    }
+                    if (!isSingleIrcToken(mask)) {
+                        view.setDialogNotice("Use one nickname mask without spaces.");
+                        return;
+                    }
+                    if (!extbanMaskAllowed(workspace.extban, mask)) {
+                        view.setDialogNotice("That extended ban type is not advertised by this server.");
+                        return;
+                    }
+                    switch (list.kind) {
+                        .ban => client.clearBan(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .except => client.clearException(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .invite => client.clearInviteMask(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .silence => unreachable,
+                    }
+                },
+                .add => {
+                    if (!isSingleIrcToken(mask)) {
+                        view.setDialogNotice("Use one nickname mask without spaces.");
+                        return;
+                    }
+                    if (!extbanMaskAllowed(workspace.extban, mask)) {
+                        view.setDialogNotice("That extended ban type is not advertised by this server.");
+                        return;
+                    }
+                    switch (list.kind) {
+                        .ban => client.setBan(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .except => client.setException(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .invite => client.setInviteMask(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .silence => unreachable,
+                    }
+                },
+            }
+        },
+        .channel_password => {
+            const client = maybe_client orelse {
+                view.setDialogNotice("Connect before joining a password-protected room.");
+                return;
+            };
+            const target = state.last_key_channel orelse room.name;
+            const index = workspace.ensure(target) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid room beginning with # or &."));
+                return;
+            };
+            _ = workspace.activate(index);
+            if (try requestMarkedJoinWithKey(client, workspace, index, target, value)) |notice| {
+                view.setDialogNotice(notice);
+                return;
+            }
+            try workspace.rooms.items[index].setJoinKey(gpa, value);
+        },
+        .invitation => {
+            const target = if (value.len != 0) value else state.last_invite_channel orelse {
+                view.setDialogNotice("No pending room invitation.");
+                return;
+            };
+            const index = workspace.ensure(target) catch |err| {
+                view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid room beginning with # or &."));
+                return;
+            };
+            _ = workspace.activate(index);
+            workspace.rooms.items[index].setWantRejoin(true);
+            if (maybe_client) |client| {
+                if (try requestJoinWithKey(client, workspace, target, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    workspace.rooms.items[index].setWantRejoin(false);
+                    view.setDialogNotice(notice);
+                    return;
+                }
+            }
+        },
+        .invite => if (maybe_client) |client| {
+            if (!isSingleIrcToken(value)) {
+                view.setDialogNotice("Enter one nickname without spaces.");
+                return;
+            }
+            client.invite(value, room.name) catch |err| {
+                try rejectDialogIrc(view, err, "Enter one nickname without spaces.");
+                return;
+            };
+        },
         .user_list, .whisper => {
+            if (id == .user_list and silenceFilterToken(std.mem.trim(u8, view.dialogValueAt(1), " \t"))) {
+                const client = maybe_client orelse {
+                    view.setDialogNotice("Connect before changing silence.");
+                    return;
+                };
+                const silence = classifyUserListSilence(value);
+                if (silence.action != .list and silence.mask.len == 0) {
+                    view.setDialogNotice("Enter the nickname or mask to silence or unsilence.");
+                    return;
+                }
+                applySilenceOperation(client, state, gpa, silence.action, silence.mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid silence mask without spaces.");
+                    return;
+                };
+                return;
+            }
             const selected = selectRosterMember(&room.transcript, value) orelse {
                 view.setDialogNotice("That member is not in the current room.");
                 return;
@@ -3001,13 +3640,20 @@ fn applyDialogAction(
             var locator_room_index = workspace.active.?;
             const changes_server = if (locator.server) |server| !std.ascii.eqlIgnoreCase(server, network.host) else false;
             if (locator.channel) |located_room| {
-                const index = workspace.ensure(located_room) catch {
-                    view.setDialogNotice("The locator contains an invalid room.");
+                const index = workspace.ensure(located_room) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNoticeOr(err, "The locator contains an invalid room."));
                     return;
                 };
                 _ = workspace.activate(index);
                 locator_room_index = index;
-                if (!changes_server) if (maybe_client) |client| try client.join(located_room);
+                workspace.rooms.items[index].setWantRejoin(true);
+                if (!changes_server) if (maybe_client) |client| {
+                    if (try requestJoinWithKey(client, workspace, located_room, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                        workspace.rooms.items[index].setWantRejoin(false);
+                        view.setDialogNotice(notice);
+                        return;
+                    }
+                };
             }
             if (locator.character) |character| if (cc.comic.session.bundledAvatarByName(character)) |avatar| {
                 try workspace.rooms.items[locator_room_index].transcript.setAvatar(nick, avatar);
@@ -3021,7 +3667,7 @@ fn applyDialogAction(
                     view.setDialogNotice("The locator server could not be opened.");
                     return;
                 };
-                resetChatConnectionState(state);
+                resetChatConnectionState(state, workspace, workspace.gpa);
             };
             try preferences.saveFile(io, network.runtime.preferences_path);
         },
@@ -3067,13 +3713,52 @@ fn applyDialogAction(
                 _ = preferences.removeFavoriteRoom(value);
                 try preferences.saveFile(io, network.runtime.preferences_path);
             } else {
-                const index = workspace.ensure(value) catch {
-                    view.setDialogNotice("Enter a valid favorite room beginning with # or &.");
+                const index = workspace.ensure(value) catch |err| {
+                    view.setDialogNotice(roomEnsureFailureNoticeOr(err, "Enter a valid favorite room beginning with # or &."));
                     return;
                 };
                 _ = workspace.activate(index);
-                if (maybe_client) |client| try client.join(value);
+                workspace.rooms.items[index].setWantRejoin(true);
+                if (maybe_client) |client| {
+                    if (try requestJoinWithKey(client, workspace, value, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                        workspace.rooms.items[index].setWantRejoin(false);
+                        view.setDialogNotice(notice);
+                        return;
+                    }
+                }
             }
+        },
+        .password => {
+            const account = value;
+            const password = view.dialogValueAt(1);
+            if (account.len == 0 or password.len == 0) {
+                view.setDialogNotice("Enter the account name and password.");
+                return;
+            }
+            if (hasWireControl(account) or hasWireControl(password) or std.mem.indexOfScalar(u8, account, ' ') != null) {
+                view.setDialogNotice("Account must be one token; the password must stay on one line.");
+                return;
+            }
+            const password_file = network.runtime.auth.password_file orelse default_sasl_password_file;
+            cc.client.files.saveBytesAtomic(io, gpa, password_file, password) catch {
+                view.setDialogNotice("Could not store the account password file.");
+                return;
+            };
+            network.runtime.preferences.setSaslAuth(account, password_file) catch {
+                view.setDialogNotice("Could not remember the account name.");
+                return;
+            };
+            network.runtime.preferences.saveFile(io, network.runtime.preferences_path) catch {};
+            network.runtime.auth.user = network.runtime.preferences.sasl_user.items;
+            network.runtime.auth.password_file = network.runtime.preferences.sasl_password_file.items;
+            if (maybe_client) |client| {
+                const secret, const totp = splitTrailingTotp(password);
+                client.identify(account, secret, totp) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid account name and password.");
+                    return;
+                };
+            }
+            state.status = "signing in";
         },
         else => {},
     }
@@ -3337,11 +4022,32 @@ test "connection dialog validates a usable endpoint" {
 }
 
 test "connection failures remain actionable" {
-    var state: ChatState = .{ .joined = true, .join_requested = true };
-    try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state));
+    var workspace = try cc.client.workspace.Workspace.init(std.testing.allocator, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    var state: ChatState = .{ .joined = true, .join_requested = true, .ircx_data = true };
+    try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state, &workspace, std.testing.allocator));
     try std.testing.expect(!state.joined);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") != null);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "click for settings") != null);
+    try std.testing.expect(!state.ircx_data);
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!roomCanSend(workspace.rooms.items[root].joined, state.joined));
+    try std.testing.expectEqualStrings("Connection failed (server refused) - click for settings", state.status);
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") == null);
+    try std.testing.expectEqualStrings("Connection failed (reset) - click for settings", connectionFailureStatus(error.ConnectionResetByPeer));
+    try std.testing.expectEqualStrings("Connection failed (closed) - click for settings", connectionFailureStatus(error.EndOfStream));
+    try std.testing.expectEqualStrings("Connection failed (TLS) - click for settings", connectionFailureStatus(error.TlsReadFailed));
+    try std.testing.expectEqualStrings("Connection failed (server closed the session) - click for settings", connectionFailureStatus(error.IrcServerError));
+    try std.testing.expectEqualStrings("Connection failed - click for settings", connectionFailureStatus(error.Unexpected));
+    try std.testing.expectEqualStrings("Connection failed (SASL needs TLS) - click for settings", connectionFailureStatus(error.SaslRequiresTls));
+    try std.testing.expectEqualStrings("Connection failed (SASL EXTERNAL needs a client certificate) - click for settings", connectionFailureStatus(error.SaslExternalRequiresClientCertificate));
+    try std.testing.expectEqualStrings("Connection failed (SASL password file missing) - click for settings", connectionFailureStatus(error.MissingSaslPasswordFile));
+    try std.testing.expect(std.mem.indexOf(u8, connectionFailureStatus(error.OutOfMemory), "OutOfMemory") == null);
+    try std.testing.expect(std.mem.indexOf(u8, connectionFailureStatus(error.SaslRequiresTls), "SaslRequiresTls") == null);
+    try std.testing.expectEqualStrings("Waiting", transferStatusLabel(.waiting));
+    try std.testing.expectEqualStrings("Transferring", transferStatusLabel(.running));
+    try std.testing.expectEqualStrings("Failed", transferStatusLabel(.failed));
+    try std.testing.expect(std.mem.indexOf(u8, transferStatusLabel(.cancelled), "cancelled") == null);
 }
 
 test "comic view choices remain bounded and roster selection ignores departed users" {
@@ -3358,6 +4064,225 @@ test "comic view choices remain bounded and roster selection ignores departed us
     var part = cc.net.message.parse(":Alice!u@h PART #root :gone");
     try std.testing.expect(try transcript.observeIrc(&part, "#root", "Me"));
     try std.testing.expect(selectRosterMember(&transcript, "alice") == null);
+}
+
+fn composerSlashVerb(text: []const u8) ?[]const u8 {
+    if (text.len < 2 or text[0] != '/') return null;
+    const body = text[1..];
+    const split = std.mem.indexOfScalar(u8, body, ' ') orelse body.len;
+    if (split == 0) return null;
+    return body[0..split];
+}
+
+fn composerSlashIs(text: []const u8, verb: []const u8) bool {
+    const name = composerSlashVerb(text) orelse return false;
+    return std.ascii.eqlIgnoreCase(name, verb);
+}
+
+fn composerSlashRest(text: []const u8) []const u8 {
+    const name = composerSlashVerb(text) orelse return "";
+    if (text.len <= 1 + name.len) return "";
+    return std.mem.trim(u8, text[1 + name.len ..], " \t");
+}
+
+const JoinSlash = struct { channel: []const u8, key: []const u8 };
+
+const SpeechSlash = struct { text: []const u8, modes: u16 };
+
+fn parseSpeechSlash(text: []const u8) ?SpeechSlash {
+    if (composerSlashIs(text, "me") or composerSlashIs(text, "describe") or composerSlashIs(text, "action"))
+        return .{ .text = composerSlashRest(text), .modes = cc.proto.udi.bm_action };
+    if (composerSlashIs(text, "think"))
+        return .{ .text = composerSlashRest(text), .modes = cc.proto.udi.bm_think };
+    if (composerSlashIs(text, "say"))
+        return .{ .text = composerSlashRest(text), .modes = cc.proto.udi.bm_say };
+    return null;
+}
+
+fn leftoverComposerSlash(text: []const u8) bool {
+    if (text.len == 0 or text[0] != '/' or parseSpeechSlash(text) != null) return false;
+    const local = .{
+        "quit",   "clear",  "comic", "text",   "members", "latest", "dialog",
+        "avatar", "save",   "open",  "export", "join",    "create", "switch",
+        "part",   "cycle",
+    };
+    inline for (local) |name| {
+        if (composerSlashIs(text, name)) return false;
+    }
+    if (composerSlashIs(text, "view")) {
+        const rest = composerSlashRest(text);
+        if (std.ascii.eqlIgnoreCase(rest, "comic") or std.ascii.eqlIgnoreCase(rest, "text")) return false;
+    }
+    return true;
+}
+
+fn isTotpCode(value: []const u8) bool {
+    if (value.len != 6) return false;
+    for (value) |ch| if (ch < '0' or ch > '9') return false;
+    return true;
+}
+
+fn splitTrailingTotp(secret: []const u8) struct { []const u8, []const u8 } {
+    const trimmed = std.mem.trim(u8, secret, " \t");
+    const split = std.mem.lastIndexOfScalar(u8, trimmed, ' ') orelse return .{ trimmed, "" };
+    const last = std.mem.trim(u8, trimmed[split + 1 ..], " \t");
+    if (!isTotpCode(last)) return .{ trimmed, "" };
+    return .{ std.mem.trim(u8, trimmed[0..split], " \t"), last };
+}
+
+fn slashRestAfter(rest: []const u8, skip: usize) []const u8 {
+    var remaining = std.mem.trim(u8, rest, " \t");
+    var n: usize = 0;
+    while (n < skip) : (n += 1) {
+        const split = std.mem.indexOfScalar(u8, remaining, ' ') orelse return "";
+        remaining = std.mem.trim(u8, remaining[split + 1 ..], " \t");
+    }
+    return remaining;
+}
+
+fn joinSlashWords(buf: []u8, words: []const []const u8, sep: u8) ?[]const u8 {
+    if (words.len == 0) return null;
+    var len: usize = 0;
+    for (words, 0..) |word, index| {
+        if (index != 0) {
+            if (len >= buf.len) return null;
+            buf[len] = sep;
+            len += 1;
+        }
+        if (len + word.len > buf.len) return null;
+        @memcpy(buf[len..][0..word.len], word);
+        len += word.len;
+    }
+    return buf[0..len];
+}
+
+fn parseJoinSlash(text: []const u8) ?JoinSlash {
+    if (!composerSlashIs(text, "join")) return null;
+    const rest = composerSlashRest(text);
+    if (rest.len == 0) return .{ .channel = "", .key = "" };
+    const split = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    return .{ .channel = rest[0..split], .key = std.mem.trim(u8, rest[split..], " \t") };
+}
+
+fn sendJoinSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    gpa: std.mem.Allocator,
+    text: []const u8,
+) !bool {
+    const parsed = parseJoinSlash(text) orelse return false;
+    if (parsed.channel.len == 0) {
+        try appendSessionNotice(workspace, "Usage: /join <#channel> [key]");
+        return true;
+    }
+    const index = workspace.ensure(parsed.channel) catch |err| {
+        try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+        return true;
+    };
+    _ = workspace.activate(index);
+    workspace.rooms.items[index].setWantRejoin(true);
+    const join_key = if (parsed.key.len != 0) parsed.key else workspace.rooms.items[index].join_key orelse "";
+    if (maybe_client) |client| {
+        if (!workspace.rooms.items[index].joined) {
+            if (try requestJoinWithKey(client, workspace, parsed.channel, join_key)) |notice| {
+                workspace.rooms.items[index].setWantRejoin(false);
+                try appendSessionNotice(workspace, notice);
+            } else if (parsed.key.len != 0) {
+                try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
+                client.setRestorationKey(parsed.channel, parsed.key);
+            }
+        } else if (parsed.key.len != 0) {
+            try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
+            client.setRestorationKey(parsed.channel, parsed.key);
+        }
+    } else if (parsed.key.len != 0) {
+        try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
+    }
+    return true;
+}
+
+fn sendCreateSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    gpa: std.mem.Allocator,
+    text: []const u8,
+) !bool {
+    const rest = composerSlashRest(text);
+    var words: [4][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.tokenizeAny(u8, rest, " \t");
+    while (it.next()) |word| {
+        if (count == words.len) break;
+        words[count] = word;
+        count += 1;
+    }
+    if (count == 0) {
+        try appendSessionNotice(workspace, "Usage: /create <#channel> [modes] [limit] [key]");
+        return true;
+    }
+    var modes: []const u8 = "";
+    var limit: []const u8 = "";
+    var key: []const u8 = "";
+    var index: usize = 1;
+    if (index < count and (words[index][0] == '+' or words[index][0] == '-')) {
+        modes = words[index];
+        index += 1;
+    }
+    if (index < count and isPositiveCount(words[index])) {
+        limit = words[index];
+        index += 1;
+    }
+    if (index < count) key = words[index];
+    if (modes.len != 0 and std.mem.indexOfAny(u8, modes, " \r\n\x00") != null) {
+        try appendSessionNotice(workspace, "Enter modes as one token, for example +nt.");
+        return true;
+    }
+    const room_index = workspace.ensure(words[0]) catch |err| {
+        try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+        return true;
+    };
+    _ = workspace.activate(room_index);
+    workspace.rooms.items[room_index].setWantRejoin(true);
+    if (maybe_client) |client| {
+        if (try requestCreateRoom(client, workspace, words[0], modes, limit, key)) |notice| {
+            workspace.rooms.items[room_index].setWantRejoin(false);
+            try appendSessionNotice(workspace, notice);
+            return true;
+        }
+        try workspace.rooms.items[room_index].setJoinKey(gpa, key);
+        if (key.len != 0) client.setRestorationKey(words[0], key);
+    } else if (key.len != 0) {
+        try workspace.rooms.items[room_index].setJoinKey(gpa, key);
+    }
+    return true;
+}
+
+fn sendCycleSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    text: []const u8,
+) !bool {
+    const rest = composerSlashRest(text);
+    const named = rest.len != 0 and cc.net.irc_map.isChannelName(workspace.chantypes, rest);
+    const channel_name = if (named) rest else if (workspace.activeRoom()) |active| active.name else "";
+    if (channel_name.len == 0) {
+        try appendSessionNotice(workspace, "Usage: /cycle [#channel]");
+        return true;
+    }
+    const join_key = if (workspace.find(channel_name)) |index|
+        workspace.rooms.items[index].join_key orelse ""
+    else
+        "";
+    if (maybe_client) |client| {
+        client.partReason(channel_name, "cycling") catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        if (try requestJoinWithKey(client, workspace, channel_name, join_key)) |notice| {
+            try appendSessionNotice(workspace, notice);
+        }
+    }
+    return true;
 }
 
 fn handleWorkspaceInputKey(
@@ -3385,16 +4310,25 @@ fn handleWorkspaceInputKey(
             }
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/save ")) {
-            const path = std.mem.trim(u8, text[6..], " \t");
+        if (composerSlashIs(text, "quit")) {
+            const reason = composerSlashRest(text);
+            if (maybe_client) |client| {
+                client.quit(if (reason.len == 0) "Comic Chat" else reason) catch {};
+            }
+            const consumed = try editor.take();
+            gpa.free(consumed);
+            return false;
+        }
+        if (composerSlashIs(text, "save")) {
+            const path = composerSlashRest(text);
             const room = workspace.activeRoom() orelse return true;
             cc.client.files.saveConversation(io, gpa, path, &room.transcript) catch return true;
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/open ")) {
-            const path = std.mem.trim(u8, text[6..], " \t");
+        if (composerSlashIs(text, "open")) {
+            const path = composerSlashRest(text);
             var loaded = cc.client.files.loadConversation(io, gpa, path) catch return true;
             errdefer loaded.deinit();
             try loaded.setSelf(nick);
@@ -3406,8 +4340,8 @@ fn handleWorkspaceInputKey(
             view.jumpLatest();
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/export ")) {
-            const path = std.mem.trim(u8, text[8..], " \t");
+        if (composerSlashIs(text, "export")) {
+            const path = composerSlashRest(text);
             const png = cc.render.png.encode(gpa, view.pixels(), view.width(), view.height()) catch return true;
             defer gpa.free(png);
             cc.client.files.saveBytesAtomic(io, gpa, path, png) catch return true;
@@ -3415,27 +4349,65 @@ fn handleWorkspaceInputKey(
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/join ")) {
-            const name = std.mem.trim(u8, text[6..], " \t");
-            const index = workspace.ensure(name) catch return true;
-            _ = workspace.activate(index);
-            if (maybe_client) |client| try client.join(name);
+        if (try sendOnyxServiceSlash(maybe_client, workspace, text)) {
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/switch ")) {
-            const name = std.mem.trim(u8, text[8..], " \t");
+        if (composerSlashIs(text, "join")) {
+            if (try sendJoinSlash(maybe_client, workspace, gpa, text)) {
+                const consumed = try editor.take();
+                gpa.free(consumed);
+                return true;
+            }
+        }
+        if (composerSlashIs(text, "create")) {
+            if (try sendCreateSlash(maybe_client, workspace, gpa, text)) {
+                const consumed = try editor.take();
+                gpa.free(consumed);
+                return true;
+            }
+        }
+        if (composerSlashIs(text, "switch")) {
+            const name = composerSlashRest(text);
             if (workspace.find(name)) |index| _ = workspace.activate(index);
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.eql(u8, text, "/part")) {
-            if (workspace.active) |index| {
-                if (workspace.rooms.items.len > 1) {
-                    if (maybe_client) |client| try client.part(workspace.rooms.items[index].name);
-                    _ = workspace.remove(index);
+        if (composerSlashIs(text, "cycle")) {
+            if (try sendCycleSlash(maybe_client, workspace, text)) {
+                const consumed = try editor.take();
+                gpa.free(consumed);
+                return true;
+            }
+        }
+        if (composerSlashIs(text, "part")) {
+            const rest = composerSlashRest(text);
+            const first_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+            const first = rest[0..first_end];
+            const named_room = first.len != 0 and cc.net.irc_map.isChannelName(workspace.chantypes, first);
+            const channel_name = if (named_room) first else if (workspace.activeRoom()) |active| active.name else "";
+            const reason = if (named_room)
+                std.mem.trim(u8, rest[first_end..], " \t")
+            else
+                rest;
+            if (channel_name.len != 0) {
+                const room_index = workspace.find(channel_name);
+                const leaving_last_active = if (room_index) |index|
+                    workspace.active == index and !canLeaveActiveRoom(workspace.rooms.items.len)
+                else
+                    false;
+                if (!leaving_last_active) {
+                    if (maybe_client) |client| {
+                        client.partReason(channel_name, reason) catch |err| {
+                            try rejectServiceIrc(workspace, err);
+                            const consumed = try editor.take();
+                            gpa.free(consumed);
+                            return true;
+                        };
+                    }
+                    if (room_index) |index| _ = workspace.remove(index);
                 }
             }
             const consumed = try editor.take();
@@ -3444,7 +4416,7 @@ fn handleWorkspaceInputKey(
         }
     }
     const room = workspace.activeRoom() orelse return true;
-    return handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, room.joined or connected, ircx_data);
+    return handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, roomCanSend(room.joined, connected), ircx_data);
 }
 
 fn processWorkspaceMessages(
@@ -3453,78 +4425,237 @@ fn processWorkspaceMessages(
     view: *cc.client.view.View,
     preferences: *cc.client.preferences.Store,
     workspace: *cc.client.workspace.Workspace,
-    nick: []const u8,
+    network: *AsyncNetwork,
     channel: []const u8,
     state: *ChatState,
 ) !bool {
     var redraw = false;
     while (try client.bufferedNext()) |msg| {
-        if (std.ascii.eqlIgnoreCase(msg.command, "QUIT") or std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
+        if (std.ascii.eqlIgnoreCase(msg.command, "ERROR")) return error.IrcServerError;
+        const nick = workspace.self_nick;
+        if (std.ascii.eqlIgnoreCase(msg.command, "QUIT") or
+            std.ascii.eqlIgnoreCase(msg.command, "NICK") or
+            std.ascii.eqlIgnoreCase(msg.command, "AWAY") or
+            std.ascii.eqlIgnoreCase(msg.command, "KILL") or
+            std.mem.eql(u8, msg.command, "301"))
+        {
             for (workspace.rooms.items) |*room| redraw = (try room.transcript.observeIrc(&msg, room.name, nick)) or redraw;
-        } else if (messageRoom(&msg)) |room_name| {
-            if (room_name.len > 1 and (room_name[0] == '#' or room_name[0] == '&')) {
-                const room_index = try workspace.ensure(room_name);
-                redraw = (try workspace.rooms.items[room_index].transcript.observeIrc(&msg, room_name, nick)) or redraw;
+        } else if (messageRoom(&msg, workspace)) |room_name| {
+            if (room_name.len > 1 and workspace.chantypes.contains(room_name[0])) {
+                if (try ensureIncomingRoom(workspace, room_name)) |room_index| {
+                    redraw = (try workspace.rooms.items[room_index].transcript.observeIrc(&msg, room_name, nick)) or redraw;
+                }
             }
         }
         if (std.ascii.eqlIgnoreCase(msg.command, "PART")) {
             const room_name = msg.param(0) orelse "";
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
-            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Leave", who, room_name, msg.param(1) orelse "");
+            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Leave", who, room_name, msg.param(1) orelse "");
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick))
+                redraw = (try applySelfLeftChannel(workspace, client, state, room_name, msg.param(1))) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "KICK")) {
             const room_name = msg.param(0) orelse "";
             const who = msg.param(1) orelse "";
-            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Kick", who, room_name, msg.param(2) orelse "");
+            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Kick", who, room_name, msg.param(2) orelse "");
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick))
+                redraw = (try applySelfLeftChannel(workspace, client, state, room_name, msg.param(2))) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "INVITE")) {
-            if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, &active_room.transcript, preferences, "Invitation", if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "", msg.param(1) orelse "", "");
+            const invited = msg.param(0) orelse "";
+            const room_name = msg.param(1) orelse "";
+            const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+            if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, workspace, &active_room.transcript, preferences, "Invitation", who, room_name, "");
+            if (std.ascii.eqlIgnoreCase(invited, workspace.self_nick)) {
+                try state.replaceOwned(workspace.gpa, &state.last_invite_channel, room_name);
+                try state.replaceOwned(workspace.gpa, &state.last_invite_from, who);
+                redraw = (try appendInviteLine(workspace, who, room_name)) or redraw;
+            }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "KILL")) {
+            const victim = msg.param(0) orelse "";
+            if (std.ascii.eqlIgnoreCase(victim, workspace.self_nick)) {
+                const reason = msg.param(1) orelse "killed";
+                var buf: [280]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "Killed ({s})", .{reason}) catch "Killed.";
+                if (workspace.activeRoom()) |active| {
+                    try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+                }
+                state.status = "killed";
+                return error.IrcServerError;
+            }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "QUIT")) {
+            const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick)) {
+                const reason = msg.param(0) orelse "quit";
+                var buf: [280]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "Disconnected ({s})", .{reason}) catch "Disconnected.";
+                if (workspace.activeRoom()) |active| {
+                    try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+                }
+                state.status = "disconnected";
+                return error.IrcServerError;
+            }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "KNOCK")) {
+            redraw = (try appendKnockLine(workspace, state, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "EVENT")) {
+            if (workspaceWorkflowRoom(workspace, &msg, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
+            redraw = true;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "ACCOUNT") or
+            std.ascii.eqlIgnoreCase(msg.command, "CHGHOST") or
+            std.ascii.eqlIgnoreCase(msg.command, "SETNAME"))
+        {
+            redraw = (try appendIdentityLine(workspace, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "TAGMSG") or
+            std.ascii.eqlIgnoreCase(msg.command, "EDIT") or
+            std.ascii.eqlIgnoreCase(msg.command, "REDACT"))
+        {
+            redraw = (try appendModernEventLine(workspace, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "RENAME")) {
+            const old_name = msg.param(0) orelse "";
+            const new_name = msg.param(1) orelse "";
+            if (try workspace.rename(old_name, new_name)) {
+                client.renameRestoration(old_name, new_name);
+                try retargetSessionHint(workspace, state, &state.last_key_channel, old_name, new_name);
+                try retargetSessionHint(workspace, state, &state.last_invite_channel, old_name, new_name);
+                _ = try appendRenameLine(workspace, old_name, new_name);
+                if (workspace.find(new_name)) |index|
+                    republishRoomClientData(client, &workspace.rooms.items[index], state.ircx_data);
+                redraw = true;
+            }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or
+            std.mem.eql(u8, msg.command, "331") or
+            std.mem.eql(u8, msg.command, "332") or
+            std.mem.eql(u8, msg.command, "333"))
+        {
+            redraw = (try appendTopicLine(workspace, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "MODE") or std.mem.eql(u8, msg.command, "324")) {
+            redraw = (try appendModeLine(workspace, &msg)) or redraw;
+            if (try applyLiveChannelKey(workspace, client, state, &msg)) redraw = true;
+        } else if (isJoinDeniedReply(&msg, workspace)) {
+            redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
+        } else if (isCommandFailureNumeric(msg.command)) {
+            redraw = (try applyCommandFailure(workspace, client, state, &msg)) or redraw;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "FAIL") or
+            std.ascii.eqlIgnoreCase(msg.command, "WARN") or
+            std.ascii.eqlIgnoreCase(msg.command, "NOTE"))
+        {
+            if (workspaceWorkflowRoom(workspace, &msg, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
+            if (std.ascii.eqlIgnoreCase(msg.command, "FAIL")) state.status = "command failed";
+            redraw = true;
+        } else if (std.mem.eql(u8, msg.command, "470")) {
+            redraw = (try applyChannelForward(workspace, client, state, &msg)) or redraw;
+            if (msg.param(2)) |dest| {
+                if (dest.len > 1 and workspace.chantypes.contains(dest[0]))
+                    client.queryMode(dest) catch |err| try ignoreTransientSend(err);
+            }
+        } else if (isNickFailureNumeric(msg.command)) {
+            redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
+        } else if (isAuthFailureNumeric(msg.command)) {
+            redraw = (try applyAuthFailure(workspace, state, &msg, channel)) or redraw;
+            if (sessionAuthFailureEndsConnection(state.join_requested)) return error.IrcServerError;
+            continue;
+        } else if (std.mem.eql(u8, msg.command, "305") or std.mem.eql(u8, msg.command, "306")) {
+            const away = std.mem.eql(u8, msg.command, "306");
+            for (workspace.rooms.items) |*room| {
+                if (try room.transcript.setAway(nick, away)) redraw = true;
+            }
         }
         if (std.mem.eql(u8, msg.command, "352")) {
-            try collectNotificationWho(workspace.gpa, state, preferences, &msg, client.host);
+            try collectNotificationWho(workspace.gpa, state, preferences, &msg, client.host, advertisedNetworkName(client));
             continue;
         }
         if (std.mem.eql(u8, msg.command, "315")) {
             redraw = (try finishNotificationWho(workspace.gpa, state, workspace)) or redraw;
             continue;
         }
+        if (std.mem.eql(u8, msg.command, "730") or std.mem.eql(u8, msg.command, "731")) {
+            redraw = (try applyMonitorNumeric(workspace.gpa, state, workspace, preferences, &msg)) or redraw;
+            continue;
+        }
+        if (std.mem.eql(u8, msg.command, "271") or std.ascii.eqlIgnoreCase(msg.command, "SILENCE")) {
+            observeSilenceState(workspace.gpa, state, &msg);
+        }
+        if (std.mem.eql(u8, msg.command, "043")) {
+            if (msg.param(1)) |assigned| {
+                try workspace.setSelfNick(assigned);
+                try network.adoptNick(assigned);
+            }
+        }
+        if (std.mem.eql(u8, msg.command, "005")) {
+            applyClientIsupport(workspace, client);
+            if (ircxSupportAdvertised(client)) state.ircx_data = true;
+        }
         if (isVisibleServerWorkflowReply(msg.command)) {
-            if (workspace.activeRoom()) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
+            if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
+            try rememberMotd(state, workspace.gpa, &msg);
+            if (workspaceWorkflowRoom(workspace, &msg, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
             redraw = true;
             continue;
         }
         if (ircxNumericEnabled(&msg)) {
             state.ircx_data = true;
+            republishJoinedClientData(client, workspace);
         } else if (!state.join_requested and std.mem.eql(u8, msg.command, "001")) {
-            if (workspace.rooms.items.len == 0) {
-                try client.join(channel);
-            } else for (workspace.rooms.items) |*room| {
-                room.joined = false;
-                try client.join(room.name);
+            if (msg.param(0)) |assigned| {
+                try workspace.setSelfNick(assigned);
+                try network.adoptNick(assigned);
             }
+            if (try applyWelcomeJoins(workspace, client, channel)) |notice|
+                try appendSessionNotice(workspace, notice);
             state.join_requested = true;
-            state.status = "joining";
+            if (anyRoomJoined(workspace)) {
+                state.joined = true;
+                state.status = "connected";
+            } else {
+                state.status = "joining";
+            }
+            resubscribeSessionControls(client, state, workspace, preferences);
+            if (workspaceTranscriptRoom(workspace, channel)) |welcome_room|
+                try appendServerWorkflowReply(&welcome_room.transcript, &msg);
             redraw = true;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
+            const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+            if (std.ascii.eqlIgnoreCase(who, nick)) if (msg.param(0)) |assigned| {
+                try workspace.setSelfNick(assigned);
+                try network.adoptNick(assigned);
+            };
         } else if (std.mem.eql(u8, msg.command, "JOIN")) {
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "";
             const joined_channel = msg.param(0) orelse "";
-            if (std.ascii.eqlIgnoreCase(who, nick)) {
-                const room_index = try workspace.ensure(joined_channel);
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick)) {
+                const room_index = try ensureIncomingRoom(workspace, joined_channel) orelse {
+                    redraw = true;
+                    continue;
+                };
                 var room = &workspace.rooms.items[room_index];
                 room.joined = true;
+                room.setWantRejoin(true);
                 state.joined = true;
                 state.status = "connected";
-                try announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data);
+                if (room.pending_topic) |topic| {
+                    try applyPendingTopic(client, room, workspace.gpa, topic);
+                }
+                announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data) catch |err| switch (err) {
+                    error.UnknownAvatar => {},
+                    else => try ignoreTransientSend(err),
+                };
+                if (state.away_message) |message| client.sendAwayControl(room.name, message) catch {};
+                republishRoomClientData(client, room, state.ircx_data);
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
-                try sendAutomaticGreeting(client, preferences, joined_channel, who);
-                _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Join", who, joined_channel, "");
+                sendAutomaticGreeting(client, preferences, joined_channel, who) catch |err| try ignoreTransientSend(err);
+                _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Join", who, joined_channel, "");
                 redraw = true;
             }
         } else if (std.mem.eql(u8, msg.command, "366")) {
             const joined_channel = msg.param(1) orelse msg.param(0) orelse "";
             if (workspace.find(joined_channel)) |room_index| {
-                workspace.rooms.items[room_index].joined = true;
+                var joined_room = &workspace.rooms.items[room_index];
+                joined_room.joined = true;
+                joined_room.setWantRejoin(true);
                 state.joined = true;
                 state.status = "connected";
+                if (joined_room.pending_topic) |topic| {
+                    try applyPendingTopic(client, joined_room, workspace.gpa, topic);
+                }
                 redraw = true;
             }
         } else if (std.mem.eql(u8, msg.command, "DATA")) {
@@ -3532,9 +4663,9 @@ fn processWorkspaceMessages(
             const kind = msg.param(1) orelse continue;
             const wire = msg.param(2) orelse continue;
             if (!std.mem.eql(u8, kind, "CCUDI1")) continue;
-            const room_index = workspace.find(target) orelse if (std.ascii.eqlIgnoreCase(target, nick)) workspace.active orelse continue else continue;
+            const room_index = try workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, nick, state.ircx_data, preferences)) {
+            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, false, nick, workspace.rooms.items[room_index].name, state.ircx_data, preferences, state)) {
                 redraw = true;
                 continue;
             }
@@ -3545,43 +4676,63 @@ fn processWorkspaceMessages(
             // list. The server has already filtered delivery to us; retain
             // the channel context and render it as a private comic line.
             const target = msg.param(0) orelse continue;
-            const room_index = workspace.find(target) orelse continue;
+            const room_index = try workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             const text = msg.param(2) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             var room = &workspace.rooms.items[room_index];
-            try room.transcript.addWireMessage(who, text, true, null);
+            if (try processComicControl(io, client, &room.transcript, who, text, false, workspace.self_nick, room.name, state.ircx_data, preferences, state)) {
+                state.discardPendingUdi(workspace.gpa, target, who);
+                redraw = true;
+                continue;
+            }
+            var pending = state.takeUdi(target, who);
+            defer if (pending) |*entry| entry.deinit(room.transcript.gpa);
+            try room.transcript.addWireMessage(who, text, true, if (pending) |entry| entry.wire else null);
             room.transcript.trimTo(64);
             if (workspace.active != room_index) room.unread +|= 1;
             redraw = true;
-        } else if (std.mem.eql(u8, msg.command, "PRIVMSG")) {
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) {
             const target = msg.param(0) orelse continue;
-            const is_private = std.ascii.eqlIgnoreCase(target, nick);
-            const room_index = workspace.find(target) orelse if (is_private) workspace.active orelse continue else continue;
+            const resolved = stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes);
+            const is_private = cc.net.irc_map.eql(workspace.casemapping, resolved, nick);
+            const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
+            if (is_notice and isServerSourced(&msg)) {
+                if (workspaceWorkflowRoom(workspace, &msg, channel)) |active_room|
+                    try appendServerWorkflowReply(&active_room.transcript, &msg);
+                redraw = true;
+                continue;
+            }
+            const room_index = try workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             var room = &workspace.rooms.items[room_index];
             const transcript = &room.transcript;
             const text = msg.param(1) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             if (observeFlood(state, workspace.gpa, who, monotonicMilliseconds(io), preferences.auto_ignore_count, preferences.auto_ignore_interval_s)) {
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
             if (try receiveDccOffer(workspace.gpa, view, state, who, text)) {
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
             if (try receiveCallControl(client, view, who, text)) {
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
-            if (try processComicControl(io, client, transcript, who, text, nick, state.ircx_data, preferences)) {
+            if (try processComicControl(io, client, transcript, who, text, is_notice, nick, room.name, state.ircx_data, preferences, state)) {
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
-            if (!std.ascii.eqlIgnoreCase(who, nick) and try runPersistentRules(workspace.gpa, client, transcript, preferences, if (is_private) "Whisper" else "Message", who, room.name, text)) {
+            if (!std.ascii.eqlIgnoreCase(who, nick) and try runPersistentRules(workspace.gpa, client, workspace, transcript, preferences, if (is_private) "Whisper" else "Message", who, room.name, text)) {
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
-            var pending = state.takeUdi(target, who);
+            var pending = state.takeUdi(resolved, who);
             defer if (pending) |*entry| entry.deinit(transcript.gpa);
             try transcript.addWireMessage(
                 who,
@@ -3592,17 +4743,94 @@ fn processWorkspaceMessages(
             transcript.trimTo(64);
             if (workspace.active != room_index) room.unread +|= 1;
             redraw = true;
-        } else if (std.mem.eql(u8, msg.command, "433")) {
-            state.status = "nickname in use";
-            redraw = true;
         }
     }
     return redraw;
 }
 
 fn isVisibleServerWorkflowReply(command: []const u8) bool {
-    const code = std.fmt.parseInt(u16, command, 10) catch return std.ascii.eqlIgnoreCase(command, "PROP");
-    return code == 322 or code == 323 or (code >= 801 and code <= 819) or (code >= 913 and code <= 925);
+    const code = std.fmt.parseInt(u16, command, 10) catch
+        return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE") or
+            std.ascii.eqlIgnoreCase(command, "ACCESS") or isOnyxServiceReply(command);
+    return switch (code) {
+        2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
+        301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 354, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
+        322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
+        704, 705, 706, 710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733, 778, 826, 827 => true,
+        801...819, 824, 825, 900...905, 907, 908 => true,
+        else => false,
+    };
+}
+
+fn stripStatusmsgTarget(target: []const u8) []const u8 {
+    return stripStatusmsgTargetWith(target, .default, .default);
+}
+
+fn stripStatusmsgTargetWith(
+    target: []const u8,
+    statusmsg: cc.net.irc_map.StatusMsg,
+    chantypes: cc.net.irc_map.ChanTypes,
+) []const u8 {
+    var index: usize = 0;
+    while (index < target.len and statusmsg.contains(target[index])) : (index += 1) {}
+    if (index == 0 or index >= target.len) return target;
+    if (!cc.net.irc_map.isChannelName(chantypes, target[index..])) return target;
+    return target[index..];
+}
+
+fn applyClientIsupport(workspace: *cc.client.workspace.Workspace, client: *cc.net.client.Client) void {
+    const features = client.featureState() orelse return;
+    workspace.applyIsupport(features.advertised());
+}
+
+fn republishRoomClientData(
+    client: *cc.net.client.Client,
+    room: *cc.client.workspace.Room,
+    ircx_data: bool,
+) void {
+    if (!ircx_data) return;
+    const data = room.client_data orelse return;
+    if (data.len == 0) return;
+    client.setProperty(room.name, "CLIENT", data) catch {};
+}
+
+fn republishJoinedClientData(client: *cc.net.client.Client, workspace: *cc.client.workspace.Workspace) void {
+    for (workspace.rooms.items) |*room| {
+        if (!room.joined) continue;
+        republishRoomClientData(client, room, true);
+    }
+}
+
+fn workspaceRoomForIncoming(
+    workspace: *cc.client.workspace.Workspace,
+    target: []const u8,
+    self_nick: []const u8,
+) !?usize {
+    const resolved = stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes);
+    if (resolved.len > 1 and workspace.chantypes.contains(resolved[0]))
+        return ensureIncomingRoom(workspace, resolved);
+    if (cc.net.irc_map.eql(workspace.casemapping, resolved, self_nick)) return workspace.active;
+    return workspace.find(resolved) orelse workspace.active;
+}
+
+fn workspaceTranscriptRoom(workspace: *cc.client.workspace.Workspace, channel: []const u8) ?*cc.client.workspace.Room {
+    if (workspace.activeRoom()) |room| return room;
+    const index = workspace.ensure(channel) catch return null;
+    return &workspace.rooms.items[index];
+}
+
+fn workspaceWorkflowRoom(
+    workspace: *cc.client.workspace.Workspace,
+    msg: *const cc.net.message.Message,
+    fallback_channel: []const u8,
+) ?*cc.client.workspace.Room {
+    var index: usize = 0;
+    while (index < msg.param_count) : (index += 1) {
+        const param = msg.param(index) orelse continue;
+        const resolved = stripStatusmsgTargetWith(param, workspace.statusmsg, workspace.chantypes);
+        if (workspace.find(resolved)) |room_index| return &workspace.rooms.items[room_index];
+    }
+    return workspaceTranscriptRoom(workspace, fallback_channel);
 }
 
 fn appendServerWorkflowReply(transcript: *cc.comic.session.Transcript, msg: *const cc.net.message.Message) !void {
@@ -3616,12 +4844,2162 @@ fn appendServerWorkflowReply(transcript: *cc.comic.session.Transcript, msg: *con
     try transcript.addWithOptions("Server", text.items, .{ .modes = cc.proto.udi.bm_action });
 }
 
+const ClientPropertyReply = struct {
+    object: []const u8,
+    value: []const u8,
+};
+
+fn clientPropertyReply(msg: *const cc.net.message.Message) ?ClientPropertyReply {
+    if (std.mem.eql(u8, msg.command, "818") and msg.param_count >= 4) {
+        if (!std.ascii.eqlIgnoreCase(msg.params[2], "CLIENT")) return null;
+        return .{ .object = msg.params[1], .value = msg.params[3] };
+    }
+    if (std.ascii.eqlIgnoreCase(msg.command, "PROP") and msg.param_count >= 3) {
+        if (!std.ascii.eqlIgnoreCase(msg.params[1], "CLIENT")) return null;
+        return .{ .object = msg.params[0], .value = msg.params[2] };
+    }
+    return null;
+}
+
+fn applyClientPropertyBackdrop(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const reply = clientPropertyReply(msg) orelse return false;
+    const room_index = workspace.find(reply.object) orelse workspace.active orelse return false;
+    try workspace.rooms.items[room_index].setClientData(workspace.gpa, reply.value);
+    const backdrop = cc.proto.keystring.getValue(reply.value, "bk") orelse return false;
+    if (backdrop.len == 0) return false;
+    const bundled = cc.comic.session.bundledBackdropByName(backdrop) orelse return false;
+    try workspace.rooms.items[room_index].transcript.setBackdrop(bundled);
+    return true;
+}
+
+fn appendTopicLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const numeric = std.mem.eql(u8, msg.command, "331") or
+        std.mem.eql(u8, msg.command, "332") or
+        std.mem.eql(u8, msg.command, "333");
+    const channel = if (numeric) msg.param(1) else msg.param(0);
+    const room_name = channel orelse return false;
+    const room_index = workspace.find(room_name) orelse return false;
+    var display: std.ArrayList(u8) = .empty;
+    defer display.deinit(workspace.gpa);
+    if (std.mem.eql(u8, msg.command, "331")) {
+        try display.appendSlice(workspace.gpa, msg.param(2) orelse "No topic is set");
+    } else if (std.mem.eql(u8, msg.command, "333")) {
+        const setter = msg.param(2) orelse "someone";
+        try display.appendSlice(workspace.gpa, "Topic set by ");
+        try display.appendSlice(workspace.gpa, setter);
+        if (msg.param(3)) |when| {
+            try display.appendSlice(workspace.gpa, " at ");
+            try display.appendSlice(workspace.gpa, when);
+        }
+    } else {
+        const text = if (std.mem.eql(u8, msg.command, "332")) msg.param(2) else msg.param(1);
+        const topic = text orelse return false;
+        const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "Topic";
+        if (who.len != 0 and !std.mem.eql(u8, msg.command, "332")) {
+            try display.appendSlice(workspace.gpa, "Topic from ");
+            try display.appendSlice(workspace.gpa, who);
+            try display.appendSlice(workspace.gpa, ": ");
+        } else try display.appendSlice(workspace.gpa, "Topic: ");
+        try display.appendSlice(workspace.gpa, topic);
+    }
+    try workspace.rooms.items[room_index].transcript.addWithOptions("Topic", display.items, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn appendModeLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const channel = if (std.mem.eql(u8, msg.command, "324")) msg.param(1) else msg.param(0);
+    const room_name = channel orelse return false;
+    const room_index = workspace.find(room_name) orelse blk: {
+        if (std.mem.eql(u8, msg.command, "324")) return false;
+        if (!cc.net.irc_map.eql(workspace.casemapping, room_name, workspace.self_nick)) return false;
+        break :blk workspace.active orelse return false;
+    };
+    var display: std.ArrayList(u8) = .empty;
+    defer display.deinit(workspace.gpa);
+    try display.appendSlice(workspace.gpa, "Mode");
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+    if (who.len != 0 and !std.mem.eql(u8, msg.command, "324")) {
+        try display.appendSlice(workspace.gpa, " from ");
+        try display.appendSlice(workspace.gpa, who);
+    }
+    try display.appendSlice(workspace.gpa, ":");
+    const start = if (std.mem.eql(u8, msg.command, "324")) @as(usize, 2) else @as(usize, 1);
+    if (start >= msg.param_count) return false;
+    for (msg.params[start..msg.param_count]) |param| {
+        try display.append(workspace.gpa, ' ');
+        try display.appendSlice(workspace.gpa, param);
+    }
+    try workspace.rooms.items[room_index].transcript.addWithOptions("Mode", display.items, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn applyLiveChannelKey(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const is_listed = std.mem.eql(u8, msg.command, "324");
+    if (!is_listed and !std.ascii.eqlIgnoreCase(msg.command, "MODE")) return false;
+    if (msg.param_count < (if (is_listed) @as(usize, 3) else 2)) return false;
+    const channel = if (is_listed) msg.params[1] else msg.params[0];
+    if (!cc.net.irc_map.isChannelName(workspace.chantypes, channel)) return false;
+    const modes = if (is_listed) msg.params[2] else msg.params[1];
+    var adding = true;
+    var parameter_index: usize = if (is_listed) 3 else 2;
+    var changed = false;
+    for (modes) |mode| {
+        if (mode == '+') {
+            adding = true;
+            continue;
+        }
+        if (mode == '-') {
+            adding = false;
+            continue;
+        }
+        if (mode == 'k') {
+            const has_key = parameter_index < msg.param_count;
+            const key = if (adding and has_key) msg.params[parameter_index] else "";
+            if (has_key) parameter_index += 1;
+            // 324 shows +k to everyone but only members get the value. Do not
+            // wipe a stored key when the parameter is omitted.
+            if (adding and !has_key) continue;
+            if (workspace.find(channel)) |room_index| {
+                try workspace.rooms.items[room_index].setJoinKey(workspace.gpa, key);
+                changed = true;
+            }
+            client.setRestorationKey(channel, key);
+            if (adding and key.len != 0)
+                try state.replaceOwned(workspace.gpa, &state.last_key_channel, channel);
+            continue;
+        }
+        if (workspace.prefixes.isMode(mode) or workspace.chanmodes.takesParam(mode, adding)) {
+            if (parameter_index < msg.param_count) parameter_index += 1;
+        }
+    }
+    return changed;
+}
+
+fn isCommandFailureNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "401") or
+        std.mem.eql(u8, command, "403") or
+        std.mem.eql(u8, command, "404") or
+        std.mem.eql(u8, command, "412") or
+        std.mem.eql(u8, command, "417") or
+        std.mem.eql(u8, command, "421") or
+        std.mem.eql(u8, command, "486") or
+        std.mem.eql(u8, command, "439") or
+        std.mem.eql(u8, command, "441") or
+        std.mem.eql(u8, command, "442") or
+        std.mem.eql(u8, command, "467") or
+        std.mem.eql(u8, command, "476") or
+        std.mem.eql(u8, command, "477") or
+        std.mem.eql(u8, command, "472") or
+        std.mem.eql(u8, command, "478") or
+        std.mem.eql(u8, command, "481") or
+        std.mem.eql(u8, command, "482") or
+        std.mem.eql(u8, command, "501") or
+        std.mem.eql(u8, command, "502") or
+        std.mem.eql(u8, command, "511") or
+        std.mem.eql(u8, command, "431") or
+        std.mem.eql(u8, command, "443") or
+        std.mem.eql(u8, command, "451") or
+        std.mem.eql(u8, command, "461") or
+        std.mem.eql(u8, command, "462") or
+        std.mem.eql(u8, command, "479") or
+        std.mem.eql(u8, command, "484") or
+        std.mem.eql(u8, command, "485") or
+        std.mem.eql(u8, command, "406") or
+        std.mem.eql(u8, command, "468") or
+        std.mem.eql(u8, command, "524") or
+        std.mem.eql(u8, command, "402") or
+        std.mem.eql(u8, command, "407") or
+        std.mem.eql(u8, command, "411") or
+        std.mem.eql(u8, command, "416") or
+        std.mem.eql(u8, command, "440") or
+        std.mem.eql(u8, command, "456") or
+        std.mem.eql(u8, command, "457") or
+        std.mem.eql(u8, command, "458") or
+        std.mem.eql(u8, command, "489") or
+        std.mem.eql(u8, command, "926") or
+        std.mem.eql(u8, command, "927") or
+        std.mem.eql(u8, command, "492") or
+        std.mem.eql(u8, command, "494") or
+        std.mem.eql(u8, command, "716") or
+        std.mem.eql(u8, command, "821") or
+        std.mem.eql(u8, command, "822") or
+        std.mem.eql(u8, command, "823") or
+        std.mem.eql(u8, command, "410") or
+        std.mem.eql(u8, command, "513") or
+        std.mem.eql(u8, command, "517") or
+        std.mem.eql(u8, command, "525") or
+        std.mem.eql(u8, command, "531") or
+        std.mem.eql(u8, command, "913") or
+        std.mem.eql(u8, command, "914") or
+        std.mem.eql(u8, command, "915") or
+        std.mem.eql(u8, command, "916") or
+        std.mem.eql(u8, command, "917") or
+        std.mem.eql(u8, command, "918") or
+        std.mem.eql(u8, command, "919") or
+        std.mem.eql(u8, command, "923") or
+        std.mem.eql(u8, command, "924") or
+        std.mem.eql(u8, command, "925") or
+        std.mem.eql(u8, command, "906") or
+        std.mem.eql(u8, command, "734") or
+        std.mem.eql(u8, command, "491") or
+        std.mem.eql(u8, command, "409");
+}
+
+fn isOnyxServiceReply(command: []const u8) bool {
+    const names = .{
+        "REGISTER",    "VERIFY",     "RESETPASS", "SETPASS",  "IDENTIFY", "LOGOUT",   "DROP",
+        "ACCOUNTINFO", "ACCOUNTSET", "SASLINFO",  "GHOST",    "RECOVER",  "RELEASE",
+        "CHANNEL",     "CS",         "AUTOJOIN",  "GROUP",    "SEEN",     "MEMO",
+        "TEGAMI",      "VHOST",      "CERTADD",   "CERTLIST", "CERTDEL",  "SESSIONTOKEN",
+        "SESSION",     "TOTP",       "KEYTRANS",  "IDENTITY", "WELCOME",  "HELP",
+        "HELPOP",      "TEMPMODE",   "PINS",      "ACCEPT",   "ACTIVITY", "LISTX",
+        "MODEX",       "IRCX",       "ISIRCX",    "CLEAR",    "SUCCESSOR",
+    };
+    inline for (names) |name| {
+        if (std.ascii.eqlIgnoreCase(command, name)) return true;
+    }
+    return false;
+}
+
+fn isNickFailureNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "432") or
+        std.mem.eql(u8, command, "433") or
+        std.mem.eql(u8, command, "435") or
+        std.mem.eql(u8, command, "436") or
+        std.mem.eql(u8, command, "437") or
+        std.mem.eql(u8, command, "438");
+}
+
+fn isAuthFailureNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "463") or
+        std.mem.eql(u8, command, "464") or
+        std.mem.eql(u8, command, "465");
+}
+
+fn applyAuthFailure(
+    workspace: *cc.client.workspace.Workspace,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+    channel: []const u8,
+) !bool {
+    state.status = if (std.mem.eql(u8, msg.command, "464"))
+        "password rejected"
+    else if (std.mem.eql(u8, msg.command, "463"))
+        "host not permitted"
+    else
+        "banned";
+    if (workspaceTranscriptRoom(workspace, channel)) |active| try appendServerWorkflowReply(&active.transcript, msg);
+    return true;
+}
+
+fn applyCommandFailure(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    _ = client;
+    const subject = msg.param(1) orelse "";
+    const detail = msg.param(2) orelse msg.command;
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s} {s}: {s}", .{ msg.command, subject, detail }) catch "Command failed.";
+    if ((std.mem.eql(u8, msg.command, "442") or std.mem.eql(u8, msg.command, "403")) and subject.len > 0) {
+        // TOPIC/MODE/KICK 442 or Ban/send 403 on a seated room means the seat
+        // is gone, not that the user left. Keep want_rejoin and restoration.
+        if (workspace.find(subject)) |room_index|
+            workspace.rooms.items[room_index].joined = false;
+        refreshJoinedState(workspace, state, "joining");
+    }
+    if (workspace.find(subject)) |room_index| {
+        try workspace.rooms.items[room_index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    } else if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    if (std.mem.eql(u8, msg.command, "482") or std.mem.eql(u8, msg.command, "481"))
+        state.status = "not privileged";
+    return true;
+}
+
+fn appendIdentityLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else return false;
+    if (who.len == 0) return false;
+    var buf: [280]u8 = undefined;
+    const line = if (std.ascii.eqlIgnoreCase(msg.command, "ACCOUNT")) blk: {
+        const account = msg.param(0) orelse "*";
+        break :blk if (std.mem.eql(u8, account, "*"))
+            std.fmt.bufPrint(&buf, "{s} logged out", .{who}) catch "Account update."
+        else
+            std.fmt.bufPrint(&buf, "{s} is {s}", .{ who, account }) catch "Account update.";
+    } else if (std.ascii.eqlIgnoreCase(msg.command, "CHGHOST")) blk: {
+        const user = msg.param(0) orelse "";
+        const host = msg.param(1) orelse "";
+        break :blk std.fmt.bufPrint(&buf, "{s} is now {s}@{s}", .{ who, user, host }) catch "Host update.";
+    } else blk: {
+        const realname = msg.param(0) orelse "";
+        break :blk std.fmt.bufPrint(&buf, "{s} is now known as {s}", .{ who, realname }) catch "Name update.";
+    };
+    var wrote = false;
+    for (workspace.rooms.items) |*room| {
+        var present = std.ascii.eqlIgnoreCase(who, workspace.self_nick);
+        if (!present) for (room.transcript.roster.items) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.nick, who) and !entry.departed) {
+                present = true;
+                break;
+            }
+        };
+        if (!present) continue;
+        try room.transcript.addWithOptions(who, line, .{ .modes = cc.proto.udi.bm_action });
+        wrote = true;
+    }
+    if (!wrote) if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions(who, line, .{ .modes = cc.proto.udi.bm_action });
+        wrote = true;
+    };
+    return wrote;
+}
+
+fn isJoinDeniedNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "405") or
+        std.mem.eql(u8, command, "471") or
+        std.mem.eql(u8, command, "473") or
+        std.mem.eql(u8, command, "474") or
+        std.mem.eql(u8, command, "475") or
+        std.mem.eql(u8, command, "480") or
+        std.mem.eql(u8, command, "520");
+}
+
+fn isJoinDeniedReply(msg: *const cc.net.message.Message, workspace: *const cc.client.workspace.Workspace) bool {
+    if (isJoinDeniedNumeric(msg.command)) return true;
+    const target = msg.param(1) orelse return false;
+    if (!cc.net.irc_map.isChannelName(workspace.chantypes, target)) return false;
+    if (std.mem.eql(u8, msg.command, "437") or
+        std.mem.eql(u8, msg.command, "476") or
+        std.mem.eql(u8, msg.command, "477")) return true;
+    if (!std.mem.eql(u8, msg.command, "403") and !std.mem.eql(u8, msg.command, "489")) return false;
+    if (workspace.find(target)) |index| return !workspace.rooms.items[index].joined;
+    return true;
+}
+
+fn anyRoomJoined(workspace: *const cc.client.workspace.Workspace) bool {
+    for (workspace.rooms.items) |room| {
+        if (room.joined) return true;
+    }
+    return false;
+}
+
+fn refreshJoinedState(workspace: *const cc.client.workspace.Workspace, state: *ChatState, idle_status: []const u8) void {
+    if (anyRoomJoined(workspace)) return;
+    state.joined = false;
+    state.status = idle_status;
+}
+
+fn applySelfLeftChannel(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    channel: []const u8,
+    reason: ?[]const u8,
+) !bool {
+    client.forgetRestoration(channel);
+    const room_index = workspace.find(channel) orelse {
+        refreshJoinedState(workspace, state, "left room");
+        return false;
+    };
+    var room = &workspace.rooms.items[room_index];
+    room.joined = false;
+    room.setWantRejoin(false);
+    if (reason) |text| {
+        if (text.len > 0) {
+            var buf: [280]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "Left {s} ({s})", .{ room.name, text }) catch "Left the room.";
+            try room.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+        }
+    }
+    refreshJoinedState(workspace, state, "left room");
+    return true;
+}
+
+fn canLeaveActiveRoom(room_count: usize) bool {
+    return room_count > 1;
+}
+
+fn roomNeedsReconnectJoin(room: *const cc.client.workspace.Room, client: *const cc.net.client.Client) bool {
+    return roomNeedsReconnectJoinWith(
+        room.want_rejoin,
+        client.restoresChannel(room.name),
+        client.projectsSessionChannels(),
+        client.hasRestorationTargets(),
+    );
+}
+
+fn roomNeedsReconnectJoinWith(
+    want_rejoin: bool,
+    restores_channel: bool,
+    projects_session_channels: bool,
+    has_restoration_targets: bool,
+) bool {
+    if (!want_rejoin or restores_channel) return false;
+    if (projects_session_channels and !has_restoration_targets) return false;
+    return true;
+}
+
+fn sessionAuthFailureEndsConnection(join_requested: bool) bool {
+    return !join_requested;
+}
+
+fn ensureIncomingRoom(workspace: *cc.client.workspace.Workspace, room_name: []const u8) !?usize {
+    return workspace.ensure(room_name) catch |err| switch (err) {
+        error.TooManyRooms, error.InvalidRoomName => {
+            try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+            return null;
+        },
+        else => return err,
+    };
+}
+
+fn roomEnsureFailureNotice(err: anyerror) []const u8 {
+    return roomEnsureFailureNoticeOr(err, "Enter a valid room name beginning with # or &.");
+}
+
+fn roomEnsureFailureNoticeOr(err: anyerror, invalid_name: []const u8) []const u8 {
+    return switch (err) {
+        error.TooManyRooms => "You have opened as many rooms as the server allows.",
+        else => invalid_name,
+    };
+}
+
+const SessionLimitKind = enum { join, create, nick };
+
+fn sessionLimitFailureNotice(
+    kind: SessionLimitKind,
+    workspace: *const cc.client.workspace.Workspace,
+    channel: []const u8,
+    key: []const u8,
+) []const u8 {
+    const limits = workspace.session_limits;
+    return switch (kind) {
+        .nick => "That nickname is longer than the server allows.",
+        .join, .create => if (cc.net.irc_map.SessionLimits.exceeds(limits.channellen, channel))
+            "That room name is longer than the server allows."
+        else if (cc.net.irc_map.SessionLimits.exceeds(limits.keylen, key))
+            "That room password is longer than the server allows."
+        else
+            "You have joined as many rooms as the server allows.",
+    };
+}
+
+fn sendOnyxServiceSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    text: []const u8,
+) !bool {
+    if (text.len < 2 or text[0] != '/') return false;
+    const body = text[1..];
+    const split = std.mem.indexOfScalar(u8, body, ' ') orelse body.len;
+    const verb = body[0..split];
+    const rest = std.mem.trim(u8, if (split < body.len) body[split + 1 ..] else "", " \t");
+    var words: [16][]const u8 = undefined;
+    var count: usize = 0;
+    var overflow = false;
+    var it = std.mem.tokenizeAny(u8, rest, " \t");
+    while (it.next()) |word| {
+        if (count == words.len) {
+            overflow = true;
+            break;
+        }
+        words[count] = word;
+        count += 1;
+    }
+    const client = maybe_client orelse {
+        if (!isOnyxServiceSlash(verb)) return false;
+        try appendSessionNotice(workspace, "Connect before using that command.");
+        return true;
+    };
+    if (std.ascii.eqlIgnoreCase(verb, "identify")) {
+        const password, const totp = splitTrailingTotp(slashRestAfter(rest, 1));
+        if (password.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /identify <account> <password> [code]");
+            return true;
+        }
+        client.identify(words[0], password, totp) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "register")) {
+        const password = slashRestAfter(rest, 2);
+        if (password.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /register <account|*> <email|*> <password>");
+            return true;
+        }
+        const password_copy = try workspace.gpa.dupe(u8, password);
+        defer workspace.gpa.free(password_copy);
+        client.accountRegister(words[0], words[1], password_copy) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "verify")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /verify [account] <code>");
+            return true;
+        }
+        const code_copy = try workspace.gpa.dupe(u8, words[count - 1]);
+        defer workspace.gpa.free(code_copy);
+        const account = if (count > 1) words[0] else "*";
+        client.accountVerify(account, code_copy) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "logout")) {
+        client.logoutAccount() catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "accountinfo")) {
+        client.accountInfo(if (count == 0) null else words[0]) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "saslinfo")) {
+        client.saslInfo() catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "knock")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /knock <#channel> [reason]");
+            return true;
+        }
+        const reason = if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else "";
+        client.knock(words[0], if (reason.len == 0) null else reason) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "search")) {
+        if (rest.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /search [#channel] <query>");
+            return true;
+        }
+        const target, const query = if (count > 1 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]))
+            .{ words[0], std.mem.trim(u8, rest[words[0].len..], " \t") }
+        else if (workspace.activeRoom()) |room|
+            .{ room.name, rest }
+        else {
+            try appendSessionNotice(workspace, "Search needs a room or target.");
+            return true;
+        };
+        if (query.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /search [#channel] <query>");
+            return true;
+        }
+        client.search(target, query) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "setname")) {
+        if (rest.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /setname <real name>");
+            return true;
+        }
+        client.setName(rest) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "ghost") or std.ascii.eqlIgnoreCase(verb, "drop")) {
+        const password = slashRestAfter(rest, 1);
+        if (password.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /ghost|/drop <nick-or-account> <password>");
+            return true;
+        }
+        const send = if (std.ascii.eqlIgnoreCase(verb, "ghost"))
+            client.ghost(words[0], password)
+        else
+            client.dropAccount(words[0], password);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "recover") or std.ascii.eqlIgnoreCase(verb, "release") or std.ascii.eqlIgnoreCase(verb, "seen")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "That command needs a nickname or account.");
+            return true;
+        }
+        const send = if (std.ascii.eqlIgnoreCase(verb, "recover"))
+            client.recover(words[0])
+        else if (std.ascii.eqlIgnoreCase(verb, "release"))
+            client.release(words[0])
+        else
+            client.sendService("SEEN", words[0..count]);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "msg") or std.ascii.eqlIgnoreCase(verb, "notice")) {
+        if (count == 0 or rest.len == words[0].len) {
+            try appendSessionNotice(workspace, "Usage: /msg|/notice <target> <text>");
+            return true;
+        }
+        const text_arg = std.mem.trim(u8, rest[words[0].len..], " \t");
+        const send = if (std.ascii.eqlIgnoreCase(verb, "msg"))
+            client.privmsg(words[0], text_arg)
+        else
+            client.notice(words[0], text_arg);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        if (std.ascii.eqlIgnoreCase(verb, "msg")) {
+            if (workspace.activeRoom()) |active| {
+                try active.transcript.addWithOptions(workspace.self_nick, text_arg, .{ .modes = cc.proto.udi.bm_whisper });
+            }
+        }
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "nick")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /nick <nickname>");
+            return true;
+        }
+        if (try requestNickChange(client, workspace, words[0])) |notice| {
+            try appendSessionNotice(workspace, notice);
+        }
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "topic")) {
+        const room = workspace.activeRoom() orelse {
+            try appendSessionNotice(workspace, "Topic needs a room.");
+            return true;
+        };
+        const send = if (rest.len == 0)
+            client.sendService("TOPIC", &.{room.name})
+        else
+            client.setTopic(room.name, rest);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "invite")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /invite <nick> [#channel]");
+            return true;
+        }
+        const dest = if (count > 1) words[1] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Invite needs a room.");
+            return true;
+        };
+        client.invite(words[0], dest) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "mode")) {
+        const first_is_modes = count > 0 and words[0].len != 0 and (words[0][0] == '+' or words[0][0] == '-');
+        if (count == 0 or first_is_modes) {
+            const room = workspace.activeRoom() orelse {
+                try appendSessionNotice(workspace, "Mode needs a target.");
+                return true;
+            };
+            const send = if (count == 0)
+                client.queryMode(room.name)
+            else
+                client.setMode(room.name, words[0], if (count > 1) words[1] else "");
+            send catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (count == 1) {
+            client.queryMode(words[0]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        client.setMode(words[0], words[1], if (count > 2) words[2] else "") catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "kick")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /kick [#channel] <nick> [reason]");
+            return true;
+        }
+        const named = cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Kick needs a room.");
+            return true;
+        };
+        if (named and count < 2) {
+            try appendSessionNotice(workspace, "Usage: /kick [#channel] <nick> [reason]");
+            return true;
+        }
+        const nick_start = if (named) (std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len) else 0;
+        const after_chan = if (named) std.mem.trim(u8, rest[nick_start..], " \t") else rest;
+        const nick_end = std.mem.indexOfScalar(u8, after_chan, ' ') orelse after_chan.len;
+        const nick = after_chan[0..nick_end];
+        const reason = std.mem.trim(u8, after_chan[nick_end..], " \t");
+        if (nick.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /kick [#channel] <nick> [reason]");
+            return true;
+        }
+        client.kick(channel, nick, reason) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "rename")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /rename [#old] <#new> [reason]");
+            return true;
+        }
+        const second_is_chan = count > 1 and cc.net.irc_map.isChannelName(workspace.chantypes, words[1]);
+        const old_name = if (second_is_chan) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Rename needs a room.");
+            return true;
+        };
+        const new_name = if (second_is_chan) words[1] else words[0];
+        const reason_start = if (second_is_chan) words[0].len + 1 + words[1].len else words[0].len;
+        const reason = if (rest.len > reason_start) std.mem.trim(u8, rest[reason_start..], " \t") else "";
+        client.renameChannel(old_name, new_name, if (reason.len == 0) null else reason) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "ctcp") or std.ascii.eqlIgnoreCase(verb, "ping")) {
+        if (std.ascii.eqlIgnoreCase(verb, "ping") and count == 0) {
+            client.sendService("PING", &.{"reinked"}) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (count == 0 or (std.ascii.eqlIgnoreCase(verb, "ctcp") and count < 2)) {
+            try appendSessionNotice(workspace, "Usage: /ctcp <target> <command> [payload]");
+            return true;
+        }
+        const command = if (std.ascii.eqlIgnoreCase(verb, "ping")) "PING" else words[1];
+        const payload_start = if (std.ascii.eqlIgnoreCase(verb, "ping")) words[0].len else words[0].len + 1 + words[1].len;
+        const payload = if (rest.len > payload_start) std.mem.trim(u8, rest[payload_start..], " \t") else "";
+        client.ctcpRequest(words[0], command, if (payload.len == 0) null else payload) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "op") or std.ascii.eqlIgnoreCase(verb, "deop") or
+        std.ascii.eqlIgnoreCase(verb, "voice") or std.ascii.eqlIgnoreCase(verb, "devoice") or
+        std.ascii.eqlIgnoreCase(verb, "owner") or std.ascii.eqlIgnoreCase(verb, "deowner"))
+    {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /op|/deop|/voice|/devoice|/owner|/deowner <nick> [#channel]");
+            return true;
+        }
+        const named = count > 1 and cc.net.irc_map.isChannelName(workspace.chantypes, words[1]);
+        const first_is_chan = cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named)
+            words[1]
+        else if (first_is_chan and count > 1)
+            words[0]
+        else if (workspace.activeRoom()) |room|
+            room.name
+        else {
+            try appendSessionNotice(workspace, "That command needs a room.");
+            return true;
+        };
+        const nick = if (first_is_chan and count > 1) words[1] else words[0];
+        const flag = if (std.ascii.eqlIgnoreCase(verb, "op"))
+            "+o"
+        else if (std.ascii.eqlIgnoreCase(verb, "deop"))
+            "-o"
+        else if (std.ascii.eqlIgnoreCase(verb, "voice"))
+            "+v"
+        else if (std.ascii.eqlIgnoreCase(verb, "devoice"))
+            "-v"
+        else if (std.ascii.eqlIgnoreCase(verb, "owner"))
+            "+q"
+        else
+            "-q";
+        client.setMode(channel, flag, nick) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "ban") or std.ascii.eqlIgnoreCase(verb, "unban")) {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Ban needs a room.");
+            return true;
+        };
+        const mask = if (named) (if (count > 1) words[1] else "") else if (count > 0) words[0] else "";
+        if (mask.len == 0) {
+            if (std.ascii.eqlIgnoreCase(verb, "unban")) {
+                try appendSessionNotice(workspace, "Usage: /unban [channel] <mask>");
+                return true;
+            }
+            client.listBans(channel) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (try rejectUnadvertisedExtban(workspace, mask)) return true;
+        const send = if (std.ascii.eqlIgnoreCase(verb, "ban"))
+            client.setBan(channel, mask)
+        else
+            client.clearBan(channel, mask);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "except") or std.ascii.eqlIgnoreCase(verb, "unexcept") or
+        std.ascii.eqlIgnoreCase(verb, "invex") or std.ascii.eqlIgnoreCase(verb, "uninvex"))
+    {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "That list command needs a room.");
+            return true;
+        };
+        const mask = if (named) (if (count > 1) words[1] else "") else if (count > 0) words[0] else "";
+        const is_except = std.ascii.eqlIgnoreCase(verb, "except") or std.ascii.eqlIgnoreCase(verb, "unexcept");
+        const is_remove = std.ascii.eqlIgnoreCase(verb, "unexcept") or std.ascii.eqlIgnoreCase(verb, "uninvex");
+        if (mask.len == 0) {
+            if (is_remove) {
+                try appendSessionNotice(workspace, "Usage: /unexcept|/uninvex [channel] <mask>");
+                return true;
+            }
+            const send = if (is_except) client.listExceptions(channel) else client.listInviteMasks(channel);
+            send catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (try rejectUnadvertisedExtban(workspace, mask)) return true;
+        const send = if (is_except and !is_remove)
+            client.setException(channel, mask)
+        else if (is_except)
+            client.clearException(channel, mask)
+        else if (!is_remove)
+            client.setInviteMask(channel, mask)
+        else
+            client.clearInviteMask(channel, mask);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "whisper")) {
+        if (count == 0 or rest.len == words[0].len) {
+            try appendSessionNotice(workspace, "Usage: /whisper <nick> <text>");
+            return true;
+        }
+        const room = workspace.activeRoom() orelse {
+            try appendSessionNotice(workspace, "Whisper needs a room.");
+            return true;
+        };
+        const text_arg = std.mem.trim(u8, rest[words[0].len..], " \t");
+        client.whisper(room.name, words[0], text_arg) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        try room.transcript.addWithOptions(workspace.self_nick, text_arg, .{ .modes = cc.proto.udi.bm_whisper });
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "umode")) {
+        if (count == 0) {
+            client.queryMode(workspace.self_nick) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        client.setMode(workspace.self_nick, words[0], if (count > 1) words[1] else "") catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "prop")) {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const entity = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Property needs a room.");
+            return true;
+        };
+        const after_entity = if (named)
+            if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else ""
+        else
+            rest;
+        if (after_entity.len == 0) {
+            client.queryProperty(entity, "*") catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const property_end = std.mem.indexOfScalar(u8, after_entity, ' ') orelse after_entity.len;
+        const property = after_entity[0..property_end];
+        const value = std.mem.trim(u8, after_entity[property_end..], " \t");
+        const send = if (value.len == 0)
+            client.queryProperty(entity, property)
+        else
+            client.setProperty(entity, property, value);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "access")) {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Access needs a room.");
+            return true;
+        };
+        const op_index: usize = if (named) 1 else 0;
+        if (count <= op_index or std.ascii.eqlIgnoreCase(words[op_index], "LIST")) {
+            client.accessList(channel) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const operation = words[op_index];
+        if (std.ascii.eqlIgnoreCase(operation, "CLEAR")) {
+            client.accessClear(channel, if (count > op_index + 1) words[op_index + 1] else "") catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(operation, "DELETE") or std.ascii.eqlIgnoreCase(operation, "DEL")) {
+            if (count < op_index + 3) {
+                try appendSessionNotice(workspace, "Usage: /access [channel] DELETE <level> <mask>");
+                return true;
+            }
+            client.accessDelete(channel, words[op_index + 1], words[op_index + 2]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(operation, "ADD")) {
+            if (count < op_index + 3) {
+                try appendSessionNotice(workspace, "Usage: /access [channel] ADD <level> <mask> [minutes] [reason]");
+                return true;
+            }
+            const level = words[op_index + 1];
+            const mask = words[op_index + 2];
+            var after = rest;
+            if (named) after = if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else "";
+            after = if (after.len > operation.len) std.mem.trim(u8, after[operation.len..], " \t") else "";
+            after = if (after.len > level.len) std.mem.trim(u8, after[level.len..], " \t") else "";
+            after = if (after.len > mask.len) std.mem.trim(u8, after[mask.len..], " \t") else "";
+            var duration: []const u8 = "";
+            if (after.len != 0) {
+                const token_end = std.mem.indexOfScalar(u8, after, ' ') orelse after.len;
+                const token = after[0..token_end];
+                if (token.len != 0 and std.ascii.isDigit(token[0])) {
+                    var digits = true;
+                    for (token) |byte| if (!std.ascii.isDigit(byte)) {
+                        digits = false;
+                        break;
+                    };
+                    if (digits) {
+                        duration = token;
+                        after = std.mem.trim(u8, after[token_end..], " \t");
+                    }
+                }
+            }
+            client.accessAdd(channel, level, mask, duration, after) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /access [channel] LIST|ADD|DELETE|CLEAR ...");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "monitor")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "list") or std.ascii.eqlIgnoreCase(words[0], "L")) {
+            client.monitor(.list, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "clear") or std.ascii.eqlIgnoreCase(words[0], "C")) {
+            client.monitor(.clear, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "status") or std.ascii.eqlIgnoreCase(words[0], "S")) {
+            client.monitor(.status, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const removing = std.ascii.eqlIgnoreCase(words[0], "-") or
+            std.ascii.eqlIgnoreCase(words[0], "remove") or
+            std.ascii.eqlIgnoreCase(words[0], "del");
+        const adding = std.ascii.eqlIgnoreCase(words[0], "+") or
+            std.ascii.eqlIgnoreCase(words[0], "add");
+        const names_start: usize = if (removing or adding) 1 else 0;
+        var names_buf: [512]u8 = undefined;
+        const names = joinSlashWords(names_buf[0..], words[names_start..count], ',') orelse {
+            try appendSessionNotice(workspace, "Usage: /monitor +|-|add|remove|list|clear|status [nick[,nick]...]");
+            return true;
+        };
+        const send = if (removing) client.monitor(.remove, names) else client.monitor(.add, names);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "pins")) {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Pins need a room.");
+            return true;
+        };
+        const op_index: usize = if (named) 1 else 0;
+        if (count <= op_index or std.ascii.eqlIgnoreCase(words[op_index], "list")) {
+            client.pins(channel, .list, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[op_index], "clear")) {
+            client.pins(channel, .clear, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const adding = std.ascii.eqlIgnoreCase(words[op_index], "add");
+        const deleting = std.ascii.eqlIgnoreCase(words[op_index], "del") or
+            std.ascii.eqlIgnoreCase(words[op_index], "delete");
+        if ((adding or deleting) and count > op_index + 1) {
+            const send = if (adding)
+                client.pins(channel, .add, words[op_index + 1])
+            else
+                client.pins(channel, .delete, words[op_index + 1]);
+            send catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /pins [channel] list|add <msgid>|del <msgid>|clear");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "accept")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "list") or std.mem.eql(u8, words[0], "*")) {
+            client.accept(.list, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        var operation: cc.net.client.AcceptOperation = .add;
+        var nick = words[0];
+        if (std.ascii.eqlIgnoreCase(words[0], "add") or std.mem.eql(u8, words[0], "+")) {
+            if (count < 2) {
+                try appendSessionNotice(workspace, "Usage: /accept [+|-|add|remove] <nick>");
+                return true;
+            }
+            nick = words[1];
+        } else if (std.ascii.eqlIgnoreCase(words[0], "remove") or std.ascii.eqlIgnoreCase(words[0], "del") or std.mem.eql(u8, words[0], "-")) {
+            if (count < 2) {
+                try appendSessionNotice(workspace, "Usage: /accept [+|-|add|remove] <nick>");
+                return true;
+            }
+            operation = .remove;
+            nick = words[1];
+        } else if (words[0][0] == '+') {
+            nick = words[0][1..];
+        } else if (words[0][0] == '-') {
+            operation = .remove;
+            nick = words[0][1..];
+        }
+        if (nick.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /accept [+|-|add|remove] <nick>");
+            return true;
+        }
+        client.accept(operation, nick) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "listx")) {
+        client.listRooms(if (count > 0) words[0] else "", if (count > 1) words[1] else "", true) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "tempmode")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "sweep")) {
+            client.tempModeSweep() catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "add")) {
+            if (count < 4) {
+                try appendSessionNotice(workspace, "Usage: /tempmode add <#channel> <flag> [param] <duration>");
+                return true;
+            }
+            const duration = std.fmt.parseInt(u32, words[count - 1], 10) catch {
+                try appendSessionNotice(workspace, "Usage: /tempmode add <#channel> <flag> [param] <duration>");
+                return true;
+            };
+            const parameter: ?[]const u8 = if (count > 4) words[3] else null;
+            client.tempModeAdd(words[1], words[2], parameter, duration) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "cancel")) {
+            if (count < 3) {
+                try appendSessionNotice(workspace, "Usage: /tempmode cancel <#channel> <flag> [param]");
+                return true;
+            }
+            client.tempModeCancel(words[1], words[2], if (count > 3) words[3] else null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /tempmode add|cancel|sweep ...");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "welcome")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "SHOW")) {
+            client.welcome() catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "CLEAR")) {
+            client.welcomeClear() catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "ADD")) {
+            const line = if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else "";
+            if (line.len == 0) {
+                try appendSessionNotice(workspace, "Usage: /welcome ADD <line>");
+                return true;
+            }
+            client.welcomeAdd(line) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /welcome [SHOW|CLEAR|ADD <line>]");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "tegami") or std.ascii.eqlIgnoreCase(verb, "memo")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "LIST")) {
+            client.sendService("MEMO", &.{"LIST"}) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "CLEAR")) {
+            client.sendService("MEMO", &.{"CLEAR"}) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "FORWARD")) {
+            client.sendService("MEMO", words[0..count]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "IGNORE")) {
+            client.sendService("MEMO", words[0..count]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "SEND")) {
+            if (count < 2) {
+                try appendSessionNotice(workspace, "Usage: /memo|/tegami SEND <account> <message>");
+                return true;
+            }
+            const message = if (rest.len > words[0].len + 1 + words[1].len)
+                std.mem.trim(u8, rest[words[0].len + 1 + words[1].len ..], " \t")
+            else
+                "";
+            if (message.len == 0) {
+                try appendSessionNotice(workspace, "Usage: /memo|/tegami SEND <account> <message>");
+                return true;
+            }
+            client.memoSend(words[1], message) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /memo|/tegami LIST|CLEAR|SEND|FORWARD|IGNORE ...");
+        return true;
+    }
+    if ((std.ascii.eqlIgnoreCase(verb, "cs") or std.ascii.eqlIgnoreCase(verb, "channel")) and
+        count >= 1 and std.ascii.eqlIgnoreCase(words[0], "REGISTER"))
+    {
+        if (count < 2) {
+            try appendSessionNotice(workspace, "Usage: /cs REGISTER <#channel> [password]");
+            return true;
+        }
+        const password = slashRestAfter(rest, 2);
+        const send = if (password.len == 0)
+            client.sendService("CHANNEL", &.{ "REGISTER", words[1] })
+        else
+            client.sendService("CHANNEL", &.{ "REGISTER", words[1], password });
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if ((std.ascii.eqlIgnoreCase(verb, "cs") or std.ascii.eqlIgnoreCase(verb, "channel")) and
+        count >= 1 and std.ascii.eqlIgnoreCase(words[0], "SET"))
+    {
+        if (count < 3) {
+            try appendSessionNotice(workspace, "Usage: /cs SET <#channel> <field> <value>");
+            return true;
+        }
+        const value = slashRestAfter(rest, 3);
+        if (value.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /cs SET <#channel> <field> <value>");
+            return true;
+        }
+        client.sendService("CHANNEL", &.{ "SET", words[1], words[2], value }) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "vhost") and count >= 1 and
+        (std.ascii.eqlIgnoreCase(words[0], "DENY") or std.ascii.eqlIgnoreCase(words[0], "APPROVE")))
+    {
+        if (count < 2) {
+            try appendSessionNotice(workspace, "Usage: /vhost DENY|APPROVE <account> [reason]");
+            return true;
+        }
+        var sub_buf: [8]u8 = undefined;
+        const subcommand = std.ascii.upperString(&sub_buf, words[0]);
+        const reason = slashRestAfter(rest, 2);
+        const send = if (reason.len == 0)
+            client.sendService("VHOST", &.{ subcommand, words[1] })
+        else
+            client.sendService("VHOST", &.{ subcommand, words[1], reason });
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "accountset")) {
+        if (count < 4) {
+            try appendSessionNotice(workspace, "Usage: /accountset <account> <password> <field> <value>");
+            return true;
+        }
+        const value = slashRestAfter(rest, 3);
+        if (value.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /accountset <account> <password> <field> <value>");
+            return true;
+        }
+        client.sendService("ACCOUNTSET", &.{ words[0], words[1], words[2], value }) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "setpass")) {
+        if (count < 2) {
+            try appendSessionNotice(workspace, "Usage: /setpass <old> <new>");
+            return true;
+        }
+        client.sendService("SETPASS", &.{ words[0], slashRestAfter(rest, 1) }) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "resetpass")) {
+        if (count < 3) {
+            try appendSessionNotice(workspace, "Usage: /resetpass <account> <code> <new-password>");
+            return true;
+        }
+        client.sendService("RESETPASS", &.{ words[0], words[1], slashRestAfter(rest, 2) }) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (overflow and isOnyxServiceSlash(verb)) {
+        try appendSessionNotice(workspace, "That command has too many arguments.");
+        return true;
+    }
+    if (!isOnyxServiceSlash(verb)) return false;
+    var command_buf: [16]u8 = undefined;
+    if (verb.len > command_buf.len) return false;
+    const command = std.ascii.upperString(&command_buf, verb);
+    const mapped = if (std.ascii.eqlIgnoreCase(command, "CS"))
+        "CHANNEL"
+    else if (std.ascii.eqlIgnoreCase(command, "TEGAMI"))
+        "MEMO"
+    else if (std.ascii.eqlIgnoreCase(command, "WHOX"))
+        "WHO"
+    else
+        command;
+    client.sendService(mapped, words[0..count]) catch |err| {
+        try rejectServiceIrc(workspace, err);
+        return true;
+    };
+    return true;
+}
+
+fn isOnyxQuerySlash(verb: []const u8) bool {
+    const names = .{
+        "whois", "whowas", "who",     "whox",    "ison",  "userhost",
+        "motd",  "version", "time",   "admin",   "info",  "lusers",
+        "commands", "names", "list",  "msg",     "notice", "nick",
+        "topic", "invite", "mode", "kick", "rename", "ctcp", "ping",
+        "op", "deop", "voice", "devoice", "owner", "deowner", "ban", "unban",
+        "except", "unexcept", "invex", "uninvex", "whisper",
+        "umode", "prop", "access", "monitor",
+    };
+    inline for (names) |name| {
+        if (std.ascii.eqlIgnoreCase(verb, name)) return true;
+    }
+    return false;
+}
+
+fn isOnyxServiceSlash(verb: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(verb, "clear")) return false;
+    return isOnyxServiceReply(verb) or std.ascii.eqlIgnoreCase(verb, "identify") or
+        std.ascii.eqlIgnoreCase(verb, "session") or std.ascii.eqlIgnoreCase(verb, "knock") or
+        std.ascii.eqlIgnoreCase(verb, "search") or std.ascii.eqlIgnoreCase(verb, "setname") or
+        isOnyxQuerySlash(verb);
+}
+
+fn rejectServiceIrc(workspace: *cc.client.workspace.Workspace, err: anyerror) !void {
+    const line = switch (err) {
+        error.InvalidIrcParameter => "That account command is not allowed.",
+        error.AccountRegistrationRequiresTls => "Account commands require a TLS connection.",
+        error.AccountRegistrationNotEnabled => "This server did not advertise account registration.",
+        error.CapabilityNotEnabled => "This server did not advertise that command.",
+        error.InvalidUtf8 => "That text is not valid UTF-8.",
+        error.TxBackpressure => "The connection is busy. Try again in a moment.",
+        else => return err,
+    };
+    try appendSessionNotice(workspace, line);
+}
+
+fn requestJoinWithKey(
+    client: *cc.net.client.Client,
+    workspace: *const cc.client.workspace.Workspace,
+    channel: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    client.joinWithKey(channel, key) catch |err| switch (err) {
+        error.InvalidIrcParameter => return sessionLimitFailureNotice(.join, workspace, channel, key),
+        error.InvalidRestoreTarget => return "Enter the room password as one token.",
+        error.TxBackpressure => return "The connection is busy. Try again in a moment.",
+        else => return err,
+    };
+    return null;
+}
+
+fn requestCreateRoom(
+    client: *cc.net.client.Client,
+    workspace: *const cc.client.workspace.Workspace,
+    channel: []const u8,
+    creation_modes: []const u8,
+    limit: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    client.create(channel, creation_modes, limit, key) catch |err| switch (err) {
+        error.InvalidIrcParameter => return sessionLimitFailureNotice(.create, workspace, channel, key),
+        error.InvalidRestoreTarget => return "Enter the room password as one token.",
+        error.TxBackpressure => return "The connection is busy. Try again in a moment.",
+        else => return err,
+    };
+    return null;
+}
+
+fn requestNickChange(
+    client: *cc.net.client.Client,
+    workspace: *const cc.client.workspace.Workspace,
+    nick_value: []const u8,
+) !?[]const u8 {
+    client.changeNick(nick_value) catch |err| switch (err) {
+        error.InvalidIrcParameter => return sessionLimitFailureNotice(.nick, workspace, "", ""),
+        error.TxBackpressure => return "The connection is busy. Try again in a moment.",
+        else => return err,
+    };
+    return null;
+}
+
+fn requestMarkedJoinWithKey(
+    client: *cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    room_index: usize,
+    channel: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    workspace.rooms.items[room_index].setWantRejoin(true);
+    if (try requestJoinWithKey(client, workspace, channel, key)) |notice| {
+        workspace.rooms.items[room_index].setWantRejoin(false);
+        return notice;
+    }
+    return null;
+}
+
+fn applyWelcomeJoins(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    startup_channel: []const u8,
+) !?[]const u8 {
+    if (workspace.rooms.items.len == 0 and !client.projectsSessionChannels()) {
+        const startup = try workspace.ensure(startup_channel);
+        return requestMarkedJoinWithKey(
+            client,
+            workspace,
+            startup,
+            startup_channel,
+            workspace.rooms.items[startup].join_key orelse "",
+        );
+    }
+    for (workspace.rooms.items) |*room| {
+        if (client.restoresChannel(room.name) and room.want_rejoin) {
+            room.joined = true;
+            continue;
+        }
+        room.joined = false;
+        try requestReconnectJoin(workspace, client, room);
+    }
+    return null;
+}
+
+fn applyPendingTopic(
+    client: *cc.net.client.Client,
+    room: *cc.client.workspace.Room,
+    gpa: std.mem.Allocator,
+    topic: []const u8,
+) !void {
+    client.setTopic(room.name, topic) catch |err| switch (err) {
+        error.InvalidIrcParameter => try room.transcript.addWithOptions(
+            "Server",
+            "That topic is not allowed.",
+            .{ .modes = cc.proto.udi.bm_action },
+        ),
+        error.InvalidUtf8 => try room.transcript.addWithOptions(
+            "Server",
+            "That topic is not valid UTF-8.",
+            .{ .modes = cc.proto.udi.bm_action },
+        ),
+        error.TxBackpressure => {
+            try room.transcript.addWithOptions(
+                "Server",
+                "The connection is busy. Try again in a moment.",
+                .{ .modes = cc.proto.udi.bm_action },
+            );
+            return;
+        },
+        else => return err,
+    };
+    try room.setPendingTopic(gpa, "");
+}
+
+fn requestReconnectJoin(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    room: *cc.client.workspace.Room,
+) !void {
+    if (!roomNeedsReconnectJoin(room, client)) return;
+    client.joinWithKey(room.name, room.join_key orelse "") catch |err| switch (err) {
+        error.InvalidIrcParameter => {
+            client.forgetRestoration(room.name);
+            room.setWantRejoin(false);
+            try room.transcript.addWithOptions(
+                "Server",
+                sessionLimitFailureNotice(.join, workspace, room.name, room.join_key orelse ""),
+                .{ .modes = cc.proto.udi.bm_action },
+            );
+        },
+        error.InvalidRestoreTarget => {
+            try room.setJoinKey(workspace.gpa, "");
+            client.forgetRestoration(room.name);
+            try room.transcript.addWithOptions(
+                "Server",
+                "Enter the room password as one token.",
+                .{ .modes = cc.proto.udi.bm_action },
+            );
+        },
+        error.TxBackpressure => try room.transcript.addWithOptions(
+            "Server",
+            "The connection is busy. Try again in a moment.",
+            .{ .modes = cc.proto.udi.bm_action },
+        ),
+        else => return err,
+    };
+}
+
+fn appendSessionNotice(workspace: *cc.client.workspace.Workspace, line: []const u8) !void {
+    if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+}
+
+fn ignoreTransientSend(err: anyerror) !void {
+    switch (err) {
+        error.TxBackpressure, error.InvalidUtf8, error.InvalidIrcParameter => {},
+        else => return err,
+    }
+}
+
+fn dialogIrcNotice(err: anyerror, notice: []const u8) ?[]const u8 {
+    return switch (err) {
+        error.InvalidIrcParameter => notice,
+        error.InvalidUtf8 => "That text is not valid UTF-8.",
+        error.TxBackpressure => "The connection is busy. Try again in a moment.",
+        else => null,
+    };
+}
+
+fn rejectDialogIrc(view: *cc.client.view.View, err: anyerror, notice: []const u8) !void {
+    if (dialogIrcNotice(err, notice)) |line| {
+        view.setDialogNotice(line);
+        return;
+    }
+    return err;
+}
+
+fn retargetSessionHint(
+    workspace: *const cc.client.workspace.Workspace,
+    state: *ChatState,
+    slot: *?[]u8,
+    from: []const u8,
+    dest: []const u8,
+) !void {
+    const hint = slot.* orelse return;
+    if (!cc.net.irc_map.eql(workspace.casemapping, hint, from)) return;
+    try state.replaceOwned(workspace.gpa, slot, dest);
+}
+
+fn appendRenameLine(workspace: *cc.client.workspace.Workspace, from: []const u8, dest: []const u8) !bool {
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "Room renamed from {s} to {s}", .{ from, dest }) catch "Room renamed.";
+    if (workspace.find(dest) orelse workspace.active) |index| {
+        try workspace.rooms.items[index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+        return true;
+    }
+    return false;
+}
+
+fn applyChannelForward(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const from = msg.param(1) orelse return false;
+    const maybe_to = msg.param(2);
+    const to = if (maybe_to) |value|
+        if (value.len > 1 and workspace.chantypes.contains(value[0])) value else null
+    else
+        null;
+    if (to == null) return applyJoinDenied(workspace, client, state, msg);
+    const dest = to.?;
+    client.renameRestoration(from, dest);
+    if (workspace.find(from)) |from_index| {
+        workspace.rooms.items[from_index].joined = false;
+        workspace.rooms.items[from_index].setWantRejoin(false);
+        const dest_index = workspace.ensure(dest) catch |err| blk: {
+            try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+            break :blk from_index;
+        };
+        if (dest_index != from_index) {
+            if (workspace.find(from)) |source_index| {
+                if (workspace.rooms.items[dest_index].join_key == null)
+                    if (workspace.rooms.items[source_index].join_key) |key|
+                        try workspace.rooms.items[dest_index].setJoinKey(workspace.gpa, key);
+                if (workspace.rooms.items[dest_index].client_data == null)
+                    if (workspace.rooms.items[source_index].client_data) |data|
+                        try workspace.rooms.items[dest_index].setClientData(workspace.gpa, data);
+            }
+            workspace.rooms.items[dest_index].setWantRejoin(true);
+            _ = workspace.activate(dest_index);
+        }
+    } else if (workspace.ensure(dest)) |dest_index| {
+        workspace.rooms.items[dest_index].setWantRejoin(true);
+    } else |err| {
+        try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+    }
+    try retargetSessionHint(workspace, state, &state.last_key_channel, from, dest);
+    try retargetSessionHint(workspace, state, &state.last_invite_channel, from, dest);
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "Forwarded from {s} to {s}", .{ from, dest }) catch "Room forwarded.";
+    if (workspace.find(dest) orelse workspace.active) |index| {
+        try workspace.rooms.items[index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    if (workspace.find(dest)) |dest_index| {
+        const from_index = workspace.find(from);
+        if ((from_index == null or from_index.? != dest_index) and !workspace.rooms.items[dest_index].joined) {
+            const key = workspace.rooms.items[dest_index].join_key orelse "";
+            if (try requestJoinWithKey(client, workspace, dest, key)) |notice| {
+                if (key.len != 0) {
+                    if (try requestJoinWithKey(client, workspace, dest, "")) |again| {
+                        try workspace.rooms.items[dest_index].transcript.addWithOptions(
+                            "Server",
+                            again,
+                            .{ .modes = cc.proto.udi.bm_action },
+                        );
+                    }
+                } else {
+                    try workspace.rooms.items[dest_index].transcript.addWithOptions(
+                        "Server",
+                        notice,
+                        .{ .modes = cc.proto.udi.bm_action },
+                    );
+                }
+            }
+        }
+    }
+    refreshJoinedState(workspace, state, "joining");
+    return true;
+}
+
+fn applyJoinDenied(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const channel = msg.param(1) orelse return false;
+    client.forgetRestoration(channel);
+    const detail = msg.param(2) orelse msg.command;
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "Cannot join {s}: {s}", .{ channel, detail }) catch "Cannot join room.";
+    if (workspace.find(channel)) |room_index| {
+        workspace.rooms.items[room_index].joined = false;
+        workspace.rooms.items[room_index].setWantRejoin(false);
+        try workspace.rooms.items[room_index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    } else if (workspace.activeRoom()) |active| {
+        try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    if (std.mem.eql(u8, msg.command, "475") and channel.len != 0)
+        try state.replaceOwned(workspace.gpa, &state.last_key_channel, channel);
+    if (std.mem.eql(u8, msg.command, "473") and channel.len != 0)
+        try state.replaceOwned(workspace.gpa, &state.last_invite_channel, channel);
+    refreshJoinedState(workspace, state, "join denied");
+    return true;
+}
+
+fn appendInviteLine(workspace: *cc.client.workspace.Workspace, who: []const u8, channel: []const u8) !bool {
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s} invited you to {s}", .{
+        if (who.len == 0) "Someone" else who,
+        if (channel.len == 0) "a room" else channel,
+    }) catch "You were invited to a room.";
+    const room_index = workspace.find(channel) orelse workspace.active;
+    const index = room_index orelse return false;
+    try workspace.rooms.items[index].transcript.addWithOptions("Invite", line, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn appendKnockLine(
+    workspace: *cc.client.workspace.Workspace,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const room_name = msg.param(0) orelse "";
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+    const reason = msg.param(1) orelse "";
+    if (room_name.len != 0) try state.replaceOwned(workspace.gpa, &state.last_invite_channel, room_name);
+    if (who.len != 0) try state.replaceOwned(workspace.gpa, &state.last_invite_from, who);
+    var buf: [280]u8 = undefined;
+    const line = if (reason.len == 0)
+        std.fmt.bufPrint(&buf, "{s} knocked on {s}", .{
+            if (who.len == 0) "Someone" else who,
+            if (room_name.len == 0) "a room" else room_name,
+        }) catch "A member knocked."
+    else
+        std.fmt.bufPrint(&buf, "{s} knocked on {s} ({s})", .{
+            if (who.len == 0) "Someone" else who,
+            if (room_name.len == 0) "a room" else room_name,
+            reason,
+        }) catch "A member knocked.";
+    const room_index = workspace.find(room_name) orelse workspace.active;
+    const index = room_index orelse return false;
+    try workspace.rooms.items[index].transcript.addWithOptions("Knock", line, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+const BanAction = enum { add, delete, list };
+const ChannelListKind = enum { ban, except, invite, silence };
+const ChannelListAction = struct { action: BanAction, kind: ChannelListKind };
+const UserListSilence = struct { action: BanAction, mask: []const u8 };
+
+fn classifyBanMask(mask: []const u8) BanAction {
+    return classifyChannelListMask(mask).action;
+}
+
+fn classifyChannelListMask(mask: []const u8) ChannelListAction {
+    const trimmed = std.mem.trim(u8, mask, " \t");
+    if (channelListToken(trimmed, &.{ "+e", "e", "except", "exception" })) return .{ .action = .list, .kind = .except };
+    if (channelListToken(trimmed, &.{ "+I", "I", "invex" })) return .{ .action = .list, .kind = .invite };
+    if (channelListPrefixed(trimmed, "-e")) |_| return .{ .action = .delete, .kind = .except };
+    if (channelListPrefixed(trimmed, "+e")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .except };
+    if (channelListPrefixed(trimmed, "e:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .except };
+    if (channelListPrefixed(trimmed, "-I")) |_| return .{ .action = .delete, .kind = .invite };
+    if (channelListPrefixed(trimmed, "+I")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .invite };
+    if (channelListPrefixed(trimmed, "I:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .invite };
+    if (channelListToken(trimmed, &.{ "s", "silence", "ignore" })) return .{ .action = .list, .kind = .silence };
+    if (channelListPrefixed(trimmed, "-s")) |_| return .{ .action = .delete, .kind = .silence };
+    if (channelListPrefixed(trimmed, "+s")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .silence };
+    if (channelListPrefixed(trimmed, "s:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .silence };
+    if (channelListToken(trimmed, &.{ "+b", "b", "ban" })) return .{ .action = .list, .kind = .ban };
+    if (channelListPrefixed(trimmed, "-b")) |_| return .{ .action = .delete, .kind = .ban };
+    if (channelListPrefixed(trimmed, "+b")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .ban };
+    if (channelListPrefixed(trimmed, "b:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .ban };
+    if (trimmed.len == 0) return .{ .action = .list, .kind = .ban };
+    if (trimmed[0] == '-') return .{ .action = .delete, .kind = .ban };
+    return .{ .action = .add, .kind = .ban };
+}
+
+fn channelListToken(value: []const u8, tokens: []const []const u8) bool {
+    for (tokens) |token| if (std.ascii.eqlIgnoreCase(value, token)) return true;
+    return false;
+}
+
+fn channelListPrefixed(value: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, value, prefix)) return null;
+    const rest = value[prefix.len..];
+    if (rest.len == 0) return "";
+    if (prefix[prefix.len - 1] == ':') return std.mem.trim(u8, rest, " \t");
+    if (rest[0] == ':' or rest[0] == ' ') return std.mem.trim(u8, rest[1..], " \t");
+    return null;
+}
+
+fn banMaskArgument(mask: []const u8) []const u8 {
+    return channelListMaskArgument(mask, .ban);
+}
+
+fn channelListMaskArgument(mask: []const u8, kind: ChannelListKind) []const u8 {
+    const trimmed = std.mem.trim(u8, mask, " \t");
+    const prefixes: []const []const u8 = switch (kind) {
+        .except => &.{ "-e", "+e", "e:" },
+        .invite => &.{ "-I", "+I", "I:" },
+        .silence => &.{ "-s", "+s", "s:" },
+        .ban => &.{ "-b", "+b", "b:" },
+    };
+    for (prefixes) |prefix| {
+        if (channelListPrefixed(trimmed, prefix)) |rest| return rest;
+    }
+    if (trimmed.len > 0 and trimmed[0] == '-') return std.mem.trim(u8, trimmed[1..], " \t");
+    return trimmed;
+}
+
+fn silenceFilterToken(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "silence") or std.ascii.eqlIgnoreCase(value, "ignore");
+}
+
+fn classifyUserListSilence(nick: []const u8) UserListSilence {
+    const trimmed = std.mem.trim(u8, nick, " \t");
+    if (trimmed.len == 0) return .{ .action = .list, .mask = "" };
+    if (trimmed[0] == '-') return .{ .action = .delete, .mask = std.mem.trim(u8, trimmed[1..], " \t") };
+    return .{ .action = .add, .mask = trimmed };
+}
+
+fn applySilenceOperation(
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    gpa: std.mem.Allocator,
+    action: BanAction,
+    mask: []const u8,
+) !void {
+    switch (action) {
+        .list => try client.silence(.list, null),
+        .add => {
+            if (client.featureState()) |features| {
+                const cap = features.session_limits.silence;
+                if (cap != 0 and state.silence_masks.items.len >= cap)
+                    return error.InvalidIrcParameter;
+            }
+            try client.silence(.add, mask);
+            _ = try rememberNotificationNick(gpa, &state.silence_masks, mask);
+        },
+        .delete => {
+            try client.silence(.remove, mask);
+            _ = forgetNotificationNick(gpa, &state.silence_masks, mask);
+        },
+    }
+}
+
+fn observeSilenceState(gpa: std.mem.Allocator, state: *ChatState, msg: *const cc.net.message.Message) void {
+    if (std.mem.eql(u8, msg.command, "271")) {
+        if (msg.param(1)) |mask| _ = rememberNotificationNick(gpa, &state.silence_masks, mask) catch {};
+        return;
+    }
+    if (!std.ascii.eqlIgnoreCase(msg.command, "SILENCE")) return;
+    const token = msg.param(0) orelse return;
+    if (token.len < 2) return;
+    if (token[0] == '+') {
+        _ = rememberNotificationNick(gpa, &state.silence_masks, token[1..]) catch {};
+    } else if (token[0] == '-') {
+        _ = forgetNotificationNick(gpa, &state.silence_masks, token[1..]);
+    }
+}
+
+fn resubscribeSessionControls(
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    workspace: *const cc.client.workspace.Workspace,
+    preferences: ?*const cc.client.preferences.Store,
+) void {
+    for (state.silence_masks.items) |mask| {
+        client.silence(.add, mask) catch {};
+    }
+    if (state.away_message) |message| {
+        client.setAway(message) catch {};
+        for (workspace.rooms.items) |*room| {
+            if (room.joined or client.restoresChannel(room.name))
+                client.sendAwayControl(room.name, message) catch {};
+        }
+    }
+    if (preferences) |prefs| {
+        if (monitorAvailable(client)) {
+            subscribeMonitorTargets(client, prefs) catch {};
+            client.monitor(.status, null) catch {};
+            state.monitor_subscribed = true;
+        }
+    }
+}
+
+fn modernEventText(msg: *const cc.net.message.Message, who: []const u8, buf: *[280]u8) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(msg.command, "TAGMSG")) {
+        if (msg.tag("+typing") orelse msg.tag("typing")) |tag| {
+            const value = tag.raw_value orelse "active";
+            if (std.ascii.eqlIgnoreCase(value, "paused"))
+                return std.fmt.bufPrint(buf, "{s} paused typing", .{who}) catch "Typing paused.";
+            if (std.ascii.eqlIgnoreCase(value, "done") or std.ascii.eqlIgnoreCase(value, "clear"))
+                return std.fmt.bufPrint(buf, "{s} stopped typing", .{who}) catch "Typing stopped.";
+            return std.fmt.bufPrint(buf, "{s} is typing", .{who}) catch "Someone is typing.";
+        }
+        return std.fmt.bufPrint(buf, "{s} sent a tag-only message", .{who}) catch "Tag-only message.";
+    }
+    if (std.ascii.eqlIgnoreCase(msg.command, "EDIT")) {
+        const text = msg.param(2) orelse "";
+        return if (text.len != 0)
+            std.fmt.bufPrint(buf, "{s} edited a message: {s}", .{ who, text }) catch "Message edited."
+        else
+            std.fmt.bufPrint(buf, "{s} edited a message", .{who}) catch "Message edited.";
+    }
+    if (std.ascii.eqlIgnoreCase(msg.command, "REDACT")) {
+        const reason = msg.param(2) orelse "";
+        return if (reason.len != 0)
+            std.fmt.bufPrint(buf, "{s} redacted a message ({s})", .{ who, reason }) catch "Message redacted."
+        else
+            std.fmt.bufPrint(buf, "{s} redacted a message", .{who}) catch "Message redacted.";
+    }
+    return null;
+}
+
+fn appendModernEventLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
+    const target = msg.param(0) orelse return false;
+    const room_index = try workspaceRoomForIncoming(workspace, target, workspace.self_nick) orelse return false;
+    const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "someone";
+    var buf: [280]u8 = undefined;
+    const text = modernEventText(msg, who, &buf) orelse return false;
+    try workspace.rooms.items[room_index].transcript.addWithOptions(who, text, .{ .modes = cc.proto.udi.bm_action });
+    return true;
+}
+
+fn rememberMotd(state: *ChatState, gpa: std.mem.Allocator, msg: *const cc.net.message.Message) !void {
+    if (!std.mem.eql(u8, msg.command, "372") and
+        !std.mem.eql(u8, msg.command, "375") and
+        !std.mem.eql(u8, msg.command, "376")) return;
+    if (std.mem.eql(u8, msg.command, "375")) state.motd.clearRetainingCapacity();
+    const raw = msg.param(1) orelse return;
+    const text = if (std.mem.startsWith(u8, raw, "- ")) raw[2..] else raw;
+    if (state.motd.items.len != 0) try state.motd.append(gpa, '\n');
+    try state.motd.appendSlice(gpa, text);
+    if (state.motd.items.len > 4096) state.motd.shrinkRetainingCapacity(4096);
+}
+
+fn appendNickNumericLine(
+    workspace: *cc.client.workspace.Workspace,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const nick = msg.param(1) orelse "";
+    const detail = msg.param(2) orelse msg.command;
+    state.status = if (std.mem.eql(u8, msg.command, "432"))
+        "invalid nickname"
+    else if (std.mem.eql(u8, msg.command, "433"))
+        "nickname in use"
+    else if (std.mem.eql(u8, msg.command, "435"))
+        "cannot change nickname"
+    else if (std.mem.eql(u8, msg.command, "437") or std.mem.eql(u8, msg.command, "438"))
+        "nickname unavailable"
+    else
+        "nickname collision";
+    if (workspace.activeRoom()) |room| {
+        var buf: [280]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "Nick {s}: {s}", .{ nick, detail }) catch "Nickname rejected.";
+        try room.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    return true;
+}
+
+fn publishClientBackdrop(client: *cc.net.client.Client, room: *cc.client.workspace.Room, gpa: std.mem.Allocator, backdrop: []const u8) !void {
+    const updated = try cc.proto.keystring.changeProperty(gpa, room.client_data orelse "", "bk", backdrop);
+    defer gpa.free(updated);
+    try client.setProperty(room.name, "CLIENT", updated);
+    try room.setClientData(gpa, updated);
+}
+
+fn isStarOrEmpty(value: []const u8) bool {
+    return value.len == 0 or std.mem.eql(u8, value, "*");
+}
+
+fn isExactNotifyNick(nick: []const u8) bool {
+    return nick.len != 0 and nick.len <= 64 and std.mem.indexOfAny(u8, nick, " \r\n\x00,@*?") == null;
+}
+
+fn notificationUsesMonitorValues(nickname: []const u8, user_mask: []const u8, host_mask: []const u8) bool {
+    return isExactNotifyNick(nickname) and isStarOrEmpty(user_mask) and isStarOrEmpty(host_mask);
+}
+
+fn notificationUsesMonitor(notification: *const cc.client.preferences.Notification) bool {
+    return notification.enabled and notificationUsesMonitorValues(notification.nickname, notification.user_mask, notification.host_mask);
+}
+
+fn watchedMonitorNick(preferences: *const cc.client.preferences.Store, nick: []const u8) bool {
+    for (preferences.notifications.items) |notification| {
+        if (notificationUsesMonitor(&notification) and std.ascii.eqlIgnoreCase(notification.nickname, nick)) return true;
+    }
+    return false;
+}
+
+fn monitorAvailable(client: *const cc.net.client.Client) bool {
+    const features = client.featureState() orelse return false;
+    return features.isupport("MONITOR") != null;
+}
+
+fn monitorNickFromTarget(target: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, target, " \t");
+    if (std.mem.indexOfScalar(u8, trimmed, '!')) |bang| return trimmed[0..bang];
+    return trimmed;
+}
+
+fn subscribeMonitorTargets(client: *cc.net.client.Client, preferences: *const cc.client.preferences.Store) !void {
+    const limits = if (client.featureState()) |features| features.session_limits else cc.net.irc_map.SessionLimits{};
+    const max_batch = if (limits.maxtargets == 0) std.math.maxInt(usize) else limits.maxtargets;
+    const max_total = if (limits.monitor == 0) std.math.maxInt(usize) else limits.monitor;
+    var list: [400]u8 = undefined;
+    var used: usize = 0;
+    var batch_count: usize = 0;
+    var total: usize = 0;
+    for (preferences.notifications.items) |notification| {
+        if (!notificationUsesMonitor(&notification)) continue;
+        if (total >= max_total) break;
+        const nick = notification.nickname;
+        const next_len = used + @intFromBool(used != 0) + nick.len;
+        if (used != 0 and (batch_count >= max_batch or next_len > list.len)) {
+            try client.monitor(.add, list[0..used]);
+            used = 0;
+            batch_count = 0;
+        }
+        if (used != 0) {
+            list[used] = ',';
+            used += 1;
+        }
+        @memcpy(list[used..][0..nick.len], nick);
+        used += nick.len;
+        batch_count += 1;
+        total += 1;
+    }
+    if (used != 0) try client.monitor(.add, list[0..used]);
+}
+
+fn retainMonitorOnlineNicks(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    preferences: *const cc.client.preferences.Store,
+) void {
+    var index: usize = 0;
+    while (index < state.notification_current.items.len) {
+        const nick = state.notification_current.items[index];
+        if (watchedMonitorNick(preferences, nick)) {
+            index += 1;
+            continue;
+        }
+        gpa.free(nick);
+        _ = state.notification_current.orderedRemove(index);
+    }
+}
+
+fn rememberNotificationNick(gpa: std.mem.Allocator, list: *std.ArrayList([]u8), nick: []const u8) !bool {
+    if (containsIgnoreCase(list.items, nick)) return false;
+    if (list.items.len >= 512) return false;
+    try list.append(gpa, try gpa.dupe(u8, nick));
+    return true;
+}
+
+fn forgetNotificationNick(gpa: std.mem.Allocator, list: *std.ArrayList([]u8), nick: []const u8) bool {
+    for (list.items, 0..) |entry, index| {
+        if (!std.ascii.eqlIgnoreCase(entry, nick)) continue;
+        gpa.free(entry);
+        _ = list.orderedRemove(index);
+        return true;
+    }
+    return false;
+}
+
+fn announceNotificationChange(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    workspace: *cc.client.workspace.Workspace,
+    nick: []const u8,
+    online: bool,
+) !bool {
+    const transcript = if (workspace.activeRoom()) |room| &room.transcript else return false;
+    var text: [256]u8 = undefined;
+    const line = if (online)
+        std.fmt.bufPrint(&text, "{s} is online.", .{nick}) catch "A watched member is online."
+    else
+        std.fmt.bufPrint(&text, "{s} went offline.", .{nick}) catch "A watched member went offline.";
+    try transcript.addWithOptions("Notification", line, .{ .modes = cc.proto.udi.bm_action });
+    if (state.desktop_notification) |old| gpa.free(old);
+    state.desktop_notification = try gpa.dupe(u8, line);
+    return true;
+}
+
+fn applyMonitorPresence(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    workspace: *cc.client.workspace.Workspace,
+    nick: []const u8,
+    online: bool,
+) !bool {
+    if (online) {
+        _ = try rememberNotificationNick(gpa, &state.notification_current, nick);
+        if (containsIgnoreCase(state.notification_previous.items, nick)) return false;
+        _ = try rememberNotificationNick(gpa, &state.notification_previous, nick);
+        return announceNotificationChange(gpa, state, workspace, nick, true);
+    }
+    _ = forgetNotificationNick(gpa, &state.notification_current, nick);
+    if (!forgetNotificationNick(gpa, &state.notification_previous, nick)) return false;
+    return announceNotificationChange(gpa, state, workspace, nick, false);
+}
+
+fn applyMonitorNumeric(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    workspace: *cc.client.workspace.Workspace,
+    preferences: *const cc.client.preferences.Store,
+    msg: *const cc.net.message.Message,
+) !bool {
+    if (std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled")) return false;
+    const list = msg.param(msg.param_count -| 1) orelse return false;
+    const online = std.mem.eql(u8, msg.command, "730");
+    var changed = false;
+    var parts = std.mem.splitScalar(u8, list, ',');
+    while (parts.next()) |part| {
+        const nick = monitorNickFromTarget(part);
+        if (nick.len == 0) continue;
+        if (!watchedMonitorNick(preferences, nick) and !containsIgnoreCase(state.notification_previous.items, nick)) continue;
+        changed = (try applyMonitorPresence(gpa, state, workspace, nick, online)) or changed;
+    }
+    return changed;
+}
+
+fn advertisedNetworkName(client: *const cc.net.client.Client) []const u8 {
+    return if (client.featureState()) |features| features.networkName() else "";
+}
+
+fn notificationNetworkMatches(stored: []const u8, host: []const u8, advertised: []const u8) bool {
+    if (stored.len == 0) return true;
+    if (std.ascii.eqlIgnoreCase(stored, host)) return true;
+    return advertised.len != 0 and std.ascii.eqlIgnoreCase(stored, advertised);
+}
+
 fn collectNotificationWho(
     gpa: std.mem.Allocator,
     state: *ChatState,
     preferences: *const cc.client.preferences.Store,
     msg: *const cc.net.message.Message,
-    network_name: []const u8,
+    host_name: []const u8,
+    advertised_network: []const u8,
 ) !void {
     if (msg.param_count < 6) return;
     const user = msg.params[2];
@@ -3629,7 +7007,7 @@ fn collectNotificationWho(
     const nickname = msg.params[5];
     for (preferences.notifications.items) |notification| {
         if (!notification.enabled) continue;
-        if (notification.network.len != 0 and !std.ascii.eqlIgnoreCase(notification.network, network_name)) continue;
+        if (!notificationNetworkMatches(notification.network, host_name, advertised_network)) continue;
         var pattern: [512]u8 = undefined;
         const mask = std.fmt.bufPrint(&pattern, "{s}!{s}@{s}", .{ notification.nickname, notification.user_mask, notification.host_mask }) catch continue;
         var identity: [512]u8 = undefined;
@@ -3728,6 +7106,7 @@ fn replaceNickToken(gpa: std.mem.Allocator, source: []const u8, nick: []const u8
 fn runPersistentRules(
     gpa: std.mem.Allocator,
     client: *cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
     transcript: *cc.comic.session.Transcript,
     preferences: *const cc.client.preferences.Store,
     event: []const u8,
@@ -3750,23 +7129,31 @@ fn runPersistentRules(
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Notify")) {
             try transcript.addWithOptions("Automation", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Reply")) {
-            if (value.len != 0) try client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value);
+            if (value.len != 0) client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value) catch |err| try ignoreTransientSend(err);
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Action")) {
             if (value.len != 0) {
                 const wire = try std.fmt.allocPrint(gpa, "\x01ACTION {s}\x01", .{value});
                 defer gpa.free(wire);
-                try client.privmsg(channel, wire);
+                client.privmsg(channel, wire) catch |err| try ignoreTransientSend(err);
             }
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Sound")) {
-            if (value.len != 0) try client.sendSound(channel, value, "");
+            if (value.len != 0) client.sendSound(channel, value, "") catch |err| try ignoreTransientSend(err);
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Join room")) {
-            if (value.len != 0) try client.join(value);
+            if (value.len != 0) {
+                const index = workspace.ensure(value) catch |err| {
+                    try transcript.addWithOptions("Server", roomEnsureFailureNotice(err), .{ .modes = cc.proto.udi.bm_action });
+                    continue;
+                };
+                if (try requestMarkedJoinWithKey(client, workspace, index, value, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                    try transcript.addWithOptions("Server", notice, .{ .modes = cc.proto.udi.bm_action });
+                }
+            }
         }
     }
     return suppress;
 }
 
-fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
+fn messageRoom(msg: *const cc.net.message.Message, workspace: *const cc.client.workspace.Workspace) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(msg.command, "353")) {
         if (msg.param_count < 2) return null;
         return msg.params[msg.param_count - 2];
@@ -3774,8 +7161,24 @@ fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(msg.command, "366")) return msg.param(1) orelse msg.param(0);
     if (std.ascii.eqlIgnoreCase(msg.command, "JOIN") or
         std.ascii.eqlIgnoreCase(msg.command, "PART") or
+        std.ascii.eqlIgnoreCase(msg.command, "KICK") or
+        std.ascii.eqlIgnoreCase(msg.command, "MODE") or
+        std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or
         std.ascii.eqlIgnoreCase(msg.command, "DATA") or
-        std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG")) return msg.param(0);
+        std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
+        std.ascii.eqlIgnoreCase(msg.command, "NOTICE") or
+        std.ascii.eqlIgnoreCase(msg.command, "WHISPER") or
+        std.ascii.eqlIgnoreCase(msg.command, "TAGMSG") or
+        std.ascii.eqlIgnoreCase(msg.command, "EDIT") or
+        std.ascii.eqlIgnoreCase(msg.command, "REDACT")) return if (msg.param(0)) |target|
+        stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes)
+    else
+        null;
+    if (std.mem.eql(u8, msg.command, "331") or
+        std.mem.eql(u8, msg.command, "332") or
+        std.mem.eql(u8, msg.command, "333") or
+        std.mem.eql(u8, msg.command, "324") or
+        isJoinDeniedReply(msg, workspace)) return msg.param(1);
     return null;
 }
 
@@ -3816,9 +7219,9 @@ fn receiveDccOffer(
     who: []const u8,
     wire: []const u8,
 ) !bool {
-    if (!std.mem.startsWith(u8, wire, "\x01DCC SEND ")) return false;
+    if (!cc.proto.dcc.looksLikeDccControl(wire)) return false;
     const maybe_offer = cc.proto.dcc.parseSendOffer(gpa, wire) catch return true;
-    const offer = maybe_offer orelse return false;
+    const offer = maybe_offer orelse return true;
     defer gpa.free(offer.filename);
     if (offer.port == 0 or offer.size == null or offer.size.? > cc.client.files.max_document_bytes) return true;
     try state.rememberDccOffer(gpa, who, offer);
@@ -3881,6 +7284,27 @@ fn hasWireControl(value: []const u8) bool {
     return std.mem.indexOfAny(u8, value, "\r\n\x00\x01") != null;
 }
 
+fn isPositiveCount(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return (std.fmt.parseUnsigned(u32, text, 10) catch 0) != 0;
+}
+
+fn isSingleIrcToken(value: []const u8) bool {
+    return value.len != 0 and std.mem.indexOfAny(u8, value, " \t\r\n\x00\x01") == null;
+}
+
+fn extbanMaskAllowed(extban: cc.net.irc_map.Extban, mask: []const u8) bool {
+    const parsed = extban.parseMask(mask) orelse return true;
+    return parsed.value.len != 0 and extban.allows(parsed.kind);
+}
+
+fn rejectUnadvertisedExtban(workspace: *cc.client.workspace.Workspace, mask: []const u8) !bool {
+    if (extbanMaskAllowed(workspace.extban, mask)) return false;
+    try appendSessionNotice(workspace, "That extended ban type is not advertised by this server.");
+    return true;
+}
+
 test "portable transfer and call inputs reject unsafe values" {
     var safe_name: [64]u8 = undefined;
     try std.testing.expectEqualStrings("payload.exe", safeIncomingFilename("../../payload.exe", &safe_name));
@@ -3890,6 +7314,42 @@ test "portable transfer and call inputs reject unsafe values" {
     try std.testing.expect(validMeetingLink("https://meet.example.test/room"));
     try std.testing.expect(!validMeetingLink("http://meet.example.test/room"));
     try std.testing.expect(!validMeetingLink("https://example.test/bad link"));
+    try std.testing.expect(isPositiveCount("10"));
+    try std.testing.expect(!isPositiveCount("0"));
+    try std.testing.expect(!isPositiveCount(""));
+    try std.testing.expect(!isPositiveCount("abc"));
+    try std.testing.expect(!isPositiveCount("10x"));
+    try std.testing.expect(isSingleIrcToken("alice"));
+    try std.testing.expect(isSingleIrcToken("alice!*@*"));
+    try std.testing.expect(isSingleIrcToken("b:alice!*@*"[2..]));
+    try std.testing.expect(!isSingleIrcToken(""));
+    try std.testing.expect(!isSingleIrcToken("alice smith"));
+    try std.testing.expect(!isSingleIrcToken("alice!*@* extra"));
+    try std.testing.expect(!isSingleIrcToken("alice\nnick"));
+    const extban = cc.net.irc_map.Extban.parse("$,acgmrz");
+    try std.testing.expect(extbanMaskAllowed(extban, "$a:alice"));
+    try std.testing.expect(extbanMaskAllowed(extban, "alice!*@*"));
+    try std.testing.expect(!extbanMaskAllowed(extban, "$x:nope"));
+}
+
+test "pending UDI is discarded and bounded" {
+    const gpa = std.testing.allocator;
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try state.rememberUdi(gpa, "#room", "Alice", "#G000E000M1");
+    try state.rememberUdi(gpa, "#room", "Alice", "#G000E000M5");
+    try std.testing.expectEqual(@as(usize, 1), state.pending_udi.items.len);
+    try std.testing.expectEqualStrings("#G000E000M5", state.pending_udi.items[0].wire);
+    state.discardPendingUdi(gpa, "#room", "alice");
+    try std.testing.expectEqual(@as(usize, 0), state.pending_udi.items.len);
+
+    var i: usize = 0;
+    while (i < 70) : (i += 1) {
+        var nick_buf: [8]u8 = undefined;
+        const nick = try std.fmt.bufPrint(&nick_buf, "n{d}", .{i});
+        try state.rememberUdi(gpa, "#room", nick, "#G000E000M1");
+    }
+    try std.testing.expectEqual(@as(usize, 64), state.pending_udi.items.len);
 }
 
 test "flood suppression expires and nickname templates are bounded" {
@@ -3914,13 +7374,17 @@ fn processComicControl(
     transcript: *cc.comic.session.Transcript,
     who: []const u8,
     wire: []const u8,
+    is_notice: bool,
     self_nick: []const u8,
+    reply_target: []const u8,
     ircx_data: bool,
     preferences: ?*cc.client.preferences.Store,
+    state: ?*ChatState,
 ) !bool {
     if (try transcript.consumeAvatarAnnouncement(who, wire)) return true;
     if (try transcript.consumeAwayControl(who, wire)) return true;
-    if (try processCtcpRequest(io, client, who, wire, preferences)) return true;
+    if (try processCtcpRequest(io, client, who, wire, is_notice, preferences)) return true;
+    if (is_notice and try appendIncomingCtcpReply(transcript, who, wire)) return true;
     if (wire.len < 2 or wire[0] != '#' or wire[1] != ' ') return false;
 
     const comment = wire[1..];
@@ -3928,14 +7392,25 @@ fn processComicControl(
         .not_control => {},
         .get_info => {
             const saved = if (preferences) |prefs| prefs.profileText() else source_default_profile;
-            try client.sendProfile(who, if (hasWireControl(saved)) source_default_profile else saved);
+            client.sendProfile(who, if (hasWireControl(saved)) source_default_profile else saved) catch |err| try ignoreTransientSend(err);
             return true;
         },
         .get_char_info => {
-            try announceRoomAvatar(client, who, transcript.resolvedAvatar(self_nick), ircx_data);
+            const dest = if (reply_target.len > 0 and
+                (reply_target[0] == '#' or reply_target[0] == '&' or reply_target[0] == '+' or reply_target[0] == '!'))
+                reply_target
+            else
+                who;
+            announceRoomAvatar(client, dest, transcript.resolvedAvatar(self_nick), ircx_data) catch |err| switch (err) {
+                error.UnknownAvatar => {},
+                else => try ignoreTransientSend(err),
+            };
             return true;
         },
         .heres_info => |profile| {
+            if (state) |chat| {
+                if (!chat.takeProfileRequest(transcript.gpa, who)) return true;
+            }
             var display: std.ArrayList(u8) = .empty;
             defer display.deinit(transcript.gpa);
             try display.appendSlice(transcript.gpa, "Profile: ");
@@ -3944,36 +7419,26 @@ fn processComicControl(
             return true;
         },
     }
-    switch (cc.comic.session.parseBackdropControl(comment)) {
-        .not_control => return false,
-        .empty => return true,
-        .sync => |announcement| {
-            if (cc.comic.session.bundledBackdropByName(announcement.base_name)) |name| try transcript.setBackdrop(name);
-            return true;
-        },
-        .legacy => |name| {
-            if (cc.comic.session.bundledBackdropByName(name)) |bundled| try transcript.setBackdrop(bundled);
-            return true;
-        },
-    }
+    return transcript.applyBackdropControl(cc.comic.session.parseBackdropControl(comment));
 }
 
 /// Handle the source's private CTCP request/reply surface. Email and homepage
 /// replies are intentionally empty: this portable build never exposes local
 /// identity data merely because a peer probed it.
-fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8, wire: []const u8, preferences: ?*const cc.client.preferences.Store) !bool {
+fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8, wire: []const u8, is_notice: bool, preferences: ?*const cc.client.preferences.Store) !bool {
     if (wire.len < 3 or wire[0] != 0x01 or wire[wire.len - 1] != 0x01) return false;
+    if (is_notice) return false;
     const body = wire[1 .. wire.len - 1];
     const separator = std.mem.indexOfScalar(u8, body, ' ');
     const command = if (separator) |index| body[0..index] else body;
     const payload = if (separator) |index| body[index + 1 ..] else null;
 
     if (std.ascii.eqlIgnoreCase(command, "VERSION") and payload == null) {
-        try client.ctcpReply(who, "VERSION", "ComicChat Zig Comic mode");
+        client.ctcpReply(who, "VERSION", "ComicChat Zig Comic mode") catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "PING")) {
-        try client.ctcpReply(who, "PING", payload orelse "");
+        client.ctcpReply(who, "PING", payload orelse "") catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "TIME") and payload == null) {
@@ -3996,29 +7461,68 @@ fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8
                 day_seconds.getSecondsIntoMinute(),
             },
         );
-        try client.ctcpReply(who, "TIME", value);
+        client.ctcpReply(who, "TIME", value) catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "EMAIL") and payload == null) {
         const saved = if (preferences) |prefs| prefs.email.items else "";
-        try client.ctcpReply(who, "EMAIL", if (hasWireControl(saved)) "" else saved);
+        client.ctcpReply(who, "EMAIL", if (hasWireControl(saved)) "" else saved) catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "URL") and payload == null) {
         const saved = if (preferences) |prefs| prefs.homepage.items else "";
-        try client.ctcpReply(who, "URL", if (hasWireControl(saved)) "" else saved);
+        client.ctcpReply(who, "URL", if (hasWireControl(saved)) "" else saved) catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "CLIENTINFO") and payload == null) {
-        try client.ctcpReply(who, "CLIENTINFO", "ACTION AWAY CLIENTINFO DCC EMAIL PING SOUND TIME URL VERSION X-COMICCHAT-CALL");
+        client.ctcpReply(who, "CLIENTINFO", "ACTION AWAY CLIENTINFO DCC EMAIL PING SOUND TIME URL VERSION X-COMICCHAT-CALL") catch |err| try ignoreTransientSend(err);
         return true;
     }
     if (std.ascii.eqlIgnoreCase(command, "NETMEET")) {
-        try client.refuseLegacyNetMeeting(who);
+        client.refuseLegacyNetMeeting(who) catch |err| try ignoreTransientSend(err);
         return true;
     }
-    // The source explicitly ignores X-VCHAT.
-    return std.ascii.eqlIgnoreCase(command, "X-VCHAT");
+    // The source explicitly ignores X-VCHAT. Unknown CTCP must still be
+    // consumed so it is not inserted as ordinary speech. ACTION/SOUND and
+    // DCC fall through: SOUND/ACTION render through addWireMessage, and DCC
+    // is owned by receiveDccOffer.
+    return consumesUnknownCtcp(wire);
+}
+
+fn ctcpCommandName(wire: []const u8) ?[]const u8 {
+    if (wire.len < 3 or wire[0] != 0x01 or wire[wire.len - 1] != 0x01) return null;
+    const body = wire[1 .. wire.len - 1];
+    const separator = std.mem.indexOfScalar(u8, body, ' ');
+    return if (separator) |index| body[0..index] else body;
+}
+
+fn isSpeechCtcp(wire: []const u8) bool {
+    const command = ctcpCommandName(wire) orelse return false;
+    return std.ascii.eqlIgnoreCase(command, "ACTION") or std.ascii.eqlIgnoreCase(command, "SOUND");
+}
+
+fn consumesUnknownCtcp(wire: []const u8) bool {
+    const command = ctcpCommandName(wire) orelse return false;
+    return !std.ascii.eqlIgnoreCase(command, "ACTION") and
+        !std.ascii.eqlIgnoreCase(command, "SOUND") and
+        !std.ascii.eqlIgnoreCase(command, "DCC");
+}
+
+fn appendIncomingCtcpReply(transcript: *cc.comic.session.Transcript, who: []const u8, wire: []const u8) !bool {
+    const command = ctcpCommandName(wire) orelse return false;
+    if (isSpeechCtcp(wire) or std.ascii.eqlIgnoreCase(command, "DCC")) return false;
+    const body = wire[1 .. wire.len - 1];
+    const separator = std.mem.indexOfScalar(u8, body, ' ');
+    const payload = if (separator) |index| body[index + 1 ..] else "";
+    var display: std.ArrayList(u8) = .empty;
+    defer display.deinit(transcript.gpa);
+    try display.appendSlice(transcript.gpa, command);
+    if (payload.len != 0) {
+        try display.appendSlice(transcript.gpa, ": ");
+        try display.appendSlice(transcript.gpa, payload);
+    }
+    try transcript.addWithOptions(who, display.items, .{ .modes = cc.proto.udi.bm_action });
+    return true;
 }
 
 fn handleInputKey(
@@ -4054,66 +7558,87 @@ fn handleInputKey(
             if (editor.text().len == 0) return true;
             const line = try editor.take();
             defer gpa.free(line);
-            if (std.mem.eql(u8, line, "/quit")) return false;
-            if (std.mem.eql(u8, line, "/clear")) {
+            if (composerSlashIs(line, "quit")) {
+                const reason = composerSlashRest(line);
+                if (maybe_client) |client| {
+                    client.quit(if (reason.len == 0) "Comic Chat" else reason) catch {};
+                }
+                return false;
+            }
+            if (composerSlashIs(line, "clear")) {
                 transcript.trimTo(0);
                 view.jumpLatest();
                 return true;
             }
-            if (std.mem.eql(u8, line, "/view comic") or std.mem.eql(u8, line, "/comic")) {
+            if (composerSlashIs(line, "comic") or (composerSlashIs(line, "view") and std.ascii.eqlIgnoreCase(composerSlashRest(line), "comic"))) {
                 view.setContentMode(.comic);
                 return true;
             }
-            if (std.mem.eql(u8, line, "/view text") or std.mem.eql(u8, line, "/text")) {
+            if (composerSlashIs(line, "text") or (composerSlashIs(line, "view") and std.ascii.eqlIgnoreCase(composerSlashRest(line), "text"))) {
                 view.setContentMode(.text);
                 return true;
             }
-            if (std.mem.eql(u8, line, "/members")) {
+            if (composerSlashIs(line, "members")) {
                 view.toggleMembers();
                 return true;
             }
-            if (std.mem.eql(u8, line, "/latest")) {
+            if (composerSlashIs(line, "latest")) {
                 view.jumpLatest();
                 return true;
             }
-            if (std.mem.startsWith(u8, line, "/dialog ")) {
-                _ = view.openDialogByResource(std.mem.trim(u8, line["/dialog ".len..], " \t"));
+            if (composerSlashIs(line, "dialog")) {
+                _ = view.openDialogByResource(composerSlashRest(line));
                 return true;
             }
-            if (!joined) return true;
+            if (leftoverComposerSlash(line)) {
+                try transcript.addWithOptions("Server", "That command is not available here.", .{ .modes = cc.proto.udi.bm_action });
+                return true;
+            }
+            if (!joined) {
+                try transcript.addWithOptions("Server", "Wait until you have joined this room.", .{ .modes = cc.proto.udi.bm_action });
+                return true;
+            }
             const client = maybe_client orelse return true;
-            if (std.mem.eql(u8, line, "/avatar") or std.mem.startsWith(u8, line, "/avatar ")) {
-                const requested = if (line.len > "/avatar ".len) line["/avatar ".len..] else "";
-                const selected = cc.comic.session.bundledAvatarByName(requested) orelse return true;
+            if (composerSlashIs(line, "avatar")) {
+                const requested = composerSlashRest(line);
+                const selected = cc.comic.session.bundledAvatarByName(requested) orelse {
+                    try transcript.addWithOptions("Server", "That character is not available.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                };
                 try transcript.setAvatar(nick, selected);
-                try announceRoomAvatar(client, channel, selected, ircx_data);
+                announceRoomAvatar(client, channel, selected, ircx_data) catch |err| switch (err) {
+                    error.UnknownAvatar => {},
+                    error.TxBackpressure => try transcript.addWithOptions("Server", "The connection is busy. Try again in a moment.", .{ .modes = cc.proto.udi.bm_action }),
+                    error.InvalidUtf8 => try transcript.addWithOptions("Server", "That text is not valid UTF-8.", .{ .modes = cc.proto.udi.bm_action }),
+                    error.InvalidIrcParameter => try transcript.addWithOptions("Server", "That message is not allowed.", .{ .modes = cc.proto.udi.bm_action }),
+                    else => return err,
+                };
                 return true;
             }
             const selected_mode = view.shell.say_mode;
-            const action_text: ?[]const u8 = if (std.mem.eql(u8, line, "/me"))
-                ""
-            else if (std.mem.startsWith(u8, line, "/me "))
-                line["/me ".len..]
-            else if (selected_mode == .action)
-                line
-            else
-                null;
-            if (action_text) |body| if (body.len == 0) return true;
-            const visible_text = action_text orelse line;
-            const modes: u16 = if (action_text != null) cc.proto.udi.bm_action else switch (selected_mode) {
+            const speech = parseSpeechSlash(line);
+            if (speech) |parsed| if (parsed.text.len == 0) return true;
+            const visible_text = if (speech) |parsed| parsed.text else line;
+            const modes: u16 = if (speech) |parsed| parsed.modes else switch (selected_mode) {
                 .say => cc.proto.udi.bm_say,
                 .think => cc.proto.udi.bm_think,
                 .whisper => cc.proto.udi.bm_whisper,
-                .action => unreachable,
+                .action => cc.proto.udi.bm_action,
                 .sound => cc.proto.udi.bm_sound,
             };
-            const target = if (selected_mode == .whisper) whisper: {
-                const member_index = view.shell.selected_member orelse return true;
-                if (member_index >= transcript.roster.items.len) return true;
-                if (transcript.roster.items[member_index].departed) return true;
+            const use_whisper_target = speech == null and selected_mode == .whisper;
+            const target = if (use_whisper_target) whisper: {
+                const member_index = view.shell.selected_member orelse {
+                    try transcript.addWithOptions("Server", "Select a member to whisper.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                };
+                if (member_index >= transcript.roster.items.len or transcript.roster.items[member_index].departed) {
+                    try transcript.addWithOptions("Server", "Select a member to whisper.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                }
                 break :whisper transcript.roster.items[member_index].nick;
             } else channel;
-            const is_private = selected_mode == .whisper;
+            const is_private = use_whisper_target;
             var talk_to_storage: [1][]const u8 = undefined;
             const talk_tos: []const []const u8 = talk_tos: {
                 const member_index = view.shell.selected_member orelse break :talk_tos &.{};
@@ -4124,7 +7649,10 @@ fn handleInputKey(
                 break :talk_tos &talk_to_storage;
             };
             const avatar_name = transcript.resolvedAvatar(nick);
-            const avatar = cc.comic.strip.avatarByName(avatar_name) orelse return error.UnknownAvatar;
+            const avatar = cc.comic.strip.avatarByName(avatar_name) orelse {
+                try transcript.addWithOptions("Server", "That character is not available.", .{ .modes = cc.proto.udi.bm_action });
+                return true;
+            };
             const selected_emotion = view.shell.selectedEmotion();
             const pose_state = if (selected_emotion == .neutral)
                 try cc.comic.figure.poseStateForText(gpa, avatar, visible_text)
@@ -4147,7 +7675,21 @@ fn handleInputKey(
             // in the room synchronized without requiring the optional DATA
             // extension; inbound DATA remains accepted for peer compatibility.
             try comic_message.appendSlice(gpa, chat_message.items);
-            try client.privmsg(target, comic_message.items);
+            client.privmsg(target, comic_message.items) catch |err| switch (err) {
+                error.InvalidUtf8 => {
+                    try transcript.addWithOptions("Server", "That message is not valid UTF-8.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                },
+                error.InvalidIrcParameter => {
+                    try transcript.addWithOptions("Server", "That message is not allowed.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                },
+                error.TxBackpressure => {
+                    try transcript.addWithOptions("Server", "The connection is busy. Try again in a moment.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                },
+                else => return err,
+            };
             try transcript.addWireMessage(nick, comic_message.items, is_private, null);
             view.shell.setSayMode(.say);
             transcript.trimTo(64);
@@ -4187,6 +7729,401 @@ test "comic action wire keeps source raw text and selected talk-to metadata" {
     try std.testing.expect(std.mem.indexOf(u8, readable.items, cc.comic.session.ctcp_action_prefix) == null);
 }
 
+test "HeresInfo displays only after a matching profile request" {
+    const gpa = std.testing.allocator;
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try std.testing.expect(!state.takeProfileRequest(gpa, "Alice"));
+    try state.rememberProfileRequest(gpa, "Alice");
+    try state.rememberProfileRequest(gpa, "alice");
+    try std.testing.expectEqual(@as(usize, 1), state.pending_profiles.items.len);
+    try std.testing.expect(state.takeProfileRequest(gpa, "ALICE"));
+    try std.testing.expect(!state.takeProfileRequest(gpa, "Alice"));
+    try state.rememberProfileRequest(gpa, "Bob");
+    resetChatConnectionState(&state, null, gpa);
+    try std.testing.expect(!state.takeProfileRequest(gpa, "Bob"));
+}
+
+test "IRCX CLIENT property bk updates the matching room backdrop" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const listed = cc.net.message.parse(":server 818 me #root CLIENT :ln=en;bk=Volcano.bgb");
+    try std.testing.expect(try applyClientPropertyBackdrop(&workspace, &listed));
+    try std.testing.expectEqualStrings("volcano", workspace.rooms.items[0].transcript.resolvedBackdrop());
+    try std.testing.expectEqualStrings("ln=en;bk=Volcano.bgb", workspace.rooms.items[0].client_data.?);
+    const changed = cc.net.message.parse(":owner PROP #root CLIENT :bk=room;");
+    try std.testing.expect(try applyClientPropertyBackdrop(&workspace, &changed));
+    try std.testing.expectEqualStrings("room", workspace.rooms.items[0].transcript.resolvedBackdrop());
+    const topic = cc.net.message.parse(":server 818 me #root TOPIC :hello");
+    try std.testing.expect(!try applyClientPropertyBackdrop(&workspace, &topic));
+}
+
+test "topic replies land in the matching room" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const listed = cc.net.message.parse(":server 332 me #root :Welcome");
+    try std.testing.expect(try appendTopicLine(&workspace, &listed));
+    try std.testing.expectEqualStrings("Topic: Welcome", workspace.rooms.items[0].transcript.lines.items[0].text);
+    const changed = cc.net.message.parse(":alice!u@h TOPIC #root :New topic");
+    try std.testing.expect(try appendTopicLine(&workspace, &changed));
+    try std.testing.expectEqualStrings("Topic from alice: New topic", workspace.rooms.items[0].transcript.lines.items[1].text);
+    const empty = cc.net.message.parse(":server 331 me #root :No topic is set");
+    try std.testing.expect(try appendTopicLine(&workspace, &empty));
+    try std.testing.expectEqualStrings("No topic is set", workspace.rooms.items[0].transcript.lines.items[2].text);
+    const setter = cc.net.message.parse(":server 333 me #root alice 1700000000");
+    try std.testing.expect(try appendTopicLine(&workspace, &setter));
+    try std.testing.expectEqualStrings("Topic set by alice at 1700000000", workspace.rooms.items[0].transcript.lines.items[3].text);
+}
+
+test "live roster room lookup includes MODE KICK and topic numerics" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const kick = cc.net.message.parse(":op!u@h KICK #root alice :out");
+    const mode = cc.net.message.parse(":op!u@h MODE #root +o alice");
+    const topic = cc.net.message.parse(":server 332 me #root :hi");
+    const no_topic = cc.net.message.parse(":server 331 me #root :No topic is set");
+    const modes = cc.net.message.parse(":server 324 me #root +nt");
+    const invite_only = cc.net.message.parse(":server 473 me #root :Cannot join channel (+i)");
+    const notice = cc.net.message.parse(":alice!u@h NOTICE #root :heads up");
+    try std.testing.expectEqualStrings("#root", messageRoom(&kick, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&mode, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&topic, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&no_topic, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&modes, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&invite_only, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&notice, &workspace).?);
+    const statusmsg = cc.net.message.parse(":alice!u@h PRIVMSG @#root :ops only");
+    try std.testing.expectEqualStrings("#root", messageRoom(&statusmsg, &workspace).?);
+    const plus_status = cc.net.message.parse(":alice!u@h NOTICE +#root :voices");
+    try std.testing.expectEqualStrings("#root", messageRoom(&plus_status, &workspace).?);
+    const unavail = cc.net.message.parse(":server 437 me #root :Channel is temporarily unavailable");
+    try std.testing.expect(isJoinDeniedReply(&unavail, &workspace));
+    try std.testing.expectEqualStrings("#root", messageRoom(&unavail, &workspace).?);
+    const nick_unavail = cc.net.message.parse(":server 437 me taken :Nick/channel is temporarily unavailable");
+    try std.testing.expect(!isJoinDeniedReply(&nick_unavail, &workspace));
+    try std.testing.expect(isNickFailureNumeric("437"));
+    try std.testing.expect(messageRoom(&nick_unavail, &workspace) == null);
+    const oper_only = cc.net.message.parse(":server 520 me #root :Cannot join channel (+O)");
+    try std.testing.expect(isJoinDeniedReply(&oper_only, &workspace));
+    try std.testing.expectEqualStrings("#root", messageRoom(&oper_only, &workspace).?);
+    const secure = cc.net.message.parse(":server 489 me #root :Cannot join channel (+S) - TLS required");
+    try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
+    try std.testing.expectEqualStrings("#root", messageRoom(&secure, &workspace).?);
+    const root = try workspace.ensure("#root");
+    try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
+    workspace.rooms.items[root].joined = true;
+    try std.testing.expect(!isJoinDeniedReply(&secure, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("489"));
+    const missing = cc.net.message.parse(":server 403 me #ghost :No such channel");
+    try std.testing.expect(isJoinDeniedReply(&missing, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("403"));
+    const seated = cc.net.message.parse(":server 403 me #root :No such channel");
+    try std.testing.expect(!isJoinDeniedReply(&seated, &workspace));
+}
+
+test "channel mode and invite lines land in the matching room" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const listed = cc.net.message.parse(":server 324 me #root +ntk secret");
+    try std.testing.expect(try appendModeLine(&workspace, &listed));
+    try std.testing.expectEqualStrings("Mode: +ntk secret", workspace.rooms.items[0].transcript.lines.items[0].text);
+    const changed = cc.net.message.parse(":op!u@h MODE #root +o alice");
+    try std.testing.expect(try appendModeLine(&workspace, &changed));
+    try std.testing.expectEqualStrings("Mode from op: +o alice", workspace.rooms.items[0].transcript.lines.items[1].text);
+    try std.testing.expect(try appendInviteLine(&workspace, "alice", "#root"));
+    try std.testing.expectEqualStrings("alice invited you to #root", workspace.rooms.items[0].transcript.lines.items[2].text);
+    const umode = cc.net.message.parse(":me!u@h MODE me +i");
+    try std.testing.expect(try appendModeLine(&workspace, &umode));
+    try std.testing.expectEqualStrings("Mode from me: +i", workspace.rooms.items[0].transcript.lines.items[3].text);
+    const mapped = cc.net.message.parse(":server MODE ME +iw");
+    try std.testing.expect(try appendModeLine(&workspace, &mapped));
+    try std.testing.expectEqualStrings("Mode from server: +iw", workspace.rooms.items[0].transcript.lines.items[4].text);
+    const other = cc.net.message.parse(":alice!u@h MODE alice +i");
+    try std.testing.expect(!try appendModeLine(&workspace, &other));
+    try std.testing.expectEqual(@as(usize, 5), workspace.rooms.items[0].transcript.lines.items.len);
+}
+
+test "self leave and join denial clear membership without a live socket" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    workspace.rooms.items[root].setWantRejoin(true);
+    var state: ChatState = .{ .joined = true, .status = "connected" };
+    defer state.deinit(gpa);
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try client.joinWithKey("#root", "swordfish");
+    try std.testing.expect(client.hasRestorationTargets());
+
+    try std.testing.expect(try applySelfLeftChannel(&workspace, &client, &state, "#root", "out"));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!workspace.rooms.items[root].want_rejoin);
+    try std.testing.expect(!state.joined);
+    try std.testing.expectEqualStrings("left room", state.status);
+    try std.testing.expect(!client.hasRestorationTargets());
+    try std.testing.expectEqualStrings("Left #root (out)", workspace.rooms.items[root].transcript.lines.items[0].text);
+
+    try client.join("#locked");
+    workspace.rooms.items[root].joined = false;
+    const locked = try workspace.ensure("#locked");
+    workspace.rooms.items[locked].setWantRejoin(true);
+    const denied = cc.net.message.parse(":server 473 me #locked :Cannot join channel (+i)");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &denied));
+    try std.testing.expect(!client.hasRestorationTargets());
+    try std.testing.expect(!workspace.rooms.items[locked].want_rejoin);
+    try std.testing.expectEqualStrings("#locked", state.last_invite_channel.?);
+    try std.testing.expectEqualStrings("join denied", state.status);
+    try std.testing.expectEqualStrings("Cannot join #locked: Cannot join channel (+i)", workspace.rooms.items[locked].transcript.lines.items[0].text);
+
+    workspace.rooms.items[root].joined = true;
+    state.joined = true;
+    state.status = "connected";
+    const full = cc.net.message.parse(":server 471 me #overflow :Cannot join channel (+l)");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &full));
+    try std.testing.expect(state.joined);
+    try std.testing.expectEqualStrings("connected", state.status);
+
+    try client.join("#oa");
+    const oper_only = cc.net.message.parse(":server 520 me #oa :Cannot join channel (+O)");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &oper_only));
+    try std.testing.expect(!client.restoresChannel("#oa"));
+    const throttled = cc.net.message.parse(":server 480 me #root :Cannot join channel (+j)");
+    workspace.rooms.items[root].joined = true;
+    try client.join("#root");
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &throttled));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!workspace.rooms.items[root].want_rejoin);
+    try std.testing.expect(!client.restoresChannel("#root"));
+
+    try client.join("#secure");
+    const secure = cc.net.message.parse(":server 489 me #secure :Cannot join channel (+S) - TLS required");
+    try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &secure));
+    try std.testing.expect(!client.restoresChannel("#secure"));
+
+    const need_reg = cc.net.message.parse(":server 477 me #locked :Cannot join channel (+a)");
+    try std.testing.expect(isJoinDeniedReply(&need_reg, &workspace));
+    workspace.rooms.items[locked].setWantRejoin(true);
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &need_reg));
+    try std.testing.expect(!workspace.rooms.items[locked].want_rejoin);
+
+    const plus_r = cc.net.message.parse(":server 477 me alice :Cannot message this user (+R)");
+    try std.testing.expect(!isJoinDeniedReply(&plus_r, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("477"));
+    workspace.rooms.items[root].setWantRejoin(true);
+    workspace.rooms.items[root].joined = true;
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &plus_r));
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[root].joined);
+
+    const bad_mask = cc.net.message.parse(":server 476 me evil!*@* :Invalid channel mask");
+    try std.testing.expect(!isJoinDeniedReply(&bad_mask, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("476"));
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &bad_mask));
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
+
+    const nosuch_join = cc.net.message.parse(":server 403 me #ghost :No such channel");
+    try std.testing.expect(isJoinDeniedReply(&nosuch_join, &workspace));
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &nosuch_join));
+
+    workspace.rooms.items[root].joined = true;
+    workspace.rooms.items[root].setWantRejoin(true);
+    const nosuch_send = cc.net.message.parse(":server 403 me #root :No such channel");
+    try std.testing.expect(!isJoinDeniedReply(&nosuch_send, &workspace));
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &nosuch_send));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
+}
+
+test "reconnect joins only rooms that still want rejoin" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const kept = try workspace.ensure("#kept");
+    const left = try workspace.ensure("#left");
+    workspace.rooms.items[kept].setWantRejoin(true);
+    workspace.rooms.items[left].setWantRejoin(false);
+    try workspace.rooms.items[kept].setJoinKey(gpa, "secret");
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    try std.testing.expect(roomNeedsReconnectJoin(&workspace.rooms.items[kept], &client));
+    try std.testing.expect(!roomNeedsReconnectJoin(&workspace.rooms.items[left], &client));
+    workspace.markDisconnected();
+    try std.testing.expect(workspace.rooms.items[kept].want_rejoin);
+    try std.testing.expect(roomNeedsReconnectJoin(&workspace.rooms.items[kept], &client));
+}
+
+test "room rename retargets last key and invite hints" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const old = try workspace.ensure("#old");
+    try workspace.rooms.items[old].setJoinKey(gpa, "secret");
+    workspace.rooms.items[old].setWantRejoin(true);
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try state.replaceOwned(gpa, &state.last_key_channel, "#old");
+    try state.replaceOwned(gpa, &state.last_invite_channel, "#old");
+    try std.testing.expect(try workspace.rename("#old", "#vault"));
+    try retargetSessionHint(&workspace, &state, &state.last_key_channel, "#old", "#vault");
+    try retargetSessionHint(&workspace, &state, &state.last_invite_channel, "#old", "#vault");
+    try std.testing.expect(try appendRenameLine(&workspace, "#old", "#vault"));
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+    try std.testing.expectEqualStrings("#vault", state.last_invite_channel.?);
+    try std.testing.expectEqualStrings("secret", workspace.rooms.items[old].join_key.?);
+    try std.testing.expect(workspace.rooms.items[old].want_rejoin);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[old].transcript.lines.items[0].text, "Room renamed from #old to #vault") != null);
+}
+
+test "unknown CTCP is consumed while ACTION and SOUND stay speech" {
+    try std.testing.expect(consumesUnknownCtcp("\x01FINGER\x01"));
+    try std.testing.expect(consumesUnknownCtcp("\x01X-VCHAT unused\x01"));
+    try std.testing.expect(consumesUnknownCtcp("\x01VERSION\x01"));
+    try std.testing.expect(!consumesUnknownCtcp("\x01ACTION waves\x01"));
+    try std.testing.expect(!consumesUnknownCtcp("\x01SOUND Chime\x01"));
+    try std.testing.expect(!consumesUnknownCtcp("\x01DCC CHAT chat 1 2\x01"));
+    try std.testing.expect(!isSpeechCtcp("\x01FINGER\x01"));
+    try std.testing.expect(isSpeechCtcp("\x01action waves\x01"));
+    try std.testing.expect(isSpeechCtcp("\x01sound Knock\x01"));
+}
+
+test "nick collision and invalid nick numerics update status" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    const invalid = cc.net.message.parse(":server 432 me badnick :Erroneous nickname");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &invalid));
+    try std.testing.expectEqualStrings("invalid nickname", state.status);
+    try std.testing.expectEqualStrings("Nick badnick: Erroneous nickname", workspace.rooms.items[0].transcript.lines.items[0].text);
+    const collision = cc.net.message.parse(":server 436 me stolen :Nickname collision");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &collision));
+    try std.testing.expectEqualStrings("nickname collision", state.status);
+    const in_use = cc.net.message.parse(":server 433 me taken :Nickname is already in use");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &in_use));
+    try std.testing.expectEqualStrings("nickname in use", state.status);
+    try std.testing.expectEqualStrings("Nick taken: Nickname is already in use", workspace.rooms.items[0].transcript.lines.items[2].text);
+    const banned = cc.net.message.parse(":server 435 me newnick :Cannot change nickname while banned");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &banned));
+    try std.testing.expectEqualStrings("cannot change nickname", state.status);
+    try std.testing.expectEqualStrings("Nick newnick: Cannot change nickname while banned", workspace.rooms.items[0].transcript.lines.items[3].text);
+}
+
+test "live MODE key and command failures update membership state" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    var state: ChatState = .{ .joined = true, .status = "connected" };
+    defer state.deinit(gpa);
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try client.joinWithKey("#root", "old");
+    const set_key = cc.net.message.parse(":op!u@h MODE #root +k secret");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &set_key));
+    try std.testing.expectEqualStrings("secret", workspace.rooms.items[root].join_key.?);
+    try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
+    const clear_key = cc.net.message.parse(":op!u@h MODE #root -k");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &clear_key));
+    try std.testing.expect(workspace.rooms.items[root].join_key == null);
+    try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
+    const listed_key = cc.net.message.parse(":server 324 me #root +ntk listed");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &listed_key));
+    try std.testing.expectEqualStrings("listed", workspace.rooms.items[root].join_key.?);
+    try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
+    const listed_letters = cc.net.message.parse(":server 324 me #root +ntk");
+    try std.testing.expect(!try applyLiveChannelKey(&workspace, &client, &state, &listed_letters));
+    try std.testing.expectEqualStrings("listed", workspace.rooms.items[root].join_key.?);
+
+    workspace.rooms.items[root].setWantRejoin(true);
+    const noton = cc.net.message.parse(":server 442 me #root :You're not on that channel");
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &noton));
+    try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
+    try std.testing.expect(client.hasRestorationTargets());
+    try std.testing.expect(roomNeedsReconnectJoin(&workspace.rooms.items[root], &client) == false);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[root].transcript.lines.items[workspace.rooms.items[root].transcript.lines.items.len - 1].text, "442 #root") != null);
+    const forbidden = cc.net.message.parse(":server 482 me #root :You're not channel operator");
+    try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &forbidden));
+    try std.testing.expectEqualStrings("not privileged", state.status);
+
+    const account = cc.net.message.parse(":alice!u@h ACCOUNT aliceacct");
+    var join = cc.net.message.parse(":alice!u@h JOIN #root");
+    _ = try workspace.rooms.items[root].transcript.observeIrc(&join, "#root", "me");
+    try std.testing.expect(try appendIdentityLine(&workspace, &account));
+    try std.testing.expectEqualStrings("alice is aliceacct", workspace.rooms.items[root].transcript.lines.items[workspace.rooms.items[root].transcript.lines.items.len - 1].text);
+}
+
 test "IRCX DATA transport requires numeric 800 enabled state" {
     const disabled = cc.net.message.parse(":server 800 comicchat 0 0 :IRCX is supported");
     const enabled = cc.net.message.parse(":server 800 comicchat 1 0 :IRCX enabled");
@@ -4197,6 +8134,1148 @@ test "IRCX DATA transport requires numeric 800 enabled state" {
     try std.testing.expect(ircxNumericEnabled(&enabled));
     try std.testing.expect(!ircxNumericEnabled(&unrelated));
     try std.testing.expect(!ircxNumericEnabled(&advertisement));
+    try std.testing.expect(isServerSourced(&cc.net.message.parse(":eshmaki.me NOTICE me :SESSION TOKEN abc")));
+    try std.testing.expect(!isServerSourced(&cc.net.message.parse(":alice!u@h NOTICE me :hi")));
+}
+
+test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup stay live" {
+    const gpa = std.testing.allocator;
+    try std.testing.expect(isVisibleServerWorkflowReply("372"));
+    try std.testing.expect(isVisibleServerWorkflowReply("376"));
+    try std.testing.expect(isVisibleServerWorkflowReply("251"));
+    try std.testing.expect(isVisibleServerWorkflowReply("311"));
+    try std.testing.expect(isVisibleServerWorkflowReply("221"));
+    try std.testing.expect(isVisibleServerWorkflowReply("002"));
+    try std.testing.expect(isVisibleServerWorkflowReply("004"));
+    try std.testing.expect(isVisibleServerWorkflowReply("250"));
+    try std.testing.expect(isVisibleServerWorkflowReply("265"));
+    try std.testing.expect(isVisibleServerWorkflowReply("330"));
+    try std.testing.expect(isVisibleServerWorkflowReply("307"));
+    try std.testing.expect(isVisibleServerWorkflowReply("338"));
+    try std.testing.expect(isVisibleServerWorkflowReply("378"));
+    try std.testing.expect(isVisibleServerWorkflowReply("422"));
+    try std.testing.expect(isVisibleServerWorkflowReply("329"));
+    try std.testing.expect(isVisibleServerWorkflowReply("042"));
+    try std.testing.expect(isVisibleServerWorkflowReply("271"));
+    try std.testing.expect(isVisibleServerWorkflowReply("272"));
+    try std.testing.expect(isVisibleServerWorkflowReply("335"));
+    try std.testing.expect(isVisibleServerWorkflowReply("379"));
+    try std.testing.expect(isVisibleServerWorkflowReply("010"));
+    try std.testing.expect(isVisibleServerWorkflowReply("020"));
+    try std.testing.expect(isVisibleServerWorkflowReply("276"));
+    try std.testing.expect(isVisibleServerWorkflowReply("308"));
+    try std.testing.expect(isVisibleServerWorkflowReply("310"));
+    try std.testing.expect(isVisibleServerWorkflowReply("320"));
+    try std.testing.expect(isVisibleServerWorkflowReply("351"));
+    try std.testing.expect(isVisibleServerWorkflowReply("391"));
+    try std.testing.expect(isVisibleServerWorkflowReply("256"));
+    try std.testing.expect(isVisibleServerWorkflowReply("257"));
+    try std.testing.expect(isVisibleServerWorkflowReply("302"));
+    try std.testing.expect(isVisibleServerWorkflowReply("303"));
+    try std.testing.expect(isVisibleServerWorkflowReply("321"));
+    try std.testing.expect(isVisibleServerWorkflowReply("369"));
+    try std.testing.expect(isVisibleServerWorkflowReply("371"));
+    try std.testing.expect(isVisibleServerWorkflowReply("374"));
+    try std.testing.expect(isVisibleServerWorkflowReply("043"));
+    try std.testing.expect(isVisibleServerWorkflowReply("015"));
+    try std.testing.expect(isVisibleServerWorkflowReply("301"));
+    try std.testing.expect(isVisibleServerWorkflowReply("281"));
+    try std.testing.expect(isVisibleServerWorkflowReply("304"));
+    try std.testing.expect(isVisibleServerWorkflowReply("325"));
+    try std.testing.expect(isVisibleServerWorkflowReply("364"));
+    try std.testing.expect(isVisibleServerWorkflowReply("717"));
+    try std.testing.expect(isVisibleServerWorkflowReply("778"));
+    try std.testing.expect(isVisibleServerWorkflowReply("824"));
+    try std.testing.expect(isVisibleServerWorkflowReply("305"));
+    try std.testing.expect(isVisibleServerWorkflowReply("306"));
+    try std.testing.expect(isCommandFailureNumeric("531"));
+    try std.testing.expect(isCommandFailureNumeric("525"));
+    try std.testing.expect(isCommandFailureNumeric("410"));
+    try std.testing.expect(isCommandFailureNumeric("513"));
+    try std.testing.expect(isCommandFailureNumeric("517"));
+    try std.testing.expect(isNickFailureNumeric("435"));
+    try std.testing.expect(!isCommandFailureNumeric("435"));
+    try std.testing.expect(isCommandFailureNumeric("402"));
+    try std.testing.expect(isCommandFailureNumeric("407"));
+    try std.testing.expect(isCommandFailureNumeric("411"));
+    try std.testing.expect(isCommandFailureNumeric("416"));
+    try std.testing.expect(isCommandFailureNumeric("440"));
+    try std.testing.expect(isCommandFailureNumeric("456"));
+    try std.testing.expect(isJoinDeniedNumeric("480"));
+    try std.testing.expect(!isCommandFailureNumeric("480"));
+    try std.testing.expect(isJoinDeniedNumeric("520"));
+    try std.testing.expect(isCommandFailureNumeric("926"));
+    try std.testing.expect(isCommandFailureNumeric("927"));
+    try std.testing.expect(isCommandFailureNumeric("913"));
+    try std.testing.expect(isCommandFailureNumeric("918"));
+    try std.testing.expect(isCommandFailureNumeric("923"));
+    try std.testing.expect(isCommandFailureNumeric("925"));
+    try std.testing.expect(isCommandFailureNumeric("906"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("906"));
+    try std.testing.expect(isVisibleServerWorkflowReply("904"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("913"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("923"));
+    try std.testing.expect(isVisibleServerWorkflowReply("804"));
+    try std.testing.expect(isVisibleServerWorkflowReply("818"));
+    try std.testing.expect(isVisibleServerWorkflowReply("728"));
+    try std.testing.expect(isVisibleServerWorkflowReply("729"));
+    try std.testing.expect(!isCommandFailureNumeric("728"));
+    try std.testing.expect(!canLeaveActiveRoom(1));
+    try std.testing.expect(canLeaveActiveRoom(2));
+    try std.testing.expect(isAuthFailureNumeric("463"));
+    try std.testing.expect(isAuthFailureNumeric("464"));
+    try std.testing.expect(isVisibleServerWorkflowReply("466"));
+    try std.testing.expect(isCommandFailureNumeric("489"));
+    try std.testing.expect(isCommandFailureNumeric("492"));
+    try std.testing.expect(isCommandFailureNumeric("716"));
+    try std.testing.expect(isCommandFailureNumeric("821"));
+    try std.testing.expect(isCommandFailureNumeric("406"));
+    try std.testing.expect(isCommandFailureNumeric("468"));
+    try std.testing.expect(isCommandFailureNumeric("524"));
+    try std.testing.expect(isCommandFailureNumeric("431"));
+    try std.testing.expect(isCommandFailureNumeric("443"));
+    try std.testing.expect(isCommandFailureNumeric("451"));
+    try std.testing.expect(isCommandFailureNumeric("461"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SILENCE"));
+    try std.testing.expect(isVisibleServerWorkflowReply("ACCESS"));
+    try std.testing.expect(isVisibleServerWorkflowReply("PROP"));
+    try std.testing.expect(isVisibleServerWorkflowReply("346"));
+    try std.testing.expect(isVisibleServerWorkflowReply("348"));
+    try std.testing.expect(isVisibleServerWorkflowReply("349"));
+    try std.testing.expect(isCommandFailureNumeric("412"));
+    try std.testing.expect(isCommandFailureNumeric("417"));
+    try std.testing.expect(isCommandFailureNumeric("486"));
+    try std.testing.expect(isCommandFailureNumeric("439"));
+    try std.testing.expect(isCommandFailureNumeric("511"));
+    try std.testing.expect(isVisibleServerWorkflowReply("732"));
+    try std.testing.expect(isVisibleServerWorkflowReply("733"));
+    try std.testing.expect(isCommandFailureNumeric("734"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("734"));
+    try std.testing.expect(isCommandFailureNumeric("491"));
+    try std.testing.expect(isOnyxServiceReply("REGISTER"));
+    try std.testing.expect(isOnyxServiceReply("IDENTIFY"));
+    try std.testing.expect(isOnyxServiceReply("MEMO"));
+    try std.testing.expect(isOnyxServiceReply("CHANNEL"));
+    try std.testing.expect(isOnyxServiceReply("AUTOJOIN"));
+    try std.testing.expect(isOnyxServiceReply("CERTADD"));
+    try std.testing.expect(isOnyxServiceReply("SESSION"));
+    try std.testing.expect(isOnyxServiceReply("TOTP"));
+    try std.testing.expect(isOnyxServiceReply("HELP"));
+    try std.testing.expect(isOnyxServiceReply("SETPASS"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SETPASS"));
+    try std.testing.expect(isOnyxServiceSlash("setpass"));
+    try std.testing.expect(isOnyxServiceSlash("knock"));
+    try std.testing.expect(isOnyxServiceSlash("search"));
+    try std.testing.expect(isOnyxServiceSlash("setname"));
+    try std.testing.expect(isOnyxServiceSlash("whois"));
+    try std.testing.expect(isOnyxServiceSlash("motd"));
+    try std.testing.expect(isOnyxServiceSlash("commands"));
+    try std.testing.expect(isOnyxServiceSlash("names"));
+    try std.testing.expect(isOnyxServiceSlash("list"));
+    try std.testing.expect(isOnyxServiceSlash("msg"));
+    try std.testing.expect(isOnyxServiceSlash("nick"));
+    try std.testing.expect(isOnyxServiceSlash("topic"));
+    try std.testing.expect(isOnyxServiceSlash("invite"));
+    try std.testing.expect(isOnyxServiceSlash("mode"));
+    try std.testing.expect(isOnyxServiceSlash("kick"));
+    try std.testing.expect(isOnyxServiceSlash("rename"));
+    try std.testing.expect(isOnyxServiceSlash("ctcp"));
+    try std.testing.expect(isOnyxServiceSlash("ping"));
+    try std.testing.expect(isOnyxServiceSlash("op"));
+    try std.testing.expect(isOnyxServiceSlash("ban"));
+    try std.testing.expect(isOnyxServiceSlash("whisper"));
+    try std.testing.expect(isOnyxServiceSlash("owner"));
+    try std.testing.expect(isOnyxServiceSlash("except"));
+    try std.testing.expect(isOnyxServiceSlash("invex"));
+    try std.testing.expect(isOnyxServiceSlash("umode"));
+    try std.testing.expect(isOnyxServiceSlash("prop"));
+    try std.testing.expect(isOnyxServiceSlash("access"));
+    try std.testing.expect(isOnyxServiceSlash("monitor"));
+    try std.testing.expect(isOnyxServiceSlash("pins"));
+    try std.testing.expect(isOnyxServiceSlash("successor"));
+    try std.testing.expect(isOnyxServiceSlash("accept"));
+    try std.testing.expect(isOnyxServiceSlash("listx"));
+    try std.testing.expect(isOnyxServiceSlash("tempmode"));
+    try std.testing.expect(isOnyxServiceSlash("welcome"));
+    try std.testing.expect(isOnyxServiceSlash("memo"));
+    try std.testing.expect(isOnyxServiceReply("SUCCESSOR"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SUCCESSOR"));
+    try std.testing.expect(isOnyxQuerySlash("umode"));
+    try std.testing.expect(isOnyxQuerySlash("prop"));
+    try std.testing.expect(isOnyxQuerySlash("access"));
+    try std.testing.expect(isOnyxQuerySlash("monitor"));
+    try std.testing.expect(!isOnyxQuerySlash("say"));
+    try std.testing.expect(!isOnyxQuerySlash("think"));
+    try std.testing.expect(!isOnyxQuerySlash("describe"));
+    try std.testing.expect(!isOnyxQuerySlash("action"));
+    try std.testing.expect(!isOnyxQuerySlash("me"));
+    try std.testing.expect(!isOnyxServiceSlash("say"));
+    try std.testing.expect(!isOnyxServiceSlash("think"));
+    try std.testing.expect(!isOnyxServiceSlash("describe"));
+    try std.testing.expect(!isOnyxServiceSlash("action"));
+    try std.testing.expect(!isOnyxServiceSlash("me"));
+    try std.testing.expect(!isOnyxServiceReply("PROP"));
+    try std.testing.expect(!isOnyxServiceReply("ACCESS"));
+    try std.testing.expect(!isOnyxServiceReply("MONITOR"));
+    const say = parseSpeechSlash("/SAY hello").?;
+    try std.testing.expectEqualStrings("hello", say.text);
+    try std.testing.expect(say.modes == cc.proto.udi.bm_say);
+    const think = parseSpeechSlash("/THINK hmm").?;
+    try std.testing.expectEqualStrings("hmm", think.text);
+    try std.testing.expect(think.modes == cc.proto.udi.bm_think);
+    const describe = parseSpeechSlash("/DESCRIBE waves").?;
+    try std.testing.expectEqualStrings("waves", describe.text);
+    try std.testing.expect(describe.modes == cc.proto.udi.bm_action);
+    const action = parseSpeechSlash("/ACTION waves").?;
+    try std.testing.expectEqualStrings("waves", action.text);
+    try std.testing.expect(action.modes == cc.proto.udi.bm_action);
+    try std.testing.expect(parseSpeechSlash("/umode +i") == null);
+    try std.testing.expect(leftoverComposerSlash("/users"));
+    try std.testing.expect(leftoverComposerSlash("/silence nick!*@*"));
+    try std.testing.expect(leftoverComposerSlash("/view members"));
+    try std.testing.expect(!leftoverComposerSlash("/avatar bob"));
+    try std.testing.expect(!leftoverComposerSlash("/view comic"));
+    try std.testing.expect(!leftoverComposerSlash("/SAY hello"));
+    try std.testing.expect(!leftoverComposerSlash("/think hmm"));
+    try std.testing.expect(!leftoverComposerSlash("hello"));
+    try std.testing.expect(composerSlashIs("/cycle #root", "cycle"));
+    try std.testing.expect(composerSlashIs("/ME waves", "me"));
+    try std.testing.expectEqualStrings("waves", composerSlashRest("/ME waves"));
+    try std.testing.expect(composerSlashIs("/CLEAR", "clear"));
+    try std.testing.expect(composerSlashIs("/DIALOG invite", "dialog"));
+    try std.testing.expect(composerSlashIs("/JOIN #locked secret", "join"));
+    try std.testing.expect(composerSlashIs("/QUIT later", "quit"));
+    try std.testing.expect(composerSlashIs("/Create #room", "create"));
+    try std.testing.expectEqualStrings("#locked", parseJoinSlash("/JOIN #locked secret").?.channel);
+    try std.testing.expectEqualStrings("secret", parseJoinSlash("/join #locked secret").?.key);
+    try std.testing.expectEqualStrings("", parseJoinSlash("/join").?.channel);
+    try std.testing.expectEqualStrings("My channel rules", slashRestAfter("SET #zig DESC My channel rules", 3));
+    try std.testing.expectEqualStrings("was abusive", slashRestAfter("DENY alice was abusive", 2));
+    const totp_secret, const totp_code = splitTrailingTotp("secret 123456");
+    try std.testing.expectEqualStrings("secret", totp_secret);
+    try std.testing.expectEqualStrings("123456", totp_code);
+    const spaced_secret, const spaced_totp = splitTrailingTotp("my secret");
+    try std.testing.expectEqualStrings("my secret", spaced_secret);
+    try std.testing.expectEqualStrings("", spaced_totp);
+    try std.testing.expectEqualStrings("my horse", slashRestAfter("alice * my horse", 2));
+    try std.testing.expectEqualStrings("my secret", slashRestAfter("alice my secret", 1));
+    try std.testing.expectEqualStrings("new pass", slashRestAfter("old new pass", 1));
+    try std.testing.expectEqualStrings("my new passphrase", slashRestAfter("alice 123456 my new passphrase", 2));
+    try std.testing.expect(isOnyxServiceSlash("resetpass"));
+    try std.testing.expect(sessionAuthFailureEndsConnection(false));
+    try std.testing.expect(!sessionAuthFailureEndsConnection(true));
+    try std.testing.expect(roomNeedsReconnectJoinWith(true, false, false, false));
+    try std.testing.expect(!roomNeedsReconnectJoinWith(true, true, true, true));
+    try std.testing.expect(roomNeedsReconnectJoinWith(true, false, true, true));
+    try std.testing.expect(!roomNeedsReconnectJoinWith(true, false, true, false));
+    try std.testing.expect(!isOnyxServiceReply("WHOIS"));
+    try std.testing.expect(!isOnyxServiceReply("MOTD"));
+    try std.testing.expect(!isOnyxServiceSlash("users"));
+    try std.testing.expect(!isOnyxServiceSlash("stats"));
+    try std.testing.expectEqualStrings("That text is not valid UTF-8.", dialogIrcNotice(error.InvalidUtf8, "nope").?);
+    try std.testing.expectEqualStrings("The connection is busy. Try again in a moment.", dialogIrcNotice(error.TxBackpressure, "nope").?);
+    try std.testing.expectEqualStrings("nope", dialogIrcNotice(error.InvalidIrcParameter, "nope").?);
+    try std.testing.expect(dialogIrcNotice(error.OutOfMemory, "nope") == null);
+    try ignoreTransientSend(error.TxBackpressure);
+    try ignoreTransientSend(error.InvalidUtf8);
+    try ignoreTransientSend(error.InvalidIrcParameter);
+    try std.testing.expectError(error.OutOfMemory, ignoreTransientSend(error.OutOfMemory));
+    try std.testing.expect(isVisibleServerWorkflowReply("REGISTER"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SASLINFO"));
+    try std.testing.expect(isVisibleServerWorkflowReply("MEMO"));
+    try std.testing.expect(isVisibleServerWorkflowReply("VHOST"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SESSION"));
+    try std.testing.expect(isVisibleServerWorkflowReply("354"));
+    try std.testing.expect(isVisibleServerWorkflowReply("704"));
+    try std.testing.expect(isVisibleServerWorkflowReply("706"));
+    try std.testing.expect(isVisibleServerWorkflowReply("826"));
+    try std.testing.expect(isVisibleServerWorkflowReply("827"));
+    try std.testing.expect(isCommandFailureNumeric("409"));
+    try std.testing.expect(isVisibleServerWorkflowReply("904"));
+    try std.testing.expect(!isOnyxServiceSlash("clear"));
+    try std.testing.expect(isOnyxServiceSlash("help"));
+    try std.testing.expect(isOnyxServiceSlash("totp"));
+    try std.testing.expect(isCommandFailureNumeric("421"));
+    try std.testing.expect(isNickFailureNumeric("433"));
+    try std.testing.expect(isNickFailureNumeric("437"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("315"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("730"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("731"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("005"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("800"));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("@#root"));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("+#root"));
+    try std.testing.expectEqualStrings("&local", stripStatusmsgTarget("&local"));
+    try std.testing.expectEqualStrings("alice", stripStatusmsgTarget("alice"));
+
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    try std.testing.expectEqual(@as(usize, 1), (try workspaceRoomForIncoming(&workspace, "@#late", "me")).?);
+    try std.testing.expectEqual(@as(usize, 1), workspace.find("#late").?);
+    try std.testing.expectEqual(@as(usize, 0), (try workspaceRoomForIncoming(&workspace, "me", "me")).?);
+
+    var transcript = cc.comic.session.Transcript.init(gpa);
+    defer transcript.deinit();
+    try std.testing.expect(try appendIncomingCtcpReply(&transcript, "alice", "\x01VERSION ComicChat Zig Comic mode\x01"));
+    try std.testing.expectEqualStrings("VERSION: ComicChat Zig Comic mode", transcript.lines.items[0].text);
+    try std.testing.expect(!try appendIncomingCtcpReply(&transcript, "alice", "\x01ACTION waves\x01"));
+
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try state.rememberDccOffer(gpa, "alice", .{
+        .filename = "notes.txt",
+        .host_ip = 0x7f000001,
+        .port = 5000,
+        .size = 12,
+    });
+    try std.testing.expect(state.pending_dcc != null);
+    const password = cc.net.message.parse(":server 464 me :Password incorrect");
+    try std.testing.expect(try applyAuthFailure(&workspace, &state, &password, "#root"));
+    try std.testing.expectEqualStrings("password rejected", state.status);
+    const host_denied = cc.net.message.parse(":server 463 me :Your host isn't among the privileged");
+    try std.testing.expect(try applyAuthFailure(&workspace, &state, &host_denied, "#root"));
+    try std.testing.expectEqualStrings("host not permitted", state.status);
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(state.pending_dcc == null);
+    try std.testing.expect(!workspace.rooms.items[0].joined);
+
+    var empty = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer empty.deinit();
+    try std.testing.expect(empty.activeRoom() == null);
+    try std.testing.expect(workspaceTranscriptRoom(&empty, "#root") != null);
+    try std.testing.expectEqualStrings("#root", empty.rooms.items[0].name);
+    _ = try workspace.ensure("#other");
+    _ = workspace.activate(workspace.find("#other").?);
+    const pins_reply = cc.net.message.parse(":irc PINS #root LIST");
+    try std.testing.expectEqualStrings("#root", workspaceWorkflowRoom(&workspace, &pins_reply, "#other").?.name);
+    const notice_reply = cc.net.message.parse(":irc NOTICE #root :IDENTIFY ok");
+    try std.testing.expectEqualStrings("#root", workspaceWorkflowRoom(&workspace, &notice_reply, "#other").?.name);
+    const motd_reply = cc.net.message.parse(":irc 372 me :- hello");
+    try std.testing.expectEqualStrings("#other", workspaceWorkflowRoom(&workspace, &motd_reply, "#other").?.name);
+}
+
+test "MOTD, invite, knock, key, and ban helpers stay live" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+
+    try rememberMotd(&state, gpa, &cc.net.message.parse(":server 375 me :- eshmaki MOTD"));
+    try rememberMotd(&state, gpa, &cc.net.message.parse(":server 372 me :- Welcome to #root"));
+    try rememberMotd(&state, gpa, &cc.net.message.parse(":server 376 me :- End of MOTD"));
+    try std.testing.expect(std.mem.indexOf(u8, state.motd.items, "Welcome to #root") != null);
+    try std.testing.expect(isVisibleServerWorkflowReply("367"));
+    try std.testing.expect(isVisibleServerWorkflowReply("368"));
+    try std.testing.expect(isVisibleServerWorkflowReply("710"));
+    try std.testing.expect(isVisibleServerWorkflowReply("728"));
+    try std.testing.expect(isVisibleServerWorkflowReply("729"));
+
+    try std.testing.expect(try appendKnockLine(&workspace, &state, &cc.net.message.parse(":alice!u@h KNOCK #locked :please")));
+    try std.testing.expectEqualStrings("#locked", state.last_invite_channel.?);
+    try std.testing.expectEqualStrings("alice", state.last_invite_from.?);
+    try std.testing.expectEqualStrings("alice knocked on #locked (please)", workspace.rooms.items[0].transcript.lines.items[0].text);
+
+    const denied = cc.net.message.parse(":server 475 me #vault :Cannot join channel (+k)");
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &denied));
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+    try std.testing.expectEqual(BanAction.list, classifyBanMask(""));
+    try std.testing.expectEqual(BanAction.delete, classifyBanMask("-alice!*@*"));
+    try std.testing.expectEqual(BanAction.add, classifyBanMask("alice!*@*"));
+    try std.testing.expectEqual(BanAction.delete, classifyBanMask("-evil!*@*"));
+    try std.testing.expectEqualStrings("alice!*@*", banMaskArgument("-alice!*@*"));
+    try std.testing.expectEqual(ChannelListKind.except, classifyChannelListMask("+e").kind);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("except").action);
+    try std.testing.expectEqual(ChannelListKind.except, classifyChannelListMask("+e:alice!*@*").kind);
+    try std.testing.expectEqual(BanAction.add, classifyChannelListMask("+e:alice!*@*").action);
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("+e:alice!*@*", .except));
+    try std.testing.expectEqual(ChannelListKind.invite, classifyChannelListMask("invex").kind);
+    try std.testing.expectEqual(BanAction.delete, classifyChannelListMask("-I:alice!*@*").action);
+    try std.testing.expectEqual(ChannelListKind.ban, classifyChannelListMask("-evil!*@*").kind);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("+b").action);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("ban").action);
+    try std.testing.expectEqual(BanAction.add, classifyChannelListMask("+b:alice!*@*").action);
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("+b:alice!*@*", .ban));
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("b:alice!*@*", .ban));
+    try std.testing.expectEqual(BanAction.delete, classifyChannelListMask("-b:alice!*@*").action);
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("-b:alice!*@*", .ban));
+    try std.testing.expectEqual(ChannelListKind.silence, classifyChannelListMask("silence").kind);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("ignore").action);
+    try std.testing.expectEqual(ChannelListKind.silence, classifyChannelListMask("+s:nick!*@*").kind);
+    try std.testing.expectEqual(BanAction.add, classifyChannelListMask("s:nick!*@*").action);
+    try std.testing.expectEqualStrings("nick!*@*", channelListMaskArgument("-s:nick!*@*", .silence));
+    try std.testing.expectEqual(ChannelListKind.ban, classifyChannelListMask("-someone").kind);
+    try std.testing.expect(isSingleIrcToken(channelListMaskArgument("+b:alice!*@*", .ban)));
+    try std.testing.expect(!isSingleIrcToken(channelListMaskArgument("alice!*@* extra", .ban)));
+    try std.testing.expect(!isSingleIrcToken(channelListMaskArgument("+e:alice extra!*@*", .except)));
+    try std.testing.expect(silenceFilterToken("SILENCE"));
+    try std.testing.expect(silenceFilterToken("ignore"));
+    try std.testing.expect(!silenceFilterToken("alice"));
+    try std.testing.expectEqual(BanAction.list, classifyUserListSilence("").action);
+    try std.testing.expectEqual(BanAction.add, classifyUserListSilence("alice").action);
+    try std.testing.expectEqualStrings("alice", classifyUserListSilence("-alice").mask);
+    try std.testing.expectEqual(BanAction.delete, classifyUserListSilence("-alice").action);
+
+    try client.listBans("#root");
+    try client.clearBan("#root", "alice!*@*");
+    try client.listExceptions("#root");
+    try client.setException("#root", "alice!*@*");
+    try client.listInviteMasks("#root");
+    try client.clearInviteMask("#root", "alice!*@*");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MODE #root +b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MODE #root -b alice!*@*") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "MODE #root +e") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[3].bytes, "MODE #root +e alice!*@*") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[4].bytes, "MODE #root +I") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[5].bytes, "MODE #root -I alice!*@*") != null);
+}
+
+test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
+    const gpa = std.testing.allocator;
+
+    const cli = resolveSaslAuth(.{ .user = "cli", .password_file = "cli.secret" }, "stored", ".comicchat-sasl", "nick", true).?;
+    try std.testing.expectEqualStrings("cli", cli.user);
+    try std.testing.expectEqualStrings("cli.secret", cli.password_file);
+    const stored = resolveSaslAuth(.{}, "alex", "stored.secret", "nick", true).?;
+    try std.testing.expectEqualStrings("alex", stored.user);
+    try std.testing.expectEqualStrings("stored.secret", stored.password_file);
+    const inferred = resolveSaslAuth(.{}, "", "", "nick", true).?;
+    try std.testing.expectEqualStrings("nick", inferred.user);
+    try std.testing.expectEqualStrings(default_sasl_password_file, inferred.password_file);
+    try std.testing.expect(resolveSaslAuth(.{}, "", "", "nick", false) == null);
+    try std.testing.expect(resolveSaslAuth(.{ .external = true }, "", "", "nick", false) == null);
+
+    try std.testing.expect(notificationUsesMonitorValues("alice", "*", "*"));
+    try std.testing.expect(notificationUsesMonitorValues("alice", "", ""));
+    try std.testing.expect(!notificationUsesMonitorValues("al*", "*", "*"));
+    try std.testing.expect(!notificationUsesMonitorValues("alice", "*", "*.test"));
+    try std.testing.expectEqualStrings("alice", monitorNickFromTarget("alice!user@host"));
+    try std.testing.expectEqualStrings("bob", monitorNickFromTarget(" bob "));
+
+    var preferences = cc.client.preferences.Store.init(gpa);
+    defer preferences.deinit();
+    try preferences.upsertNotification(.{ .nickname = "alice", .user_mask = "*", .host_mask = "*", .network = "" });
+    try preferences.upsertNotification(.{ .nickname = "bob", .user_mask = "*", .host_mask = "*", .network = "" });
+    try preferences.upsertNotification(.{ .nickname = "al*", .user_mask = "*", .host_mask = "*", .network = "" });
+    try preferences.upsertNotification(.{ .nickname = "carol", .user_mask = "*", .host_mask = "*.test", .network = "" });
+
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    state.monitor_subscribed = true;
+    try state.notification_current.append(gpa, try gpa.dupe(u8, "alice"));
+    try state.notification_current.append(gpa, try gpa.dupe(u8, "dave"));
+    try state.notification_previous.append(gpa, try gpa.dupe(u8, "alice"));
+    retainMonitorOnlineNicks(gpa, &state, &preferences);
+    try std.testing.expectEqual(@as(usize, 1), state.notification_current.items.len);
+    try std.testing.expectEqualStrings("alice", state.notification_current.items[0]);
+
+    const online = cc.net.message.parse(":server 730 me :bob!u@h,alice!a@b");
+    try std.testing.expect(try applyMonitorNumeric(gpa, &state, &workspace, &preferences, &online));
+    try std.testing.expect(containsIgnoreCase(state.notification_current.items, "bob"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[0].transcript.lines.items[0].text, "bob is online") != null);
+    const again = cc.net.message.parse(":server 730 me :bob!u@h");
+    try std.testing.expect(!try applyMonitorNumeric(gpa, &state, &workspace, &preferences, &again));
+    const offline = cc.net.message.parse(":server 731 me :bob");
+    try std.testing.expect(try applyMonitorNumeric(gpa, &state, &workspace, &preferences, &offline));
+    try std.testing.expect(!containsIgnoreCase(state.notification_current.items, "bob"));
+    try std.testing.expect(containsIgnoreCase(state.notification_previous.items, "alice"));
+    try std.testing.expect(containsIgnoreCase(state.notification_current.items, "alice"));
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(!state.monitor_subscribed);
+    try std.testing.expectEqual(@as(usize, 0), state.notification_current.items.len);
+    try std.testing.expect(containsIgnoreCase(state.notification_previous.items, "alice"));
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+        .features = try cc.net.features.State.init(gpa, "me", .{}),
+    };
+    defer {
+        if (client.features) |*owned_features| owned_features.deinit();
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    if (client.features) |*owned_features|
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me NETWORK=Onyx MAXTARGETS=1 MONITOR=128 SILENCE=1 :are supported"));
+    try std.testing.expect(notificationNetworkMatches("Onyx", "irc.example", advertisedNetworkName(&client)));
+    try std.testing.expect(notificationNetworkMatches("irc.example", "irc.example", advertisedNetworkName(&client)));
+    try std.testing.expect(!notificationNetworkMatches("Efnet", "irc.example", advertisedNetworkName(&client)));
+    try subscribeMonitorTargets(&client, &preferences);
+    try client.monitor(.status, null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MONITOR + alice\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MONITOR + bob\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "MONITOR S\r\n") != null);
+    try std.testing.expectError(error.InvalidIrcParameter, client.whisper("#root", "anna,bob", "secret"));
+    try std.testing.expectError(error.InvalidIrcParameter, client.monitor(.add, "eve,frank"));
+    try applySilenceOperation(&client, &state, gpa, .add, "one!*@*");
+    try std.testing.expectError(error.InvalidIrcParameter, applySilenceOperation(&client, &state, gpa, .add, "two!*@*"));
+    const saved = cc.net.message.parse(":server 043 me savednick :Nick saved");
+    if (saved.param(1)) |assigned| try workspace.setSelfNick(assigned);
+    try std.testing.expectEqualStrings("savednick", workspace.self_nick);
+    try client.join("#root");
+    try std.testing.expect(client.restoresChannel("#root"));
+    try std.testing.expect(!client.restoresChannel("#late"));
+}
+
+test "silence, modern events, and leftover session numerics stay live" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+typing=active :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice is typing", workspace.rooms.items[root].transcript.lines.items[0].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+typing=paused :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice paused typing", workspace.rooms.items[root].transcript.lines.items[1].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+typing=done :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice stopped typing", workspace.rooms.items[root].transcript.lines.items[2].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse("@+draft/react=smile :alice!u@h TAGMSG #root")));
+    try std.testing.expectEqualStrings("alice sent a tag-only message", workspace.rooms.items[root].transcript.lines.items[3].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse(":alice!u@h EDIT #root msgid-1 :corrected text")));
+    try std.testing.expectEqualStrings("alice edited a message: corrected text", workspace.rooms.items[root].transcript.lines.items[4].text);
+    try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse(":alice!u@h REDACT #root msgid-1 :off-topic")));
+    try std.testing.expectEqualStrings("alice redacted a message (off-topic)", workspace.rooms.items[root].transcript.lines.items[5].text);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h TAGMSG #root"), &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h EDIT #root msgid-1 :text"), &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h REDACT #root msgid-1"), &workspace).?);
+
+    observeSilenceState(gpa, &state, &cc.net.message.parse(":server 271 me *!*@bad.example"));
+    observeSilenceState(gpa, &state, &cc.net.message.parse(":me!u@h SILENCE +nick!*@*"));
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "nick!*@*"));
+    observeSilenceState(gpa, &state, &cc.net.message.parse(":me!u@h SILENCE -nick!*@*"));
+    try std.testing.expect(!containsIgnoreCase(state.silence_masks.items, "nick!*@*"));
+    try state.replaceOwned(gpa, &state.away_message, "back later");
+    try state.replaceOwned(gpa, &state.last_invite_channel, "#locked");
+    try state.replaceOwned(gpa, &state.last_invite_from, "alice");
+    try state.replaceOwned(gpa, &state.last_key_channel, "#vault");
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
+    try std.testing.expectEqualStrings("back later", state.away_message.?);
+    try std.testing.expectEqualStrings("#locked", state.last_invite_channel.?);
+    try std.testing.expectEqualStrings("alice", state.last_invite_from.?);
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.features) |*owned_features| owned_features.deinit();
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try applySilenceOperation(&client, &state, gpa, .list, "");
+    try applySilenceOperation(&client, &state, gpa, .add, "quiet!*@*");
+    try applySilenceOperation(&client, &state, gpa, .delete, "*!*@bad.example");
+    resubscribeSessionControls(&client, &state, &workspace, null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "SILENCE\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "SILENCE +quiet!*@*\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "SILENCE -*!*@bad.example\r\n") != null);
+    try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "quiet!*@*"));
+    try std.testing.expect(!containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[3].bytes, "SILENCE +quiet!*@*\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[4].bytes, "AWAY :back later") != null);
+    try client.join("#root");
+    const before_restore = client.tx.items.items.len;
+    resubscribeSessionControls(&client, &state, &workspace, null);
+    var saw_away_control = false;
+    for (client.tx.items.items[before_restore..]) |item| {
+        if (std.mem.indexOf(u8, item.bytes, "PRIVMSG #root :\x01AWAY back later\x01") != null) saw_away_control = true;
+    }
+    try std.testing.expect(saw_away_control);
+
+    client.features = try cc.net.features.State.init(gpa, "me", .{});
+    if (client.features) |*owned_features|
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me MONITOR=100 :are supported"));
+    var prefs = cc.client.preferences.Store.init(gpa);
+    defer prefs.deinit();
+    try prefs.upsertNotification(.{
+        .nickname = "alice",
+        .user_mask = "*",
+        .host_mask = "*",
+        .network = "",
+        .enabled = true,
+    });
+    state.monitor_subscribed = false;
+    const before_monitor = client.tx.items.items.len;
+    resubscribeSessionControls(&client, &state, &workspace, &prefs);
+    try std.testing.expect(state.monitor_subscribed);
+    var saw_monitor = false;
+    for (client.tx.items.items[before_monitor..]) |item| {
+        if (std.mem.indexOf(u8, item.bytes, "MONITOR + alice") != null) saw_monitor = true;
+    }
+    try std.testing.expect(saw_monitor);
+}
+
+test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+        .features = try cc.net.features.State.init(gpa, "me", .{}),
+    };
+    defer {
+        if (client.features) |*owned_features| owned_features.deinit();
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    if (client.features) |*owned_features| {
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& STATUSMSG=!.@+ CHANMODES=beIZ,k,lfj,imnstCTNMSgWOAVUFD NICKLEN=4 CHANNELLEN=6 KEYLEN=3 TOPICLEN=5 AWAYLEN=3 KICKLEN=4 :are supported"));
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me NETWORK=Onyx MODES=1 MAXLIST=beIZ:100 EXTBAN=$,acgmrz BOT=B WHOX UTF8ONLY IRCX :are supported"));
+    }
+    applyClientIsupport(&workspace, &client);
+    try std.testing.expect(ircxSupportAdvertised(&client));
+    try std.testing.expect(workspace.extban.allows('a'));
+    try std.testing.expect(!workspace.extban.allows('x'));
+    try std.testing.expectEqual(@as(usize, 1), workspace.session_limits.modes);
+    try std.testing.expectEqual(@as(usize, 100), workspace.session_limits.maxlist);
+    try std.testing.expect(workspace.session_limits.whox);
+    try std.testing.expect(workspace.session_limits.utf8only);
+    try std.testing.expectEqual(@as(u8, 'B'), workspace.session_limits.bot);
+    try std.testing.expectEqual(cc.net.irc_map.CaseMapping.ascii, workspace.casemapping);
+    try std.testing.expect(workspace.prefixes.isSymbol('*'));
+    try std.testing.expect(!workspace.prefixes.isSymbol('~'));
+    try std.testing.expect(workspace.chanmodes.takesParam('Z', true));
+    try std.testing.expect(workspace.chanmodes.takesParam('f', true));
+    try std.testing.expect(!workspace.statusmsg.contains('*'));
+    try std.testing.expectEqualStrings("*#root", stripStatusmsgTargetWith("*#root", workspace.statusmsg, workspace.chantypes));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTargetWith("@#root", workspace.statusmsg, workspace.chantypes));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTargetWith("!#root", workspace.statusmsg, workspace.chantypes));
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h PRIVMSG @#root :ops"), &workspace).?);
+    try std.testing.expectError(error.InvalidIrcParameter, client.changeNick("alice"));
+    try std.testing.expectError(error.InvalidIrcParameter, client.join("#toolong"));
+    try std.testing.expectError(error.InvalidIrcParameter, client.joinWithKey("#ab", "toolong"));
+    try std.testing.expectEqualStrings("That room password is longer than the server allows.", sessionLimitFailureNotice(.join, &workspace, "#ab", "toolong"));
+    try std.testing.expectEqualStrings("That room name is longer than the server allows.", sessionLimitFailureNotice(.join, &workspace, "#toolong", "x"));
+    try std.testing.expectEqualStrings("That nickname is longer than the server allows.", sessionLimitFailureNotice(.nick, &workspace, "", ""));
+    try std.testing.expectEqualStrings("You have opened as many rooms as the server allows.", roomEnsureFailureNotice(error.TooManyRooms));
+    try std.testing.expectEqualStrings("Enter a valid room name beginning with # or &.", roomEnsureFailureNotice(error.InvalidRoomName));
+    try std.testing.expectEqualStrings(
+        "The locator contains an invalid room.",
+        roomEnsureFailureNoticeOr(error.InvalidRoomName, "The locator contains an invalid room."),
+    );
+    const join_limit_notice = (try requestJoinWithKey(&client, &workspace, "#ab", "toolong")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("That room password is longer than the server allows.", join_limit_notice);
+    const create_limit_notice = (try requestCreateRoom(&client, &workspace, "#ab", "", "", "toolong")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("That room password is longer than the server allows.", create_limit_notice);
+    const nick_limit_notice = (try requestNickChange(&client, &workspace, "alice")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("That nickname is longer than the server allows.", nick_limit_notice);
+
+    const limited = try workspace.ensure("#lim");
+    try workspace.rooms.items[limited].setJoinKey(gpa, "toolong");
+    workspace.rooms.items[limited].setWantRejoin(true);
+    try requestReconnectJoin(&workspace, &client, &workspace.rooms.items[limited]);
+    try std.testing.expect(!workspace.rooms.items[limited].want_rejoin);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[limited].transcript.lines.items[0].text, "password") != null);
+    try client.setTopic("#root", "Welcome");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOPIC #root :Welco\r\n") != null);
+    try client.setAway("later");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "AWAY :lat\r\n") != null);
+    try client.kick("#root", "eve", "flood");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KICK #root eve :floo\r\n") != null);
+
+    const root = try workspace.ensure("#root");
+    _ = workspace.activate(root);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ban #root $x:nope"));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        workspace.rooms.items[root].transcript.lines.items[workspace.rooms.items[root].transcript.lines.items.len - 1].text,
+        "extended ban",
+    ) != null);
+    const set_key = cc.net.message.parse(":op!u@h MODE #root +Zfk secretfilter 10 swordfish");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &set_key));
+    try std.testing.expectEqualStrings("swordfish", workspace.rooms.items[root].join_key.?);
+
+    const old = try workspace.ensure("#old");
+    workspace.rooms.items[old].joined = true;
+    workspace.rooms.items[old].setWantRejoin(true);
+    try workspace.rooms.items[old].setJoinKey(gpa, "secret");
+    try state.replaceOwned(gpa, &state.last_key_channel, "#old");
+    try state.replaceOwned(gpa, &state.last_invite_channel, "#old");
+    try client.join("#old");
+    try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #old #vault :Forwarding")));
+    const vault = workspace.find("#vault").?;
+    try std.testing.expectEqualStrings("secret", workspace.rooms.items[vault].join_key.?);
+    try std.testing.expect(!workspace.rooms.items[old].joined);
+    try std.testing.expect(!workspace.rooms.items[old].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[vault].want_rejoin);
+    try std.testing.expect(client.restoresChannel("#vault"));
+    try std.testing.expect(!roomNeedsReconnectJoin(&workspace.rooms.items[old], &client));
+    try std.testing.expect(!roomNeedsReconnectJoin(&workspace.rooms.items[vault], &client));
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+    try std.testing.expectEqualStrings("#vault", state.last_invite_channel.?);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[vault].transcript.lines.items[0].text, "Forwarded from #old to #vault") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "JOIN #vault") != null);
+    try client.queryMode("#vault");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #vault\r\n") != null);
+    const dest_modes = cc.net.message.parse(":server 324 me #vault +ntk destkey");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &dest_modes));
+    try std.testing.expectEqualStrings("destkey", workspace.rooms.items[vault].join_key.?);
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+
+    try workspace.rooms.items[vault].setClientData(gpa, "bk=room;");
+    workspace.rooms.items[vault].joined = true;
+    republishJoinedClientData(&client, &workspace);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PROP #vault CLIENT :bk=room;\r\n") != null);
+
+    const kept = try workspace.ensure("#kept");
+    try workspace.rooms.items[kept].setJoinKey(gpa, "keepme");
+    try workspace.rooms.items[kept].setClientData(gpa, "bk=keep;");
+    const other = try workspace.ensure("#other");
+    workspace.rooms.items[other].setWantRejoin(true);
+    try workspace.rooms.items[other].setJoinKey(gpa, "overwrite");
+    try workspace.rooms.items[other].setClientData(gpa, "bk=old;");
+    try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #other #kept :Forwarding")));
+    try std.testing.expectEqualStrings("keepme", workspace.rooms.items[kept].join_key.?);
+    try std.testing.expectEqualStrings("bk=keep;", workspace.rooms.items[kept].client_data.?);
+    try std.testing.expect(workspace.rooms.items[kept].want_rejoin);
+    try std.testing.expect(!workspace.rooms.items[other].want_rejoin);
+
+    try std.testing.expect(try workspace.rename("#vault", "#renamed"));
+    client.renameRestoration("#vault", "#renamed");
+    if (workspace.find("#renamed")) |index|
+        republishRoomClientData(&client, &workspace.rooms.items[index], true);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PROP #renamed CLIENT :bk=room;\r\n") != null);
+
+    if (client.features) |*owned_features|
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CHANLIMIT=#&:1 :are supported"));
+    applyClientIsupport(&workspace, &client);
+    try std.testing.expectError(error.InvalidIrcParameter, client.join("#x"));
+    try std.testing.expectError(error.TooManyRooms, workspace.ensure("#x"));
+    try std.testing.expect((try ensureIncomingRoom(&workspace, "#x")) == null);
+    try std.testing.expect((try workspaceRoomForIncoming(&workspace, "@#x", "me")) == null);
+    try std.testing.expectEqualStrings("You have joined as many rooms as the server allows.", sessionLimitFailureNotice(.join, &workspace, "#x", ""));
+    try std.testing.expectEqualStrings("You have opened as many rooms as the server allows.", roomEnsureFailureNotice(error.TooManyRooms));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        workspace.activeRoom().?.transcript.lines.items[workspace.activeRoom().?.transcript.lines.items.len - 1].text,
+        "as many rooms",
+    ) != null);
+    const forward_before = workspace.activeRoom().?.transcript.lines.items.len;
+    try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #old #next :Forwarding")));
+    var saw_forward_limit = false;
+    for (workspace.activeRoom().?.transcript.lines.items[forward_before..]) |line| {
+        if (std.mem.indexOf(u8, line.text, "as many rooms") != null) saw_forward_limit = true;
+    }
+    try std.testing.expect(saw_forward_limit);
+
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(!workspace.rooms.items[old].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[vault].want_rejoin);
+    try std.testing.expectEqual(cc.net.irc_map.CaseMapping.rfc1459, workspace.casemapping);
+    try std.testing.expect(workspace.prefixes.isSymbol('~'));
+    try std.testing.expect(!workspace.chanmodes.takesParam('Z', true));
+    try std.testing.expect(workspace.statusmsg.contains('~'));
+    try std.testing.expectEqual(@as(usize, 0), workspace.session_limits.nicklen);
+    try std.testing.expectEqual(@as(usize, 0), workspace.session_limits.chanlimit);
+}
+
+test "Onyx account slashes and session-sync skip a JOIN storm" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    const owned_host = try gpa.dupe(u8, "eshmaki.me");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/identify alice secret"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "IDENTIFY alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/identify alice my secret"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "IDENTIFY alice :my secret") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/identify alice secret 123456"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "IDENTIFY alice secret :123456") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accountset alice secret email foo@bar.com extra"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCOUNTSET alice secret email :foo@bar.com extra") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/cs REGISTER #zig my horse"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CHANNEL REGISTER #zig :my horse") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/vhost APPROVE alice looks good"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "VHOST APPROVE alice :looks good") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/register alice * my horse"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "REGISTER alice * :my horse") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ghost alice my secret"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "GHOST alice :my secret") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/drop alice my secret"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "DROP alice :my secret") != null);
+    var password = [_]u8{ 'h', 'o', 'r', 's', 'e' };
+    try client.accountRegister("alice", "*", &password);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "REGISTER alice *") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/cs info #zig"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CHANNEL info") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/cs SET #zig DESC My channel rules"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CHANNEL SET #zig DESC :My channel rules") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/vhost DENY alice was abusive"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "VHOST DENY alice :was abusive") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tegami list"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MEMO") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEGAMI") == null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/session list"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SESSION") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/certadd"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CERTADD") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/help register"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "HELP") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/totp status"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOTP") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/setpass old newpassword99"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SETPASS old") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/setpass old new pass"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SETPASS old :new pass") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/resetpass alice 123456 my new passphrase"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "RESETPASS alice 123456 :my new passphrase") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/knock #locked please"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KNOCK #locked :please") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/search checklist"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[0].transcript.lines.items[workspace.rooms.items[0].transcript.lines.items.len - 1].text, "did not advertise") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/setname Alice Example"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[0].transcript.lines.items[workspace.rooms.items[0].transcript.lines.items.len - 1].text, "did not advertise") != null);
+    try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/clear"));
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/whois alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WHOIS :alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/motd"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MOTD") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/commands"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "COMMANDS") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/names #lobby"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "NAMES :#lobby") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/list"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "LIST") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/who #lobby"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WHO :#lobby") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/version"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "VERSION") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/whox #lobby"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WHO :#lobby") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ison alice bob"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ISON alice :bob") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/msg alice hello there"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PRIVMSG alice :hello there") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/notice alice hi"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "NOTICE alice :hi") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/nick bob"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "NICK bob") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/topic hello room"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOPIC #root :hello room") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/invite alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "INVITE alice #root") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/mode +n"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +n") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/mode #root +o alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +o alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/kick alice later"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KICK #root alice :later") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/rename #new later"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "RENAME #root #new :later") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ctcp alice VERSION"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PRIVMSG alice :\x01VERSION\x01") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ping alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PRIVMSG alice :\x01PING\x01") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ping"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PING") != null);
+    try std.testing.expect(try sendCreateSlash(&client, &workspace, gpa, "/create #made +nt 20 secret"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CREATE #made +nt 20 secret") != null);
+    try std.testing.expect(try sendJoinSlash(&client, &workspace, gpa, "/join #held secret key"));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        workspace.activeRoom().?.transcript.lines.items[workspace.activeRoom().?.transcript.lines.items.len - 1].text,
+        "one token",
+    ) != null);
+    try std.testing.expect(workspace.find("#made") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/op alice #root"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +o alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/deop #root bob"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root -o bob") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/voice alice #root"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +v alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ban #root evil!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +b evil!*@*") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/unban #root evil!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root -b evil!*@*") != null);
+    _ = workspace.activate(workspace.find("#root").?);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/whisper alice hi"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WHISPER #root alice :hi") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/owner alice #root"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +q alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/except #root good!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +e good!*@*") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/invex #root pal!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +I pal!*@*") != null);
+    try std.testing.expect(try sendCycleSlash(&client, &workspace, "/cycle #root"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 2].bytes, "PART #root :cycling") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "JOIN #root") != null);
+    try std.testing.expect(workspace.find("#root") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/umode +i"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE me +i") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/prop #root TOPIC hello room"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PROP #root TOPIC :hello room") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/access #root ADD HOST anna!*@* 0 trusted helper"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCESS #root ADD HOST anna!*@* 0 :trusted helper") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/monitor + alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MONITOR + alice") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MONITOR + :alice") == null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/monitor"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MONITOR L") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/pins #root list"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PINS #root LIST") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/successor #root SHOW"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SUCCESSOR #root") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SHOW") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accept alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT +alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accept -bob"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT -bob") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accept"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT *") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/listx N=#root,>10 25"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "LISTX N=#root,>10 25") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tempmode add #root +m 60"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEMPMODE ADD #root +m 60") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tempmode sweep"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEMPMODE SWEEP") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome ADD Hello world"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME ADD :Hello world") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(
+        &client,
+        &workspace,
+        "/welcome ADD one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen",
+    ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client.tx.items.items[client.tx.items.items.len - 1].bytes,
+        "WELCOME ADD :one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen",
+    ) != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME\r\n") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome SHOW"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME\r\n") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome CLEAR"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME CLEAR") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tegami send alice Hello world"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MEMO SEND alice :Hello world") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEGAMI") == null);
+    workspace.rooms.items[workspace.find("#root").?].joined = true;
+    const already_joined_before = client.tx.items.items.len;
+    try std.testing.expect(try sendJoinSlash(&client, &workspace, gpa, "/join #root"));
+    try std.testing.expectEqual(already_joined_before, client.tx.items.items.len);
+    try std.testing.expect(try sendJoinSlash(&client, &workspace, gpa, "/join #root newkey"));
+    try std.testing.expectEqual(already_joined_before, client.tx.items.items.len);
+    try std.testing.expectEqualStrings("newkey", workspace.rooms.items[workspace.find("#root").?].join_key.?);
+    workspace.rooms.items[workspace.find("#root").?].joined = false;
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ison a b c d e f g h i j k l m n o p q"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[workspace.find("#root").?].transcript.lines.items[workspace.rooms.items[workspace.find("#root").?].transcript.lines.items.len - 1].text, "too many arguments") != null);
+    try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
+    try std.testing.expect(!client.projectsSessionChannels());
+
+    const first = try workspace.ensure("#first");
+    workspace.rooms.items[first].setWantRejoin(true);
+    try client.joinWithKey("#root", "");
+    try std.testing.expect(client.restoresChannel("#root"));
+    workspace.rooms.items[workspace.find("#root").?].setWantRejoin(true);
+    const before = client.tx.items.items.len;
+    try std.testing.expect((try applyWelcomeJoins(&workspace, &client, "#root")) == null);
+    try std.testing.expect(workspace.rooms.items[workspace.find("#root").?].joined);
+    try std.testing.expect(!workspace.rooms.items[first].joined);
+    var saw_first = false;
+    var saw_root = false;
+    for (client.tx.items.items[before..]) |item| {
+        if (std.mem.indexOf(u8, item.bytes, "JOIN #first") != null) saw_first = true;
+        if (std.mem.indexOf(u8, item.bytes, "JOIN #root") != null) saw_root = true;
+    }
+    try std.testing.expect(saw_first);
+    try std.testing.expect(!saw_root);
+
+    const keyed = try workspace.ensure("#keyed");
+    workspace.rooms.items[keyed].setWantRejoin(true);
+    try workspace.rooms.items[keyed].setJoinKey(gpa, "secret key");
+    try requestReconnectJoin(&workspace, &client, &workspace.rooms.items[keyed]);
+    try std.testing.expect(workspace.rooms.items[keyed].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[keyed].join_key == null);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[keyed].transcript.lines.items[workspace.rooms.items[keyed].transcript.lines.items.len - 1].text, "one token") != null);
+
+    client.features = try cc.net.features.State.init(gpa, "me", .{});
+    defer if (client.features) |*owned_features| owned_features.deinit();
+    if (client.features) |*state|
+        _ = try state.observe(&cc.net.message.parse(":irc 005 me UTF8ONLY :are supported"));
+    try std.testing.expectError(error.InvalidUtf8, client.identify("alice", &.{0xff}, ""));
+    try workspace.rooms.items[first].setPendingTopic(gpa, &.{0xff});
+    try applyPendingTopic(&client, &workspace.rooms.items[first], gpa, workspace.rooms.items[first].pending_topic.?);
+    try std.testing.expect(workspace.rooms.items[first].pending_topic == null);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[first].transcript.lines.items[workspace.rooms.items[first].transcript.lines.items.len - 1].text, "UTF-8") != null);
+
+    client.tx.deinit();
+    client.tx = cc.net.connection_policy.TxQueue.init(gpa, .{ .tx_messages = 1 }, 0, 1, 0);
+    try client.join("#hold");
+    const busy = try workspace.ensure("#busy");
+    workspace.rooms.items[busy].setWantRejoin(true);
+    try requestReconnectJoin(&workspace, &client, &workspace.rooms.items[busy]);
+    try std.testing.expect(workspace.rooms.items[busy].want_rejoin);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[busy].transcript.lines.items[workspace.rooms.items[busy].transcript.lines.items.len - 1].text, "busy") != null);
+    try workspace.rooms.items[first].setPendingTopic(gpa, "retry later");
+    try applyPendingTopic(&client, &workspace.rooms.items[first], gpa, workspace.rooms.items[first].pending_topic.?);
+    try std.testing.expectEqualStrings("retry later", workspace.rooms.items[first].pending_topic.?);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[first].transcript.lines.items[workspace.rooms.items[first].transcript.lines.items.len - 1].text, "busy") != null);
+}
+
+test "composer notices instead of dropping speech before JOIN" {
+    const gpa = std.testing.allocator;
+    var view = try cc.client.view.View.init(gpa, cc.client.view.min_width, cc.client.view.min_height);
+    defer view.deinit();
+    var editor = cc.client.input.Editor.init(gpa);
+    defer editor.deinit();
+    var transcript = cc.comic.session.Transcript.init(gpa);
+    defer transcript.deinit();
+    try editor.paste("hello");
+    try std.testing.expect(try handleInputKey(
+        gpa,
+        cc.platform.event.Key{ .enter = {} },
+        &view,
+        &editor,
+        null,
+        &transcript,
+        "me",
+        "#root",
+        false,
+        false,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, transcript.lines.items[0].text, "joined this room") != null);
+    try std.testing.expectEqual(@as(usize, 0), editor.text().len);
+
+    const owned_host = try gpa.dupe(u8, "eshmaki.me");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try editor.paste("/avatar nope");
+    try std.testing.expect(try handleInputKey(
+        gpa,
+        cc.platform.event.Key{ .enter = {} },
+        &view,
+        &editor,
+        &client,
+        &transcript,
+        "me",
+        "#root",
+        true,
+        false,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, transcript.lines.items[transcript.lines.items.len - 1].text, "character is not available") != null);
+    view.shell.setSayMode(.whisper);
+    try editor.paste("psst");
+    try std.testing.expect(try handleInputKey(
+        gpa,
+        cc.platform.event.Key{ .enter = {} },
+        &view,
+        &editor,
+        &client,
+        &transcript,
+        "me",
+        "#root",
+        true,
+        false,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, transcript.lines.items[transcript.lines.items.len - 1].text, "Select a member") != null);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

@@ -6,6 +6,7 @@ const dcc = @import("../proto/dcc.zig");
 const formatting = @import("formatting.zig");
 const original_page = @import("original_page.zig");
 const irc_message = @import("../net/message.zig");
+const irc_map = @import("../net/irc_map.zig");
 const udi = @import("../proto/udi.zig");
 
 pub const avatars = [_][]const u8{
@@ -32,10 +33,7 @@ pub const ctcp_away_prefix = "\x01AWAY";
 /// Unwrap the conventional CTCP ACTION payload emitted by `SlashMeOrThink`.
 /// The slice still borrows from the UDI-stripped wire message.
 pub fn ctcpActionText(text: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, text, ctcp_action_prefix) or
-        text.len <= ctcp_action_prefix.len or text[text.len - 1] != 0x01)
-        return null;
-    return text[ctcp_action_prefix.len .. text.len - 1];
+    return ctcpCommandPayload(text, "ACTION");
 }
 
 pub const SoundControl = struct {
@@ -44,15 +42,36 @@ pub const SoundControl = struct {
 };
 
 pub fn ctcpSound(text: []const u8) ?SoundControl {
-    if (!std.mem.startsWith(u8, text, ctcp_sound_prefix) or text.len <= ctcp_sound_prefix.len or text[text.len - 1] != 0x01)
-        return null;
-    const payload = text[ctcp_sound_prefix.len .. text.len - 1];
-    const separator = std.mem.indexOfScalar(u8, payload, ' ') orelse payload.len;
+    const payload = ctcpCommandPayload(text, "SOUND") orelse return null;
+    const separator = firstUnquotedCtcpSpace(payload) orelse payload.len;
     if (separator == 0) return null;
     return .{
         .name = payload[0..separator],
         .message = if (separator < payload.len) payload[separator + 1 ..] else "",
     };
+}
+
+fn ctcpCommandPayload(text: []const u8, command: []const u8) ?[]const u8 {
+    if (text.len < 2 or text[0] != 0x01 or text[text.len - 1] != 0x01) return null;
+    const body = text[1 .. text.len - 1];
+    if (body.len < command.len or !std.ascii.eqlIgnoreCase(body[0..command.len], command)) return null;
+    if (body.len == command.len) return null;
+    if (body[command.len] != ' ') return null;
+    return body[command.len + 1 ..];
+}
+
+/// Split SOUND on the first raw space. CTCP-quoted spaces are `\x10@` and
+/// must stay inside the filename token until `ctcpUnquote`.
+fn firstUnquotedCtcpSpace(payload: []const u8) ?usize {
+    var index: usize = 0;
+    while (index < payload.len) : (index += 1) {
+        if (payload[index] == 0x10) {
+            if (index + 1 < payload.len) index += 1;
+            continue;
+        }
+        if (payload[index] == ' ') return index;
+    }
+    return null;
 }
 
 /// Microsoft broadcasts `\x01AWAY [message]\x01` to each joined room after
@@ -218,8 +237,8 @@ pub const BackdropControl = union(enum) {
     /// ` BDrop: name` - the legacy compat form sent second by
     /// `ChatSyncBackDrop` for old clients (protsupp.cpp:964-983). The
     /// source applies it only when `name` differs case-insensitively from
-    /// the last BDrop2 base name; this pure parser leaves that comparison
-    /// to the caller.
+    /// the last BDrop2 base name; `Transcript.applyBackdropControl` owns
+    /// that comparison.
     legacy: []const u8,
 };
 
@@ -339,6 +358,9 @@ pub const RosterEntry = struct {
     away: bool = false,
     role: MemberRole = .member,
     status_modes: u8 = 0,
+    /// Generation last listed in a 353 burst. Used with `Transcript.names_generation`
+    /// so 366 can retire members absent from the completed NAMES snapshot.
+    names_generation: u32 = 0,
 };
 
 /// Accumulates conversation lines, owning copies of the text (wire buffers are
@@ -348,6 +370,12 @@ pub const Transcript = struct {
     lines: std.ArrayList(Line) = .empty,
     roster: std.ArrayList(RosterEntry) = .empty,
     backdrop_storage: ?[]u8 = null,
+    last_bdrop2_base: ?[]u8 = null,
+    names_generation: u32 = 0,
+    names_sync_active: bool = false,
+    casemapping: irc_map.CaseMapping = .rfc1459,
+    prefixes: irc_map.PrefixMap = .default,
+    chanmodes: irc_map.ChanModes = .default,
 
     pub fn init(gpa: std.mem.Allocator) Transcript {
         return .{ .gpa = gpa };
@@ -359,6 +387,7 @@ pub const Transcript = struct {
         for (self.roster.items) |entry| self.gpa.free(entry.nick);
         self.roster.deinit(self.gpa);
         if (self.backdrop_storage) |name| self.gpa.free(name);
+        if (self.last_bdrop2_base) |name| self.gpa.free(name);
     }
 
     pub fn setBackdrop(self: *Transcript, name: []const u8) !void {
@@ -370,6 +399,30 @@ pub const Transcript = struct {
 
     pub fn resolvedBackdrop(self: *const Transcript) []const u8 {
         return self.backdrop_storage orelse "color apartment";
+    }
+
+    /// Consume a parsed `# BDrop2` / `# BDrop` control. A legacy BDrop whose
+    /// name matches the last BDrop2 base is ignored, matching
+    /// `g_szLastBackdropName` in `protsupp.cpp:964-1017`.
+    pub fn applyBackdropControl(self: *Transcript, control: BackdropControl) !bool {
+        switch (control) {
+            .not_control => return false,
+            .empty => return true,
+            .sync => |announcement| {
+                const replacement = try self.gpa.dupe(u8, announcement.base_name);
+                if (self.last_bdrop2_base) |old| self.gpa.free(old);
+                self.last_bdrop2_base = replacement;
+                if (bundledBackdropByName(announcement.base_name)) |name| try self.setBackdrop(name);
+                return true;
+            },
+            .legacy => |name| {
+                if (self.last_bdrop2_base) |base| {
+                    if (std.ascii.eqlIgnoreCase(name, base)) return true;
+                }
+                if (bundledBackdropByName(name)) |bundled| try self.setBackdrop(bundled);
+                return true;
+            },
+        }
     }
 
     /// Resolve a participant through their most recent source announcement,
@@ -405,18 +458,21 @@ pub const Transcript = struct {
         self_nick: []const u8,
     ) !bool {
         if (std.ascii.eqlIgnoreCase(msg.command, "353")) {
-            if (msg.param_count < 2) return false;
-            const names_channel = msg.params[msg.param_count - 2];
-            if (!std.ascii.eqlIgnoreCase(names_channel, channel)) return false;
+            const names_channel = namesReplyChannel(msg) orelse return false;
+            if (!irc_map.eql(self.casemapping, names_channel, channel)) return false;
+            if (!self.names_sync_active) {
+                self.names_generation +%= 1;
+                self.names_sync_active = true;
+            }
             var changed = false;
             var names = std.mem.tokenizeScalar(u8, msg.params[msg.param_count - 1], ' ');
             while (names.next()) |decorated| {
                 var nick = decorated;
                 var role: MemberRole = .member;
                 var status_modes: u8 = 0;
-                while (nick.len > 0 and isNickStatus(nick[0])) {
-                    role = highestRole(role, roleForPrefix(nick[0]));
-                    status_modes |= modeBitForPrefix(nick[0]);
+                while (nick.len > 0 and self.prefixes.isSymbol(nick[0])) {
+                    role = highestRole(role, roleForMode(self.prefixes.modeForSymbol(nick[0]).?));
+                    status_modes |= self.prefixes.bitForSymbol(nick[0]);
                     nick = nick[1..];
                 }
                 const bang = std.mem.indexOfScalar(u8, nick, '!') orelse nick.len;
@@ -425,11 +481,11 @@ pub const Transcript = struct {
                 const existing = self.findRosterIndex(nick);
                 const index = try self.ensureParticipant(
                     nick,
-                    std.ascii.eqlIgnoreCase(nick, self_nick),
+                    irc_map.eql(self.casemapping, nick, self_nick),
                 );
                 if (existing == null or self.roster.items[index].departed) changed = true;
                 self.roster.items[index].departed = false;
-                self.roster.items[index].away = false;
+                self.roster.items[index].names_generation = self.names_generation;
                 if (self.roster.items[index].role != role) changed = true;
                 self.roster.items[index].role = role;
                 self.roster.items[index].status_modes = status_modes;
@@ -437,16 +493,34 @@ pub const Transcript = struct {
             return changed;
         }
 
+        if (std.ascii.eqlIgnoreCase(msg.command, "366")) {
+            const names_channel = endOfNamesChannel(msg) orelse return false;
+            if (!irc_map.eql(self.casemapping, names_channel, channel)) return false;
+            if (!self.names_sync_active) {
+                self.names_generation +%= 1;
+            }
+            self.names_sync_active = false;
+            var changed = false;
+            for (self.roster.items) |*entry| {
+                if (entry.names_generation == self.names_generation) continue;
+                if (entry.is_self) continue;
+                if (entry.departed) continue;
+                entry.departed = true;
+                changed = true;
+            }
+            return changed;
+        }
+
         if (std.ascii.eqlIgnoreCase(msg.command, "JOIN")) {
             const joined_channel = msg.param(0) orelse return false;
-            if (!std.ascii.eqlIgnoreCase(joined_channel, channel)) return false;
+            if (!irc_map.eql(self.casemapping, joined_channel, channel)) return false;
             const prefix = msg.prefix orelse return false;
             const nick = nickFromPrefix(prefix);
             if (nick.len == 0) return false;
             const existing = self.findRosterIndex(nick);
             const index = try self.ensureParticipant(
                 nick,
-                std.ascii.eqlIgnoreCase(nick, self_nick),
+                irc_map.eql(self.casemapping, nick, self_nick),
             );
             const changed = existing == null or self.roster.items[index].departed;
             self.roster.items[index].departed = false;
@@ -458,46 +532,55 @@ pub const Transcript = struct {
 
         if (std.ascii.eqlIgnoreCase(msg.command, "MODE")) {
             if (msg.param_count < 2) return false;
-            if (!std.ascii.eqlIgnoreCase(msg.params[0], channel)) return false;
+            if (!irc_map.eql(self.casemapping, msg.params[0], channel)) return false;
             const modes = msg.params[1];
             var adding = true;
             var parameter_index: usize = 2;
             var changed = false;
-            for (modes) |mode| switch (mode) {
-                '+' => adding = true,
-                '-' => adding = false,
-                'q', 'a', 'o', 'h', 'v' => {
+            for (modes) |mode| {
+                if (mode == '+') {
+                    adding = true;
+                    continue;
+                }
+                if (mode == '-') {
+                    adding = false;
+                    continue;
+                }
+                if (self.prefixes.isMode(mode)) {
                     if (parameter_index >= msg.param_count) continue;
                     const nick = msg.params[parameter_index];
                     parameter_index += 1;
                     const index = self.findRosterIndex(nick) orelse continue;
-                    const bit = modeBit(mode);
+                    const bit = self.prefixes.bitForMode(mode);
                     const old_modes = self.roster.items[index].status_modes;
                     if (adding)
                         self.roster.items[index].status_modes |= bit
                     else
                         self.roster.items[index].status_modes &= ~bit;
                     if (old_modes != self.roster.items[index].status_modes) changed = true;
-                    const replacement = highestRoleForModes(self.roster.items[index].status_modes);
+                    const replacement = self.highestRoleForModes(self.roster.items[index].status_modes);
                     if (replacement != self.roster.items[index].role) {
                         self.roster.items[index].role = replacement;
                         changed = true;
                     }
-                },
-                'b', 'e', 'I', 'k' => {
+                    continue;
+                }
+                if (self.chanmodes.takesParam(mode, adding)) {
                     if (parameter_index < msg.param_count) parameter_index += 1;
-                },
-                'l' => {
-                    if (adding and parameter_index < msg.param_count) parameter_index += 1;
-                },
-                else => {},
-            };
+                }
+            }
             return changed;
+        }
+
+        if (std.ascii.eqlIgnoreCase(msg.command, "KICK")) {
+            if (msg.param_count < 2) return false;
+            if (!irc_map.eql(self.casemapping, msg.params[0], channel)) return false;
+            return self.markDeparted(msg.params[1]);
         }
 
         if (std.ascii.eqlIgnoreCase(msg.command, "PART")) {
             const parted_channel = msg.param(0) orelse return false;
-            if (!std.ascii.eqlIgnoreCase(parted_channel, channel)) return false;
+            if (!irc_map.eql(self.casemapping, parted_channel, channel)) return false;
             const prefix = msg.prefix orelse return false;
             return self.markDeparted(nickFromPrefix(prefix));
         }
@@ -505,6 +588,29 @@ pub const Transcript = struct {
         if (std.ascii.eqlIgnoreCase(msg.command, "QUIT")) {
             const prefix = msg.prefix orelse return false;
             return self.markDeparted(nickFromPrefix(prefix));
+        }
+
+        if (std.ascii.eqlIgnoreCase(msg.command, "AWAY")) {
+            const prefix = msg.prefix orelse return false;
+            const nick = nickFromPrefix(prefix);
+            if (nick.len == 0) return false;
+            const index = try self.ensureParticipant(nick, irc_map.eql(self.casemapping, nick, self_nick));
+            const away = if (msg.param(0)) |text| text.len != 0 else false;
+            if (self.roster.items[index].away == away) return false;
+            self.roster.items[index].away = away;
+            return true;
+        }
+
+        if (std.ascii.eqlIgnoreCase(msg.command, "KILL")) {
+            return self.markDeparted(msg.param(0) orelse return false);
+        }
+
+        if (std.mem.eql(u8, msg.command, "301")) {
+            const nick = msg.param(1) orelse return false;
+            const index = try self.ensureParticipant(nick, irc_map.eql(self.casemapping, nick, self_nick));
+            if (self.roster.items[index].away) return false;
+            self.roster.items[index].away = true;
+            return true;
         }
 
         if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
@@ -521,7 +627,11 @@ pub const Transcript = struct {
                     var target = &self.roster.items[new_index];
                     target.avatar = old.avatar;
                     target.is_self = target.is_self or old.is_self;
-                    target.departed = old.departed;
+                    // Keep the surviving identity present if either side is
+                    // still in the room. A departed ghost must not evict an
+                    // active homonym during a nick collision merge.
+                    target.departed = target.departed and old.departed;
+                    target.away = target.away or old.away;
                     target.role = highestRole(target.role, old.role);
                     target.status_modes |= old.status_modes;
                     target.sends = saturatingAdd(target.sends, old.sends);
@@ -660,7 +770,7 @@ pub const Transcript = struct {
             if (pending_annotation) |wire| {
                 if (udi.parseAnnotation(wire)) |decoded| {
                     annotation = decoded;
-                    modes = decoded.modes;
+                    modes = if (is_private) udi.privateModes(decoded.modes) else decoded.modes;
                 } else |_| {}
             }
         }
@@ -739,14 +849,35 @@ pub const Transcript = struct {
     /// bubble. Returns false for any other message.
     pub fn consumeAwayControl(self: *Transcript, nick: []const u8, wire: []const u8) !bool {
         const message_text = ctcpAwayMessage(wire) orelse return false;
-        const index = try self.ensureParticipant(nick, false);
-        self.roster.items[index].away = message_text.len != 0;
+        _ = try self.setAway(nick, message_text.len != 0);
         return true;
+    }
+
+    pub fn setAway(self: *Transcript, nick: []const u8, away: bool) !bool {
+        const index = try self.ensureParticipant(nick, false);
+        if (self.roster.items[index].away == away) return false;
+        self.roster.items[index].away = away;
+        return true;
+    }
+
+    pub fn applyIsupport(self: *Transcript, maps: irc_map.Advertised) void {
+        self.casemapping = maps.casemapping;
+        self.prefixes = maps.prefixes;
+        self.chanmodes = maps.chanmodes;
+    }
+
+    fn highestRoleForModes(self: *const Transcript, modes: u8) MemberRole {
+        var index: usize = 0;
+        while (index < self.prefixes.len) : (index += 1) {
+            if (modes & self.prefixes.bitForIndex(index) == 0) continue;
+            return roleForMode(self.prefixes.modes[index]);
+        }
+        return .member;
     }
 
     fn findRosterIndex(self: *const Transcript, nick: []const u8) ?usize {
         for (self.roster.items, 0..) |entry, index| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, nick)) return index;
+            if (irc_map.eql(self.casemapping, entry.nick, nick)) return index;
         }
         return null;
     }
@@ -808,62 +939,54 @@ test "every generated backdrop is accepted for local and remote comic state" {
     }
 }
 
-fn isNickStatus(ch: u8) bool {
-    return ch == '~' or ch == '&' or ch == '@' or ch == '%' or ch == '+';
+/// RFC 2812 `353 <me> <type> <channel> :<nicks>` plus the 3-parameter form
+/// and a glued type prefix (`=#room`). The last parameter is always the
+/// nick list; the channel is the last earlier token that looks like one.
+fn namesReplyChannel(msg: *const irc_message.Message) ?[]const u8 {
+    if (msg.param_count < 2) return null;
+    var index = msg.param_count - 2;
+    while (true) {
+        if (channelToken(msg.params[index])) |channel| return channel;
+        if (index == 0) break;
+        index -= 1;
+    }
+    return null;
 }
 
-fn roleForPrefix(ch: u8) MemberRole {
-    return switch (ch) {
-        '~', '&' => .owner,
-        '@' => .operator,
-        '%' => .halfop,
-        '+' => .voice,
-        else => .member,
-    };
+/// RFC 2812 `366 <me> <channel> :End of /NAMES list`.
+fn endOfNamesChannel(msg: *const irc_message.Message) ?[]const u8 {
+    if (msg.param_count >= 2) {
+        if (channelToken(msg.params[1])) |channel| return channel;
+    }
+    if (msg.param_count >= 1) return channelToken(msg.params[0]);
+    return null;
 }
 
-fn modeBitForPrefix(ch: u8) u8 {
-    return switch (ch) {
-        '~' => modeBit('q'),
-        '&' => modeBit('a'),
-        '@' => modeBit('o'),
-        '%' => modeBit('h'),
-        '+' => modeBit('v'),
-        else => 0,
-    };
+fn channelToken(token: []const u8) ?[]const u8 {
+    var value = token;
+    if (value.len >= 2 and
+        (value[0] == '=' or value[0] == '*' or value[0] == '@') and
+        isChannelPrefix(value[1]))
+        value = value[1..];
+    return if (value.len > 0 and isChannelPrefix(value[0])) value else null;
+}
+
+fn isChannelPrefix(ch: u8) bool {
+    return ch == '#' or ch == '&' or ch == '+' or ch == '!';
 }
 
 fn roleForMode(mode: u8) MemberRole {
     return switch (mode) {
-        'q', 'a' => .owner,
+        'Y', 'Q', 'q', 'a' => .owner,
         'o' => .operator,
         'h' => .halfop,
         'v' => .voice,
-        else => .member,
+        else => .owner,
     };
 }
 
 fn highestRole(a: MemberRole, b: MemberRole) MemberRole {
     return if (@intFromEnum(a) >= @intFromEnum(b)) a else b;
-}
-
-fn modeBit(mode: u8) u8 {
-    return switch (mode) {
-        'q' => 1 << 5,
-        'a' => 1 << 4,
-        'o' => 1 << 3,
-        'h' => 1 << 2,
-        'v' => 1 << 1,
-        else => 0,
-    };
-}
-
-fn highestRoleForModes(modes: u8) MemberRole {
-    if (modes & (modeBit('q') | modeBit('a')) != 0) return .owner;
-    if (modes & modeBit('o') != 0) return .operator;
-    if (modes & modeBit('h') != 0) return .halfop;
-    if (modes & modeBit('v') != 0) return .voice;
-    return .member;
 }
 
 fn saturatingAdd(a: u32, b: u32) u32 {
@@ -1065,6 +1188,106 @@ test "live roster follows NAMES membership speech and current avatars" {
     try std.testing.expect(try transcript.observeIrc(&join, "#room", "Me"));
     try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alicia").?].departed);
     try std.testing.expectEqual(@as(usize, 2), transcript.activeMemberCount());
+
+    var kick = irc_message.parse(":op!u@h KICK #room Alicia :out");
+    try std.testing.expect(try transcript.observeIrc(&kick, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alicia").?].departed);
+    try std.testing.expectEqual(@as(usize, 1), transcript.activeMemberCount());
+
+    var rejoin = irc_message.parse(":Alicia!u@h JOIN :#room");
+    try std.testing.expect(try transcript.observeIrc(&rejoin, "#room", "Me"));
+    var ban_then_op = irc_message.parse(":op!u@h MODE #room +bo bad!*@* Alicia");
+    try std.testing.expect(try transcript.observeIrc(&ban_then_op, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.operator, transcript.roster.items[transcript.findRosterIndex("Alicia").?].role);
+    var empty_kick = irc_message.parse(":op!u@h KICK #room Alicia");
+    try std.testing.expect(try transcript.observeIrc(&empty_kick, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alicia").?].departed);
+}
+
+test "NAMES 366 retires members missing from the snapshot" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+
+    try transcript.setSelf("Me");
+    var first = irc_message.parse(":server 353 Me = #room :@Me +Alice Bob");
+    try std.testing.expect(try transcript.observeIrc(&first, "#room", "Me"));
+    var end_first = irc_message.parse(":server 366 Me #room :End of /NAMES list");
+    try std.testing.expect(!try transcript.observeIrc(&end_first, "#room", "Me"));
+    try std.testing.expectEqual(@as(usize, 3), transcript.activeMemberCount());
+
+    var reconnect = irc_message.parse(":server 353 Me = #room :@Me +Alice");
+    _ = try transcript.observeIrc(&reconnect, "#room", "Me");
+    var end_reconnect = irc_message.parse(":server 366 Me #room :End of /NAMES list");
+    try std.testing.expect(try transcript.observeIrc(&end_reconnect, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Bob").?].departed);
+    try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alice").?].departed);
+    try std.testing.expectEqual(@as(usize, 2), transcript.activeMemberCount());
+}
+
+test "353 does not clear away and accepts compact channel tokens" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+
+    try transcript.setSelf("Me");
+    try std.testing.expect(try transcript.consumeAwayControl("Alice", "\x01AWAY coffee\x01"));
+    var compact = irc_message.parse(":server 353 Me =#room :@Me +Alice");
+    try std.testing.expect(try transcript.observeIrc(&compact, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alice").?].away);
+
+    var three_param = irc_message.parse(":server 353 Me #room :@Me +Alice Carol");
+    try std.testing.expect(try transcript.observeIrc(&three_param, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alice").?].away);
+    try std.testing.expect(transcript.findRosterIndex("Carol") != null);
+}
+
+test "nick collision merge keeps an active member present" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+
+    try transcript.setSelf("Me");
+    var names = irc_message.parse(":server 353 Me = #room :Me Old Alice");
+    try std.testing.expect(try transcript.observeIrc(&names, "#room", "Me"));
+    try std.testing.expect(try transcript.setAway("Alice", true));
+    var part = irc_message.parse(":Old!u@h PART #room");
+    try std.testing.expect(try transcript.observeIrc(&part, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Old").?].departed);
+    var rename = irc_message.parse(":Old!u@h NICK :Alice");
+    try std.testing.expect(try transcript.observeIrc(&rename, "#room", "Me"));
+    try std.testing.expect(transcript.findRosterIndex("Old") == null);
+    try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alice").?].departed);
+    try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alice").?].away);
+}
+
+test "live roster applies advertised Onyx PREFIX symbols" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+    transcript.applyIsupport(.{ .casemapping = .ascii, .prefixes = irc_map.PrefixMap.parse("(YQqov)*!.@+").? });
+    try transcript.setSelf("Me");
+    var names = irc_message.parse(":server 353 Me = #room :*Me !Alice .Bob @Carol +Dave Eve %Keep");
+    try std.testing.expect(try transcript.observeIrc(&names, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Me").?].role);
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Alice").?].role);
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Bob").?].role);
+    try std.testing.expectEqual(MemberRole.operator, transcript.roster.items[transcript.findRosterIndex("Carol").?].role);
+    try std.testing.expectEqual(MemberRole.voice, transcript.roster.items[transcript.findRosterIndex("Dave").?].role);
+    try std.testing.expectEqual(MemberRole.member, transcript.roster.items[transcript.findRosterIndex("Eve").?].role);
+    try std.testing.expectEqual(MemberRole.member, transcript.roster.items[transcript.findRosterIndex("%Keep").?].role);
+    try std.testing.expect(transcript.findRosterIndex("*Me") == null);
+    var promote = irc_message.parse(":server MODE #room +Q Eve");
+    try std.testing.expect(try transcript.observeIrc(&promote, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Eve").?].role);
+    transcript.applyIsupport(.{
+        .casemapping = .ascii,
+        .prefixes = irc_map.PrefixMap.parse("(YQqov)*!.@+").?,
+        .chanmodes = irc_map.ChanModes.parse("beIZ,k,lfj,imnstCTNMSgWOAVUFD"),
+    });
+    var flood_then_op = irc_message.parse(":op!u@h MODE #room +Zfo secretfilter 10 Dave");
+    try std.testing.expect(try transcript.observeIrc(&flood_then_op, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.operator, transcript.roster.items[transcript.findRosterIndex("Dave").?].role);
 }
 
 test "page break insertion and selected line removal preserve ownership and tallies" {
@@ -1204,6 +1427,13 @@ test "source action preparation prefixes the speaker for comic and CTCP forms" {
     try transcript.addWireMessage("Cro", "waves", false, "#G000E000M5");
     try std.testing.expectEqualStrings("Cro waves", transcript.lines.items[2].text);
     try std.testing.expectEqual(original_page.bm_action, transcript.lines.items[2].modes);
+
+    try transcript.addWireMessage("Dan", "psst", true, "#G000E000M5");
+    try std.testing.expectEqualStrings("Dan psst", transcript.lines.items[3].text);
+    try std.testing.expectEqual(
+        original_page.bm_action | original_page.bm_whisper,
+        transcript.lines.items[3].modes,
+    );
 }
 
 test "source SOUND control becomes an action box with sender and filename" {
@@ -1221,6 +1451,24 @@ test "source SOUND control becomes an action box with sender and filename" {
 
     try transcript.addWireMessage("Cro", "\x01SOUND Door\x10@bell.wav come in\x01", false, null);
     try std.testing.expectEqualStrings("Cro come in (Door bell.wav)", transcript.lines.items[2].text);
+
+    try transcript.addWireMessage("Dan", "\x01sound chime quietly\x01", false, null);
+    try std.testing.expectEqualStrings("Dan quietly (chime)", transcript.lines.items[3].text);
+    try transcript.addWireMessage("Eve", "\x01action waves\x01", false, null);
+    try std.testing.expectEqualStrings("Eve waves", transcript.lines.items[4].text);
+    try std.testing.expectEqual(original_page.bm_action, transcript.lines.items[4].modes);
+}
+
+test "legacy BDrop matching the last BDrop2 base does not replace the backdrop" {
+    var transcript = Transcript.init(std.testing.allocator);
+    defer transcript.deinit();
+
+    try std.testing.expect(try transcript.applyBackdropControl(parseBackdropControl(" BDrop2: Volcano.bgb,")));
+    try std.testing.expectEqualStrings("volcano", transcript.resolvedBackdrop());
+    try std.testing.expect(try transcript.applyBackdropControl(parseBackdropControl(" BDrop:  Volcano")));
+    try std.testing.expectEqualStrings("volcano", transcript.resolvedBackdrop());
+    try std.testing.expect(try transcript.applyBackdropControl(parseBackdropControl(" BDrop:  room")));
+    try std.testing.expectEqualStrings("room", transcript.resolvedBackdrop());
 }
 
 test "source AWAY control updates roster without adding a comic line" {
@@ -1234,5 +1482,21 @@ test "source AWAY control updates roster without adding a comic line" {
 
     try std.testing.expect(try transcript.consumeAwayControl("Alice", "\x01AWAY\x01"));
     try std.testing.expect(!transcript.roster.items[alice].away);
+
+    var away_notify = irc_message.parse(":Alice!u@h AWAY :afk");
+    try std.testing.expect(try transcript.observeIrc(&away_notify, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[alice].away);
+    var back = irc_message.parse(":Alice!u@h AWAY");
+    try std.testing.expect(try transcript.observeIrc(&back, "#room", "Me"));
+    try std.testing.expect(!transcript.roster.items[alice].away);
+
+    var rpl_away = irc_message.parse(":server 301 Me Bob :gone fishing");
+    try std.testing.expect(try transcript.observeIrc(&rpl_away, "#room", "Me"));
+    const bob = transcript.findRosterIndex("Bob").?;
+    try std.testing.expect(transcript.roster.items[bob].away);
+
+    var kill = irc_message.parse(":oper!u@h KILL Bob :banned");
+    try std.testing.expect(try transcript.observeIrc(&kill, "#room", "Me"));
+    try std.testing.expect(transcript.roster.items[bob].departed);
     try std.testing.expect(!try transcript.consumeAwayControl("Alice", "ordinary text"));
 }

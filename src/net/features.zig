@@ -6,12 +6,14 @@
 
 const std = @import("std");
 const message = @import("message.zig");
+const irc_map = @import("irc_map.zig");
 
 pub const Limits = struct {
     max_open_batches: usize = 32,
     max_batch_lines: usize = 1024,
     max_batch_bytes: usize = 1024 * 1024,
     max_pending_echoes: usize = 256,
+    max_seen_msgids: usize = 256,
     max_outstanding_labels: usize = 512,
     max_state_entries: usize = 4096,
 };
@@ -69,7 +71,17 @@ pub const State = struct {
     read_markers: std.ArrayList(ReadMarker) = .empty,
     metadata: std.ArrayList(Metadata) = .empty,
     isupport_tokens: std.ArrayList(IsupportToken) = .empty,
+    casemapping: irc_map.CaseMapping = .rfc1459,
+    prefixes: irc_map.PrefixMap = .default,
+    chantypes: irc_map.ChanTypes = .default,
+    chanmodes: irc_map.ChanModes = .default,
+    statusmsg: irc_map.StatusMsg = .default,
+    session_limits: irc_map.SessionLimits = .{},
+    extban: irc_map.Extban = .{},
+    network: [64]u8 = @splat(0),
+    network_len: u8 = 0,
     redacted_ids: std.ArrayList([]u8) = .empty,
+    seen_msgids: std.ArrayList([]u8) = .empty,
     pending_echoes: std.ArrayList(Echo) = .empty,
     outstanding_labels: std.ArrayList(Label) = .empty,
     completed_labels: std.ArrayList([]u8) = .empty,
@@ -105,6 +117,7 @@ pub const State = struct {
         }
         self.isupport_tokens.deinit(self.gpa);
         freeStringList(self.gpa, &self.redacted_ids);
+        freeStringList(self.gpa, &self.seen_msgids);
         for (self.pending_echoes.items) |entry| {
             self.gpa.free(entry.target);
             self.gpa.free(entry.text);
@@ -120,7 +133,7 @@ pub const State = struct {
 
     pub fn identity(self: *const State, nick: []const u8) ?*const Identity {
         for (self.identities.items) |*entry| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, nick)) return entry;
+            if (irc_map.eql(self.casemapping, entry.nick, nick)) return entry;
         }
         return null;
     }
@@ -207,7 +220,14 @@ pub const State = struct {
         } else if (std.ascii.eqlIgnoreCase(msg.command, "SETNAME")) {
             try self.setIdentityField(source_nick, .realname, msg.param(0));
         } else if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
-            if (msg.param(0)) |new_nick| try self.renameIdentity(source_nick, new_nick);
+            if (msg.param(0)) |new_nick| {
+                try self.renameIdentity(source_nick, new_nick);
+                if (source_nick.len != 0 and irc_map.eql(self.casemapping, source_nick, self.self_nick)) {
+                    const owned = try self.gpa.dupe(u8, new_nick);
+                    self.gpa.free(self.self_nick);
+                    self.self_nick = owned;
+                }
+            }
         } else if (std.ascii.eqlIgnoreCase(msg.command, "JOIN") and msg.param_count >= 3) {
             const account = msg.param(1).?;
             try self.setIdentityField(source_nick, .account, if (std.mem.eql(u8, account, "*")) null else account);
@@ -231,16 +251,22 @@ pub const State = struct {
 
         if (msg.tag("msgid")) |tag| if (tag.raw_value) |msgid| {
             if (stringListContains(self.redacted_ids.items, msgid)) return true;
+            if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
+                std.ascii.eqlIgnoreCase(msg.command, "NOTICE") or
+                std.ascii.eqlIgnoreCase(msg.command, "TAGMSG"))
+            {
+                if (try self.noteSeenMsgid(msgid)) return true;
+            }
         };
 
         if ((std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
             std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) and
-            std.ascii.eqlIgnoreCase(source_nick, self.self_nick))
+            irc_map.eql(self.casemapping, source_nick, self.self_nick))
         {
             const target = msg.param(0) orelse "";
             const text = msg.param(1) orelse "";
             for (self.pending_echoes.items, 0..) |entry, index| {
-                if (!std.ascii.eqlIgnoreCase(entry.target, target) or !std.mem.eql(u8, entry.text, text)) continue;
+                if (!irc_map.eql(self.casemapping, entry.target, target) or !std.mem.eql(u8, entry.text, text)) continue;
                 const matched = self.pending_echoes.orderedRemove(index);
                 self.gpa.free(matched.target);
                 self.gpa.free(matched.text);
@@ -252,7 +278,7 @@ pub const State = struct {
 
     fn ensureIdentity(self: *State, nick: []const u8) !*Identity {
         for (self.identities.items) |*entry| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, nick)) return entry;
+            if (irc_map.eql(self.casemapping, entry.nick, nick)) return entry;
         }
         if (nick.len == 0) return error.InvalidIdentityEvent;
         if (self.identities.items.len >= self.limits.max_state_entries) return error.StateBackpressure;
@@ -334,6 +360,116 @@ pub const State = struct {
             const value = if (equals < raw.len) raw[equals + 1 ..] else null;
             try self.putIsupport(name, value);
         }
+        self.refreshAdvertisedMaps();
+    }
+
+    pub fn networkName(self: *const State) []const u8 {
+        return self.network[0..self.network_len];
+    }
+
+    pub fn advertised(self: *const State) irc_map.Advertised {
+        return .{
+            .casemapping = self.casemapping,
+            .prefixes = self.prefixes,
+            .chantypes = self.chantypes,
+            .chanmodes = self.chanmodes,
+            .statusmsg = self.statusmsg,
+            .session_limits = self.session_limits,
+            .extban = self.extban,
+        };
+    }
+
+    fn refreshAdvertisedMaps(self: *State) void {
+        self.casemapping = if (self.isupport("CASEMAPPING")) |token|
+            irc_map.parseCaseMapping(token.value orelse "")
+        else
+            .rfc1459;
+        self.prefixes = if (self.isupport("PREFIX")) |token|
+            if (token.value) |value| irc_map.PrefixMap.parse(value) orelse .default else .default
+        else
+            .default;
+        self.chantypes = if (self.isupport("CHANTYPES")) |token|
+            if (token.value) |value| irc_map.ChanTypes.parse(value) else .default
+        else
+            .default;
+        self.chanmodes = if (self.isupport("CHANMODES")) |token|
+            if (token.value) |value| irc_map.ChanModes.parse(value) else .default
+        else
+            .default;
+        self.statusmsg = if (self.isupport("STATUSMSG")) |token|
+            if (token.value) |value| irc_map.StatusMsg.parse(value) else irc_map.StatusMsg.fromPrefix(self.prefixes)
+        else
+            irc_map.StatusMsg.fromPrefix(self.prefixes);
+        self.session_limits = .{};
+        if (self.isupport("NICKLEN")) |token| if (token.value) |value| {
+            self.session_limits.nicklen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("CHANNELLEN")) |token| if (token.value) |value| {
+            self.session_limits.channellen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("TOPICLEN")) |token| if (token.value) |value| {
+            self.session_limits.topiclen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("AWAYLEN")) |token| if (token.value) |value| {
+            self.session_limits.awaylen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("KICKLEN")) |token| if (token.value) |value| {
+            self.session_limits.kicklen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("KEYLEN")) |token| if (token.value) |value| {
+            self.session_limits.keylen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("CHANLIMIT")) |token| if (token.value) |value| {
+            self.session_limits.chanlimit = irc_map.SessionLimits.parseChanlimit(value);
+        };
+        if (self.isupport("MAXTARGETS")) |token| if (token.value) |value| {
+            self.session_limits.maxtargets = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("MONITOR")) |token| if (token.value) |value| {
+            self.session_limits.monitor = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("SILENCE")) |token| if (token.value) |value| {
+            self.session_limits.silence = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("MODES")) |token| if (token.value) |value| {
+            self.session_limits.modes = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("MAXLIST")) |token| if (token.value) |value| {
+            self.session_limits.maxlist = irc_map.SessionLimits.parseMaxlist(value);
+        };
+        if (self.isupport("BOT")) |token| if (token.value) |value| {
+            self.session_limits.bot = if (value.len != 0) value[0] else 0;
+        };
+        if (self.isupport("EXCEPTS")) |token| {
+            self.session_limits.excepts = if (token.value) |value|
+                if (value.len != 0) value[0] else 'e'
+            else
+                'e';
+        }
+        if (self.isupport("INVEX")) |token| {
+            self.session_limits.invex = if (token.value) |value|
+                if (value.len != 0) value[0] else 'I'
+            else
+                'I';
+        }
+        if (self.isupport("CHATHISTORY")) |token| if (token.value) |value| {
+            self.session_limits.chathistory = irc_map.SessionLimits.parseCount(value);
+        };
+        self.session_limits.whox = self.isupport("WHOX") != null;
+        self.session_limits.utf8only = self.isupport("UTF8ONLY") != null;
+        self.extban = if (self.isupport("EXTBAN")) |token|
+            if (token.value) |value| irc_map.Extban.parse(value) else .{}
+        else
+            .{};
+        if (self.isupport("ACCOUNTEXTBAN")) |token| if (token.value) |value| {
+            if (value.len != 0) self.extban.addType(value[0]);
+        };
+        self.network_len = 0;
+        if (self.isupport("NETWORK")) |token| if (token.value) |value| {
+            const n = @min(value.len, self.network.len);
+            @memcpy(self.network[0..n], value[0..n]);
+            self.network_len = @intCast(n);
+        };
     }
 
     fn putIsupport(self: *State, name: []const u8, value: ?[]const u8) !void {
@@ -367,8 +503,8 @@ pub const State = struct {
         var old_index: ?usize = null;
         var new_index: ?usize = null;
         for (self.identities.items, 0..) |entry, index| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, old_nick)) old_index = index;
-            if (std.ascii.eqlIgnoreCase(entry.nick, new_nick)) new_index = index;
+            if (irc_map.eql(self.casemapping, entry.nick, old_nick)) old_index = index;
+            if (irc_map.eql(self.casemapping, entry.nick, new_nick)) new_index = index;
         }
         const source_index = old_index orelse return;
         if (new_index) |target_index| {
@@ -400,6 +536,19 @@ pub const State = struct {
         const owned = try self.gpa.dupe(u8, msgid);
         errdefer self.gpa.free(owned);
         try self.redacted_ids.append(self.gpa, owned);
+    }
+
+    /// Returns true when this msgid was already delivered (bouncer + CHATHISTORY overlap).
+    fn noteSeenMsgid(self: *State, msgid: []const u8) !bool {
+        if (stringListContains(self.seen_msgids.items, msgid)) return true;
+        if (self.seen_msgids.items.len >= self.limits.max_seen_msgids) {
+            const old = self.seen_msgids.orderedRemove(0);
+            self.gpa.free(old);
+        }
+        const owned = try self.gpa.dupe(u8, msgid);
+        errdefer self.gpa.free(owned);
+        try self.seen_msgids.append(self.gpa, owned);
+        return false;
     }
 
     fn putStandardReply(self: *State, msg: *const message.Message) !void {
@@ -808,9 +957,41 @@ test "capability state tracks identity, rename, marker, metadata, and standard r
     _ = try state.observe(&message.parse(":irc 005 self UTF8ONLY CHATHISTORY=100 CLIENTTAGDENY=typing draft/ICON=https://example/icon.png :are supported"));
     try std.testing.expect(state.isupport("utf8only") != null);
     try std.testing.expectEqualStrings("100", state.isupport("CHATHISTORY").?.value.?);
+    try std.testing.expectEqual(@as(usize, 100), state.session_limits.chathistory);
     try std.testing.expectEqualStrings("https://example/icon.png", state.isupport("draft/icon").?.value.?);
     _ = try state.observe(&message.parse(":irc 005 self -UTF8ONLY :are supported"));
     try std.testing.expect(state.isupport("UTF8ONLY") == null);
+    _ = try state.observe(&message.parse(":irc 005 self CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& STATUSMSG=!.@+ CHANMODES=beIZ,k,lfj,imnstCTNMSgWOAVUFD NICKLEN=64 CHANNELLEN=64 KEYLEN=64 TOPICLEN=390 AWAYLEN=256 KICKLEN=307 CHANLIMIT=#&:50 :are supported"));
+    try std.testing.expectEqual(irc_map.CaseMapping.ascii, state.casemapping);
+    try std.testing.expect(state.prefixes.isSymbol('*'));
+    try std.testing.expect(state.prefixes.isMode('Y'));
+    try std.testing.expect(!state.prefixes.isSymbol('~'));
+    try std.testing.expect(state.chantypes.contains('#'));
+    try std.testing.expect(state.chanmodes.takesParam('Z', true));
+    try std.testing.expect(state.chanmodes.takesParam('f', true));
+    try std.testing.expect(!state.statusmsg.contains('*'));
+    try std.testing.expect(state.statusmsg.contains('!'));
+    try std.testing.expectEqual(@as(usize, 64), state.session_limits.nicklen);
+    try std.testing.expectEqual(@as(usize, 50), state.session_limits.chanlimit);
+    try std.testing.expectEqual(@as(usize, 390), state.session_limits.topiclen);
+    _ = try state.observe(&message.parse(":irc 005 self NETWORK=Onyx MAXTARGETS=4 MONITOR=128 SILENCE=32 MODES=1 MAXLIST=beIZ:100 EXTBAN=$,cgmrz ACCOUNTEXTBAN=a EXCEPTS=e INVEX=I BOT=B WHOX :are supported"));
+    try std.testing.expectEqualStrings("Onyx", state.networkName());
+    try std.testing.expectEqual(@as(usize, 4), state.session_limits.maxtargets);
+    try std.testing.expectEqual(@as(usize, 128), state.session_limits.monitor);
+    try std.testing.expectEqual(@as(usize, 32), state.session_limits.silence);
+    try std.testing.expectEqual(@as(usize, 1), state.session_limits.modes);
+    try std.testing.expectEqual(@as(usize, 100), state.session_limits.maxlist);
+    try std.testing.expect(state.session_limits.whox);
+    try std.testing.expectEqual(@as(u8, 'B'), state.session_limits.bot);
+    try std.testing.expectEqual(@as(u8, 'e'), state.session_limits.excepts);
+    try std.testing.expectEqual(@as(u8, 'I'), state.session_limits.invex);
+    try std.testing.expect(state.extban.allows('a'));
+    try std.testing.expect(state.extban.allows('c'));
+    try std.testing.expect(!state.extban.allows('x'));
+    _ = try state.observe(&message.parse(":irc 005 self -NICKLEN :are supported"));
+    try std.testing.expectEqual(@as(usize, 0), state.session_limits.nicklen);
+    try std.testing.expectEqual(@as(usize, 50), state.session_limits.chanlimit);
+    try std.testing.expectEqualStrings("Onyx", state.networkName());
 }
 
 test "echo dedupe, redaction tombstones, and labels are bounded owned state" {
@@ -821,8 +1002,17 @@ test "echo dedupe, redaction tombstones, and labels are bounded owned state" {
     try std.testing.expect(try state.observe(&message.parse(":me!u@h PRIVMSG #c hello")));
     try std.testing.expect(!try state.observe(&message.parse(":me!u@h PRIVMSG #c hello")));
 
+    _ = try state.observe(&message.parse(":me!u@h NICK :renamed"));
+    try std.testing.expectEqualStrings("renamed", state.self_nick);
+    try state.recordEcho("#c", "after-nick");
+    try std.testing.expect(try state.observe(&message.parse(":renamed!u@h PRIVMSG #c after-nick")));
+    try std.testing.expect(!try state.observe(&message.parse(":renamed!u@h PRIVMSG #c after-nick")));
+
     _ = try state.observe(&message.parse(":op!u@h REDACT #c deadbeef :spam"));
     try std.testing.expect(try state.observe(&message.parse("@msgid=deadbeef :n!u@h PRIVMSG #c hidden")));
+
+    try std.testing.expect(!try state.observe(&message.parse("@msgid=live1 :alice!u@h PRIVMSG #c first")));
+    try std.testing.expect(try state.observe(&message.parse("@msgid=live1 :alice!u@h PRIVMSG #c first")));
 
     const label = try state.createLabel();
     var line: [128]u8 = undefined;

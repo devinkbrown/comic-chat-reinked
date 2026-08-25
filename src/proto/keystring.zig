@@ -25,11 +25,9 @@
 //! `ChatSetClientData` live PROP send (`ircproto.cpp:1395-1404`), plus the
 //! `CCQuery`/`CQueryPtrList` query-correlation plumbing in `query.cpp` and
 //! `query.h`. This module returns generic `{ key, ?value }` changes instead
-//! of performing I/O. `OnPropertyChange` currently recognizes `bk` as a
-//! backdrop (`protsupp.cpp:3455-3470`); a future live IRCX PROP caller can
-//! route that value into the existing `comic/session.zig` backdrop parser
-//! and `net/client.zig` synchronization path without duplicating either,
-//! once that live PROP plumbing exists.
+//! of performing I/O. `OnPropertyChange` recognizes `bk` as a backdrop
+//! (`protsupp.cpp:3455-3470`); live 818/PROP CLIENT replies feed that key
+//! into `Transcript.setBackdrop` for bundled names only.
 
 const std = @import("std");
 

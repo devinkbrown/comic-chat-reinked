@@ -19,7 +19,9 @@ means the server supports IRCX but it is not enabled, so the client sends
 `IRCX`; only the following numeric 800 state `1` enables `DATA ... CCUDI1`.
 An ISUPPORT advertisement does not substitute for that state transition. The
 portable client preserves this ordering, with modern CAP/SASL negotiation
-between the probe and NICK/USER registration commands.
+between the probe and NICK/USER. When SASL credentials are present, NICK/USER
+wait for a terminal SASL result and `CAP END` so the reserved account nick is
+not raced before `AUTHENTICATE`.
 
 The portable client secures that stream with the pinned Onyx TLS implementation
 at commit `06bb3500b4fd62e2f307cb4004340c58062c0f59`. TLS is the default and
@@ -274,8 +276,8 @@ disconnect the existing client.
 The pinned client-tag specifications are covered as well. Typed send methods
 produce `+draft/reply`, `+draft/react`, `+draft/unreact`, and rate-limited `+typing`
 messages when either generic `message-tags` or their corresponding narrow Onyx
-draft capability is enabled; incoming `TAGMSG` is not inserted into comic
-history by default.
+draft capability is enabled; incoming `TAGMSG`, `EDIT`, and `REDACT` appear as
+action lines in the live transcript and do not rewrite comic history.
 Onyx named conversations use the narrow `onyx/topics` capability and emit
 escaped `+onyx/topic=<label>` tags on `PRIVMSG` or `NOTICE`, without requiring
 generic tags. Contextual direct messages use
@@ -286,7 +288,9 @@ semantic policy; the daemon's generic client-tag relay itself is authorized by
 iterator. `msgid`, bot/oper tags, UTF8ONLY, CLIENTTAGDENY,
 CHATHISTORY, MSGREFTYPES, MONITOR, WHOX, BOT, NETWORK, and draft ICON
 advertisements are either interpreted by feature state or retained in the
-ISUPPORT map. WEBIRC and WebSocket are separate gateway/transport modes, not
+ISUPPORT map. Advertised `PREFIX`, `CASEMAPPING`, and `CHANTYPES` are applied
+to live NAMES/MODE decorations, nick/channel comparison, and STATUSMSG
+targets instead of remaining stored-only. WEBIRC and WebSocket are separate gateway/transport modes, not
 IRC capabilities, and are intentionally outside the native TCP/TLS transport.
 The deprecated `tls` STARTTLS capability and deprecated DH SASL mechanisms are
 deliberately not requested: the connection begins with verified TLS, and the
