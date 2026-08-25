@@ -2903,7 +2903,7 @@ fn applyDialogAction(
                     };
                     view.shell.selectMember(selected);
                     view.shell.setSayMode(.whisper);
-                } else if (std.ascii.eqlIgnoreCase(operation, "Invite to current room")) {
+                } else if (cc.client.dialogs.matchesAny(operation, &.{ "Invite CAST", "Invite to current room" })) {
                     const client = maybe_client orelse {
                         view.setDialogNotice("Connect before sending an invitation.");
                         return;

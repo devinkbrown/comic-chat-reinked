@@ -88,7 +88,7 @@ pub const specs = [_]Spec{
     .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Sign-in name", .group = .connection, .source_w = 188, .source_h = 71 },
     .{ .id = .channel, .resource = "IDD_CHANNEL", .title = "Join room", .group = .rooms, .source_w = 144, .source_h = 110 },
-    .{ .id = .channel_properties, .resource = "IDD_CHANNELPROP", .title = "Room properties", .group = .rooms, .source_w = 186, .source_h = 196 },
+    .{ .id = .channel_properties, .resource = "IDD_CHANNELPROP", .title = "Room details", .group = .rooms, .source_w = 186, .source_h = 196 },
     .{ .id = .ban, .resource = "IDD_BAN", .title = "Ban or release", .group = .rooms, .source_w = 186, .source_h = 170 },
     .{ .id = .invite, .resource = "IDD_INVITE", .title = "Invite CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .sound, .resource = "IDD_SOUND_DLG", .title = "Send sound", .group = .rooms, .source_w = 188, .source_h = 228 },
@@ -103,11 +103,11 @@ pub const specs = [_]Spec{
     .{ .id = .channel_password, .resource = "IDD_CHANPASSWORD", .title = "Room password", .group = .rooms, .source_w = 173, .source_h = 86 },
     .{ .id = .file_transfer, .resource = "IDD_FILE_TRANSFER", .title = "File transfer", .group = .files, .source_w = 300, .source_h = 236 },
     .{ .id = .motd, .resource = "IDD_MOTD", .title = "Bulletin", .group = .rooms, .source_w = 298, .source_h = 146 },
-    .{ .id = .setup, .resource = "IDD_SETUPDIALOG", .title = "Connection setup", .group = .connection, .source_w = 252, .source_h = 218 },
+    .{ .id = .setup, .resource = "IDD_SETUPDIALOG", .title = "Wire setup", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .away, .resource = "IDD_AWAYDLG", .title = "Away message", .group = .rooms, .source_w = 186, .source_h = 87 },
     .{ .id = .text_font, .resource = "IDD_TEXTFONTPAGE_IRC", .title = "Text font", .group = .connection, .source_w = 252, .source_h = 218 },
-    .{ .id = .choose_color, .resource = "IDD_CHOOSECOLOR", .title = "Choose color", .group = .connection, .source_w = 118, .source_h = 38 },
-    .{ .id = .invitation, .resource = "IDD_INVITATION", .title = "Invitation", .group = .rooms, .source_w = 186, .source_h = 93 },
+    .{ .id = .choose_color, .resource = "IDD_CHOOSECOLOR", .title = "Choose ink", .group = .connection, .source_w = 118, .source_h = 38 },
+    .{ .id = .invitation, .resource = "IDD_INVITATION", .title = "Room invitation", .group = .rooms, .source_w = 186, .source_h = 93 },
     .{ .id = .advanced_event_params, .resource = "IDD_ADVANCEDEVENTPARAMS", .title = "Rule limits", .group = .automation, .source_w = 186, .source_h = 85 },
     .{ .id = .rule_sets, .resource = "IDD_RULESETSPAGE", .title = "Rule sets", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .add_to_sets, .resource = "IDD_ADDTOSETS", .title = "Add to rule sets", .group = .automation, .source_w = 252, .source_h = 161 },
@@ -131,7 +131,7 @@ pub const specs = [_]Spec{
     .{ .id = .recent_files, .resource = "PORTABLE_RECENT_FILES", .title = "Recent conversations", .group = .files, .source_w = 340, .source_h = 150 },
     .{ .id = .favorite_rooms, .resource = "PORTABLE_FAVORITE_ROOMS", .title = "Favorite rooms", .group = .rooms, .source_w = 320, .source_h = 184 },
     .{ .id = .print_preview, .resource = "PORTABLE_PRINT_PREVIEW", .title = "Print and PDF preview", .group = .files, .source_w = 320, .source_h = 150 },
-    .{ .id = .connection_features, .resource = "PORTABLE_CONNECTION_FEATURES", .title = "Connection features", .group = .connection, .source_w = 360, .source_h = 210 },
+    .{ .id = .connection_features, .resource = "PORTABLE_CONNECTION_FEATURES", .title = "Wire features", .group = .connection, .source_w = 360, .source_h = 210 },
 };
 
 pub const microsoft_dialog_count: usize = 40;
@@ -301,7 +301,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             &.{},
         .notifications => if (index == 4) &.{ "In-app banner", "Sound and banner", "Disabled" } else &.{},
         .file_transfer => if (index == 0) &.{ "Send file", "Receive offer" } else &.{},
-        .notification_users => if (index == 2) &.{ "Refresh", "Whisper", "Invite to current room", "Join room", "Clear list" } else &.{},
+        .notification_users => if (index == 2) &.{ "Refresh", "Whisper", "Invite CAST", "Join room", "Clear list" } else &.{},
         .ircx_properties => if (index == 3) &.{ "Read", "Read common properties", "Write", "Remove" } else &.{},
         .room_access => if (index == 0)
             &.{ "Show", "Add", "Remove", "Clear all" }
@@ -333,7 +333,7 @@ pub fn requiresInput(id: Id) bool {
 
 pub fn primaryLabel(id: Id) []const u8 {
     return switch (id) {
-        .setup => "Connect",
+        .setup => "Open wire",
         .settings => "Apply settings",
         .servers => "Save changes",
         .personal => "Save card",
@@ -347,7 +347,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .channel => "Join room",
         .channel_create => "Create room",
         .kick => "Kick",
-        .ban => "Apply ban",
+        .ban => "Save ban",
         .invite => "Invite",
         .whisper => "Whisper",
         .file_transfer => "Start transfer",
@@ -371,7 +371,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .password => "Sign in",
         .channel_password => "Unlock room",
         .invitation => "Accept",
-        .channel_properties => "Apply room",
+        .channel_properties => "Save room",
         .sound => "Send",
     };
 }
@@ -443,7 +443,15 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Page layout", get(.comics_view).title);
     try std.testing.expectEqualStrings("Join room", get(.channel).title);
     try std.testing.expectEqualStrings("Whisper", get(.whisper).title);
-    try std.testing.expectEqualStrings("Connection setup", get(.setup).title);
+    try std.testing.expectEqualStrings("Wire setup", get(.setup).title);
+    try std.testing.expectEqualStrings("Wire features", get(.connection_features).title);
+    try std.testing.expectEqualStrings("Open wire", primaryLabel(.setup));
+    try std.testing.expectEqualStrings("Save ban", primaryLabel(.ban));
+    try std.testing.expectEqualStrings("Save room", primaryLabel(.channel_properties));
+    try std.testing.expectEqualStrings("Room details", get(.channel_properties).title);
+    try std.testing.expectEqualStrings("Choose ink", get(.choose_color).title);
+    try std.testing.expectEqualStrings("Room invitation", get(.invitation).title);
+    try std.testing.expectEqualStrings("Invite CAST", choiceOptions(.notification_users, 2)[2]);
     try std.testing.expectEqualStrings("Sign in", primaryLabel(.password));
     try std.testing.expectEqualStrings("Sign in", get(.password).title);
     try std.testing.expectEqualStrings("Backdrop", get(.background).title);

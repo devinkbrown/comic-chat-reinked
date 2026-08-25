@@ -264,8 +264,8 @@ pub const View = struct {
             .toolbar => switch (key) {
                 .left, .up => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, false, self.wire_live),
                 .right, .down => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, true, self.wire_live),
-                .home => self.focused_toolbar = 0,
-                .end => self.focused_toolbar = @intCast(ui.ToolbarLayout.button_count - 1),
+                .home => self.focused_toolbar = firstEnabledToolbar(self.wire_live),
+                .end => self.focused_toolbar = lastEnabledToolbar(self.wire_live),
                 .enter => return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]),
                 .char => |code| if (code == ' ') return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]) else return null,
                 .escape => {
@@ -337,8 +337,8 @@ pub const View = struct {
             },
             .up, .left => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse 0, false, self.can_moderate, self.wire_live),
             .down, .right => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate, self.wire_live),
-            .home => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live),
-            .end => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate, self.wire_live),
+            .home, .page_up => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live),
+            .end, .page_down => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate, self.wire_live),
             .enter => return self.activateFocusedContextItem(),
             .char => |code| if (code == ' ') return self.activateFocusedContextItem() else return null,
             else => return null,
@@ -379,8 +379,8 @@ pub const View = struct {
         return true;
     }
 
-    /// Alt+letter opens File/Edit/View/Format/Room/CAST/Tools. Alt+Down
-    /// opens the hovered menu, or File.
+    /// Alt+letter opens File/Edit/View/Look/Room/CAST/Tools. Alt+Down
+    /// opens the hovered menu, or File. Alt+O still opens Look.
     pub fn handleMenuAccelerator(self: *View, key: platform_event.Key, alt: bool) ?Action {
         if (!alt or self.active_dialog != null) return null;
         const menu: u8 = switch (key) {
@@ -464,8 +464,8 @@ pub const View = struct {
             },
             .up => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse 0, false, self.can_moderate, self.wire_live),
             .down => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse menuItemCount(menu) - 1, true, self.can_moderate, self.wire_live),
-            .home => self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate, self.wire_live),
-            .end => self.hovered_menu_item = lastEnabledMenuItem(menu, self.can_moderate, self.wire_live),
+            .home, .page_up => self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate, self.wire_live),
+            .end, .page_down => self.hovered_menu_item = lastEnabledMenuItem(menu, self.can_moderate, self.wire_live),
             .enter => return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate, self.wire_live)),
             .char => |code| if (code == ' ') return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate, self.wire_live)) else return .none,
             else => return .none,
@@ -1710,7 +1710,7 @@ pub const View = struct {
                 .id = "dialog-browse",
                 .role = .button,
                 .bounds = dialogBrowseRect(dialog_layout.fieldRectScrolled(index, self.dialog_first_field)),
-                .label = "Browse files",
+                .label = "Choose file",
                 .focused = self.dialog_browse_focus,
             });
             if (id == .character) {
@@ -2071,7 +2071,7 @@ pub const View = struct {
     }
 };
 
-const menu_labels = [_][]const u8{ "File", "Edit", "View", "Format", "Room", "CAST", "Tools" };
+const menu_labels = [_][]const u8{ "File", "Edit", "View", "Look", "Room", "CAST", "Tools" };
 
 fn menuStart(menu: u8) i32 {
     var x: i32 = 170;
@@ -2132,14 +2132,14 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             0 => "Browse rooms",
             1 => "Join room",
             2 => "Create room",
-            3 => "Room properties",
-            4 => "Set away message",
+            3 => "Room details",
+            4 => "Away message",
             5 => "Bulletin",
             6 => "Named properties",
             7 => "Room access",
             8 => "Room events",
             9 => "Favorite rooms",
-            else => "Open room in new window",
+            else => "Open room separately",
         },
         5 => switch (item) {
             0 => "CAST list",
@@ -2152,8 +2152,8 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             else => "Send call link",
         },
         6 => switch (item) {
-            0 => "Connection setup",
-            1 => "Connection features",
+            0 => "Wire setup",
+            1 => "Wire features",
             2 => "Automation",
             3 => "Rules",
             4 => "Rule sets",
@@ -2465,7 +2465,7 @@ const ToolGlyph = ui.ToolGlyph;
 
 fn toolbarLabel(index: u8) []const u8 {
     return switch (index) {
-        0 => "Connection setup",
+        0 => "Wire setup",
         1 => "Leave the wire",
         2 => "Join room",
         3 => "Leave room",
@@ -2475,7 +2475,7 @@ fn toolbarLabel(index: u8) []const u8 {
         7 => "Browse rooms",
         8 => "Show or hide CAST",
         9 => "Favorite rooms",
-        10 => "Set away message",
+        10 => "Away message",
         11 => "CAST card",
         12 => "Ignore CAST",
         13 => "Send a whisper",
@@ -2489,7 +2489,7 @@ fn toolbarLabel(index: u8) []const u8 {
         21 => "Underline",
         22 => "Fixed-width text",
         23 => "Insert symbol",
-        else => "Comic Chat tool",
+        else => "Sunday tool",
     };
 }
 
@@ -2552,6 +2552,24 @@ fn nextEnabledToolbar(current: u8, forward: bool, connected: bool) u8 {
         if (toolbarCommandEnabled(ui.ToolbarLayout.command_ids[item], connected)) return item;
     }
     return current;
+}
+
+fn firstEnabledToolbar(connected: bool) u8 {
+    const count: u8 = @intCast(ui.ToolbarLayout.button_count);
+    var item: u8 = 0;
+    while (item < count) : (item += 1) {
+        if (toolbarCommandEnabled(ui.ToolbarLayout.command_ids[item], connected)) return item;
+    }
+    return 0;
+}
+
+fn lastEnabledToolbar(connected: bool) u8 {
+    var item: u8 = @intCast(ui.ToolbarLayout.button_count);
+    while (item > 0) {
+        item -= 1;
+        if (toolbarCommandEnabled(ui.ToolbarLayout.command_ids[item], connected)) return item;
+    }
+    return 0;
 }
 
 fn sayActionEnabled(index: u8, connected: bool) bool {
@@ -3030,7 +3048,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     if (panel_layout.show_actions) {
         const connection = panel_layout.connection;
         const settings = panel_layout.settings;
-        ui.drawButton(c, connection.x, connection.y, connection.w, "Connection setup", .primary, hovered_action == .connection);
+        ui.drawButton(c, connection.x, connection.y, connection.w, "Wire setup", .primary, hovered_action == .connection);
         ui.drawButton(c, settings.x, settings.y, settings.w, "Settings", .secondary, hovered_action == .settings);
         if (hovered_action == .connection) ui.drawFocusRing(c, connection);
         if (hovered_action == .settings) ui.drawFocusRing(c, settings);
@@ -3042,7 +3060,7 @@ const EmptyPageCopy = struct { title: []const u8, detail: []const u8, waiting: b
 
 fn emptyPageCopy(status: []const u8) EmptyPageCopy {
     const tone = ui.statusTone(status);
-    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - open Connection setup", .waiting = true };
+    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - open Wire setup", .waiting = true };
     if (isOfflineStatus(status)) return .{ .title = "Sunday page is offline", .detail = "Connect to ink the first balloon", .waiting = true };
     if (tone != .success) return .{ .title = "Sunday page is waiting", .detail = "Waiting for the wire", .waiting = true };
     return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
@@ -3098,8 +3116,8 @@ fn statusBarLabel(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "On the wire";
     if (tone == .failure) return failureStatusLabel(status);
-    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - open Connection setup";
-    if (isOfflineStatus(status)) return "Sunday page is offline - open Connection setup";
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - open Wire setup";
+    if (isOfflineStatus(status)) return "Sunday page is offline - open Wire setup";
     if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
@@ -3112,12 +3130,12 @@ fn isOfflineStatus(status: []const u8) bool {
 }
 
 fn failureStatusLabel(status: []const u8) []const u8 {
-    if (std.mem.indexOf(u8, status, "(refused)") != null) return "Wire failed (refused) - open Connection setup";
-    if (std.mem.indexOf(u8, status, "(timeout)") != null) return "Wire failed (timeout) - open Connection setup";
-    if (std.mem.indexOf(u8, status, "(reset)") != null) return "Wire failed (reset) - open Connection setup";
-    if (std.mem.indexOf(u8, status, "(TLS)") != null) return "Wire failed (TLS) - open Connection setup";
-    if (std.mem.indexOf(u8, status, "(unreachable)") != null) return "Wire failed (unreachable) - open Connection setup";
-    return "Wire failed - open Connection setup";
+    if (std.mem.indexOf(u8, status, "(refused)") != null) return "Wire failed (refused) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(timeout)") != null) return "Wire failed (timeout) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(reset)") != null) return "Wire failed (reset) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(TLS)") != null) return "Wire failed (TLS) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(unreachable)") != null) return "Wire failed (unreachable) - open Wire setup";
+    return "Wire failed - open Wire setup";
 }
 
 fn drawEmptyBuffer(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8, columns: u8) void {
@@ -3395,6 +3413,10 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .comics_view => if (index == 0) "PAGE" else "",
         .character => if (index == 0) "PAGE" else "",
         .motd => if (index == 0) "LIST" else "",
+        .choose_color => if (index == 0) "INK" else "",
+        .export_image, .print_preview => if (index == 0) "PAGE" else "",
+        .open_conversation, .save_conversation, .open_locator => if (index == 0) "FILE" else "",
+        .automation => if (index == 0) "AUTO" else "",
         else => "",
     };
 }
@@ -3487,6 +3509,11 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .invitation => "Accept an invitation to a room",
         .call_link => "Send a meeting link to CAST",
         .member_profile => "Request a CAST profile",
+        .channel_properties => "Topic, options, and CAST limit for this room",
+        .file_transfer => "Offer or accept a file with CAST",
+        .favorite_rooms => "Join or update a favorite room",
+        .away => "Posted while you are away",
+        .choose_color => "Ink color for typed text",
         else => switch (spec.group) {
             .application => "Ink Sunday preferences",
             .connection => "Wire, identity, and appearance",
@@ -3829,6 +3856,10 @@ test "context menu keyboard skips disabled moderation controls" {
     try std.testing.expectEqual(@as(?u8, 1), view.focused_context_item);
     _ = view.handleContextMenuKey(.right);
     try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
+    _ = view.handleContextMenuKey(.page_up);
+    try std.testing.expectEqual(@as(?u8, 0), view.focused_context_item);
+    _ = view.handleContextMenuKey(.page_down);
+    try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
     _ = view.handleContextMenuKey(.escape);
     try std.testing.expect(view.context_menu == null);
 }
@@ -4000,6 +4031,10 @@ test "menu keyboard navigation wraps skips disabled commands and activates setti
     try std.testing.expectEqual(@as(?u8, 6), view.active_menu);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.end).?);
     try std.testing.expectEqual(@as(?u8, 7), view.hovered_menu_item);
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_up).?);
+    try std.testing.expectEqual(@as(?u8, 0), view.hovered_menu_item);
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_down).?);
+    try std.testing.expectEqual(@as(?u8, 7), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.escape).?);
     try std.testing.expect(view.active_menu == null);
 
@@ -4024,7 +4059,7 @@ test "menu information architecture has one settings connection and transfer ent
         while (item < menuItemCount(menu)) : (item += 1) {
             const label = menuItemLabel(menu, item);
             if (std.mem.eql(u8, label, "Settings")) settings_count += 1;
-            if (std.mem.eql(u8, label, "Connection setup")) connection_count += 1;
+            if (std.mem.eql(u8, label, "Wire setup")) connection_count += 1;
             if (std.ascii.eqlIgnoreCase(label, "File transfer")) transfer_count += 1;
         }
     }
@@ -4492,7 +4527,7 @@ test "view menu layout commands ask the host to persist settings" {
 test "empty page, CAST, composer, and status copy follow the wire" {
     const failed = emptyPageCopy("Connection failed - click for settings");
     try std.testing.expectEqualStrings("Sunday page could not connect", failed.title);
-    try std.testing.expectEqualStrings("Wire failed - open Connection setup", failed.detail);
+    try std.testing.expectEqualStrings("Wire failed - open Wire setup", failed.detail);
     try std.testing.expect(failed.waiting);
     try std.testing.expectEqualStrings("Wire failed", emptyCastCopy("Connection failed - click for settings"));
     try std.testing.expectEqualStrings("Wire failed - Connect, then ink...", composerPlaceholder("Connection failed - click for settings"));
@@ -4517,12 +4552,12 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Ink the next balloon...", composerPlaceholder("connected"));
     try std.testing.expectEqualStrings("On the wire", statusPanelHeading("connected"));
     try std.testing.expectEqualStrings("On the wire", statusBarLabel("connected"));
-    try std.testing.expectEqualStrings("Sunday page is offline - open Connection setup", statusBarLabel("offline"));
-    try std.testing.expectEqualStrings("Sunday page is offline - open Connection setup", statusBarLabel("Disconnected"));
+    try std.testing.expectEqualStrings("Sunday page is offline - open Wire setup", statusBarLabel("offline"));
+    try std.testing.expectEqualStrings("Sunday page is offline - open Wire setup", statusBarLabel("Disconnected"));
     try std.testing.expectEqualStrings("Off", statusTabLabel("Disconnected"));
     try std.testing.expectEqualStrings("Waiting on the wire", statusBarLabel("reconnecting"));
-    try std.testing.expectEqualStrings("Wire failed (refused) - open Connection setup", statusBarLabel("Connection failed (refused) - click for settings"));
-    try std.testing.expectEqualStrings("Wire failed (refused) - open Connection setup", statusPanelDetail("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - open Wire setup", statusBarLabel("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - open Wire setup", statusPanelDetail("Connection failed (refused) - click for settings"));
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
     try std.testing.expectEqualStrings("Live", statusTabLabel("connected"));
     try std.testing.expectEqualStrings("Off", statusTabLabel("offline"));
@@ -4533,7 +4568,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
     try std.testing.expectEqualStrings("Name", statusTabLabel("nickname in use"));
     try std.testing.expectEqualStrings("Sign-in name is taken", statusPanelHeading("nickname in use"));
-    try std.testing.expectEqualStrings("Sign-in name is taken - open Connection setup", statusBarLabel("nickname in use"));
+    try std.testing.expectEqualStrings("Sign-in name is taken - open Wire setup", statusBarLabel("nickname in use"));
     try std.testing.expectEqualStrings("Signing in on the wire", statusBarLabel("registering"));
     try std.testing.expectEqualStrings("Joining the Sunday page", statusBarLabel("joining"));
     try std.testing.expectEqualStrings("Opening a verified wire", statusBarLabel("upgrading to TLS"));
@@ -4572,6 +4607,16 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Keep a name pattern off this room", dialogHelper(.ban, ""));
     try std.testing.expectEqualStrings("Send a meeting link to CAST", dialogHelper(.call_link, ""));
     try std.testing.expectEqualStrings("CALL", settingsKicker(.call_link, 0));
+    try std.testing.expectEqualStrings("Wire setup", menuItemLabel(6, 0));
+    try std.testing.expectEqualStrings("Wire features", menuItemLabel(6, 1));
+    try std.testing.expectEqualStrings("Wire setup", toolbarLabel(0));
+    try std.testing.expectEqualStrings("Away message", menuItemLabel(4, 4));
+    try std.testing.expectEqualStrings("Away message", toolbarLabel(10));
+    try std.testing.expectEqualStrings("Room details", menuItemLabel(4, 3));
+    try std.testing.expectEqualStrings("Open room separately", menuItemLabel(4, 10));
+    try std.testing.expectEqualStrings("Look", menu_labels[3]);
+    try std.testing.expectEqualStrings("Sunday tool", toolbarLabel(23));
+    try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
     try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 6));

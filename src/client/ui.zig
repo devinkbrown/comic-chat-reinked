@@ -1879,7 +1879,7 @@ test "ellipsized labels preserve complete words when possible" {
     var canvas = try Canvas.init(std.testing.allocator, 160, 32);
     defer canvas.deinit(std.testing.allocator);
     canvas.clear(current.layer);
-    drawEllipsized(&canvas, "Connection setup options", 2, 4, Canvas.uiTextWidth("Connection setup..."), current.ink);
+    drawEllipsized(&canvas, "Wire setup options", 2, 4, Canvas.uiTextWidth("Wire setup..."), current.ink);
     var marked = false;
     for (canvas.px) |pixel| {
         if (pixel != current.layer) {
