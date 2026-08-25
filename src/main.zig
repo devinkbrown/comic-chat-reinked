@@ -2500,7 +2500,7 @@ fn applyDialogAction(
         return;
     }
     if (cc.client.dialogs.requiresInput(id) and value.len == 0) {
-        view.setDialogNotice("Complete the first field before continuing.");
+        view.setDialogNotice("Fill the first field before continuing.");
         return;
     }
     const maybe_client = network.clientPtr();

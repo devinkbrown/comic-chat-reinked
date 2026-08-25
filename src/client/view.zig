@@ -139,6 +139,7 @@ pub const View = struct {
     room_tab_first: usize = 0,
     can_moderate: bool = false,
     wire_live: bool = true,
+    name_taken: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, initial_width: u32, initial_height: u32) !View {
         return .{
@@ -1151,6 +1152,10 @@ pub const View = struct {
             }
             if (ui.contains(status_layout.connection, pointer.x, pointer.y)) {
                 self.closeStatusPanel();
+                if (self.name_taken) {
+                    self.openDialog(.nickname);
+                    return .none;
+                }
                 return .connection;
             }
             if (ui.contains(status_layout.settings, pointer.x, pointer.y)) {
@@ -1389,7 +1394,13 @@ pub const View = struct {
         const action = self.focused_status_action orelse .connection;
         self.closeStatusPanel();
         return switch (action) {
-            .connection => .connection,
+            .connection => connection: {
+                if (self.name_taken) {
+                    self.openDialog(.nickname);
+                    break :connection .none;
+                }
+                break :connection .connection;
+            },
             .settings => settings: {
                 self.openDialog(.settings);
                 break :settings .none;
@@ -1570,6 +1581,7 @@ pub const View = struct {
         defer ui.activateAppearance(.{});
         self.can_moderate = false;
         self.wire_live = ui.statusTone(status) == .success;
+        self.name_taken = std.mem.indexOf(u8, status, "nickname in use") != null;
         for (transcript.roster.items) |member| if (member.is_self and !member.departed) {
             self.can_moderate = member.role.canModerate();
             break;
@@ -2062,12 +2074,13 @@ pub const View = struct {
                 0 => self.openDialog(.setup),
                 1 => self.openDialog(.servers),
                 2 => self.openDialog(.password),
-                3 => self.openDialog(.connection_features),
-                4 => self.openDialog(.automation),
-                5 => self.openDialog(.rules),
-                6 => self.openDialog(.rule_sets),
-                7 => self.openDialog(.notifications),
-                8 => self.openDialog(.notification_users),
+                3 => self.openDialog(.nickname),
+                4 => self.openDialog(.connection_features),
+                5 => self.openDialog(.automation),
+                6 => self.openDialog(.rules),
+                7 => self.openDialog(.rule_sets),
+                8 => self.openDialog(.notifications),
+                9 => self.openDialog(.notification_users),
                 else => self.openDialog(.about),
             },
             else => {},
@@ -2105,7 +2118,7 @@ fn menuItemCount(menu: u8) u8 {
         2 => 6,
         4 => 13,
         5 => 8,
-        6 => 10,
+        6 => 11,
         1 => 4,
         else => 1,
     };
@@ -2175,12 +2188,13 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             0 => "Wire setup",
             1 => "Wire list",
             2 => "Sign in",
-            3 => "Wire features",
-            4 => "Automation",
-            5 => "Rules",
-            6 => "Rule sets",
-            7 => "Online notifications",
-            8 => "Online CAST",
+            3 => "Sign-in name",
+            4 => "Wire features",
+            5 => "Automation",
+            6 => "Rules",
+            7 => "Rule sets",
+            8 => "Online notifications",
+            9 => "Online CAST",
             else => "About Comic Chat",
         },
         else => "Settings",
@@ -2230,8 +2244,8 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             else => "Call",
         },
         6 => switch (item) {
-            0, 1, 2, 3 => "Wire",
-            9 => "About",
+            0, 1, 2, 3, 4 => "Wire",
+            10 => "About",
             else => "Auto",
         },
         else => "",
@@ -2324,7 +2338,7 @@ fn menuStartsGroup(menu: u8, item: u8) bool {
         3 => item == 2 or item == 5,
         4 => item == 3 or item == 6 or item == 9 or item == 10 or item == 11,
         5 => item == 2 or item == 4 or item == 6,
-        6 => item == 4 or item == 7 or item == 9,
+        6 => item == 5 or item == 8 or item == 10,
         else => false,
     };
 }
@@ -2998,7 +3012,7 @@ fn drawStatusTabTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8)
 
 fn drawStatusBarTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
     const label = statusBarLabel(status);
-    const hint = if (ui.statusTone(status) == .success) "Live" else "Wire";
+    const hint = if (ui.statusTone(status) == .success) "Live" else if (std.mem.indexOf(u8, status, "nickname in use") != null) "Name" else "Wire";
     const width = @min(260, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
     const x = std.math.clamp(layout.status.x + 8, 6, @max(6, layout.status.right() - width - 6));
     ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.status.y - 34, .w = width, .h = 28 }, label, hint);
@@ -3072,7 +3086,8 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     if (panel_layout.show_actions) {
         const connection = panel_layout.connection;
         const settings = panel_layout.settings;
-        ui.drawButton(c, connection.x, connection.y, connection.w, "Wire setup", .primary, hovered_action == .connection);
+        const connection_label = if (std.mem.indexOf(u8, status, "nickname in use") != null) "Sign-in name" else "Wire setup";
+        ui.drawButton(c, connection.x, connection.y, connection.w, connection_label, .primary, hovered_action == .connection);
         ui.drawButton(c, settings.x, settings.y, settings.w, "Settings", .secondary, hovered_action == .settings);
         if (hovered_action == .connection) ui.drawFocusRing(c, connection);
         if (hovered_action == .settings) ui.drawFocusRing(c, settings);
@@ -3140,7 +3155,7 @@ fn statusBarLabel(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "On the wire";
     if (tone == .failure) return failureStatusLabel(status);
-    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - open Wire setup";
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - open Sign-in name";
     if (isOfflineStatus(status)) return "Sunday page is offline - open Wire setup";
     if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
@@ -4099,11 +4114,11 @@ test "menu keyboard navigation wraps skips disabled commands and activates setti
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.left).?);
     try std.testing.expectEqual(@as(?u8, 6), view.active_menu);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.end).?);
-    try std.testing.expectEqual(@as(?u8, 9), view.hovered_menu_item);
+    try std.testing.expectEqual(@as(?u8, 10), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_up).?);
     try std.testing.expectEqual(@as(?u8, 0), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_down).?);
-    try std.testing.expectEqual(@as(?u8, 9), view.hovered_menu_item);
+    try std.testing.expectEqual(@as(?u8, 10), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.escape).?);
     try std.testing.expect(view.active_menu == null);
 
@@ -4640,7 +4655,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
     try std.testing.expectEqualStrings("Name", statusTabLabel("nickname in use"));
     try std.testing.expectEqualStrings("Sign-in name is taken", statusPanelHeading("nickname in use"));
-    try std.testing.expectEqualStrings("Sign-in name is taken - open Wire setup", statusBarLabel("nickname in use"));
+    try std.testing.expectEqualStrings("Sign-in name is taken - open Sign-in name", statusBarLabel("nickname in use"));
     try std.testing.expectEqualStrings("Signing in on the wire", statusBarLabel("registering"));
     try std.testing.expectEqualStrings("Joining the Sunday page", statusBarLabel("joining"));
     try std.testing.expectEqualStrings("Opening a verified wire", statusBarLabel("upgrading to TLS"));
@@ -4684,7 +4699,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Wire setup", menuItemLabel(6, 0));
     try std.testing.expectEqualStrings("Wire list", menuItemLabel(6, 1));
     try std.testing.expectEqualStrings("Sign in", menuItemLabel(6, 2));
-    try std.testing.expectEqualStrings("Wire features", menuItemLabel(6, 3));
+    try std.testing.expectEqualStrings("Sign-in name", menuItemLabel(6, 3));
+    try std.testing.expectEqualStrings("Wire features", menuItemLabel(6, 4));
     try std.testing.expectEqualStrings("Wire setup", toolbarLabel(0));
     try std.testing.expectEqualStrings("Away message", menuItemLabel(4, 4));
     try std.testing.expectEqualStrings("Away message", toolbarLabel(10));
@@ -4701,7 +4717,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
-    try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 8));
+    try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 9));
     try std.testing.expectEqualStrings("Room invitation", menuItemLabel(4, 11));
     try std.testing.expectEqualStrings("Room password", menuItemLabel(4, 12));
     try std.testing.expectEqualStrings("Live Onyx nodes use implicit TLS 6697", dialogHelper(.servers, ""));
@@ -4753,6 +4769,12 @@ test "invitation password and wire list route from existing menus" {
     view.hovered_menu_item = 2;
     try std.testing.expectEqual(Action{ .menu = 6 }, view.handleMenuKey(.enter).?);
     try std.testing.expectEqual(dialogs.Id.password, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 6;
+    view.hovered_menu_item = 3;
+    try std.testing.expectEqual(Action{ .menu = 6 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.nickname, view.active_dialog.?);
 }
 
 test "composer Page Up and Page Down page the transcript" {
@@ -4912,6 +4934,12 @@ test "status keyboard opens the panel and activates its actions" {
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
     try std.testing.expectEqual(Action.connection, view.handleFocusedActionKey(.{ .char = ' ' }).?);
     try std.testing.expect(!view.status_panel_open);
+
+    view.name_taken = true;
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(dialogs.Id.nickname, view.active_dialog.?);
 }
 
 test "composer send chip sends and space activates focused chrome" {
