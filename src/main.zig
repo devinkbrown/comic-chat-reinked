@@ -29,6 +29,16 @@ fn ircxNumericEnabled(msg: *const cc.net.message.Message) bool {
         std.mem.eql(u8, msg.params[1], "1");
 }
 
+fn ircxSupportAdvertised(client: *const cc.net.client.Client) bool {
+    const features = client.featureState() orelse return false;
+    return features.isupport("IRCX") != null;
+}
+
+fn isServerSourced(msg: *const cc.net.message.Message) bool {
+    const prefix = msg.prefix orelse return true;
+    return std.mem.indexOfAny(u8, prefix, "!@") == null;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const minimal = init.minimal;
@@ -4228,6 +4238,7 @@ fn processWorkspaceMessages(
         }
         if (std.mem.eql(u8, msg.command, "005")) {
             applyClientIsupport(workspace, client);
+            if (ircxSupportAdvertised(client)) state.ircx_data = true;
         }
         if (isVisibleServerWorkflowReply(msg.command)) {
             if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
@@ -4359,6 +4370,12 @@ fn processWorkspaceMessages(
             const resolved = stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes);
             const is_private = cc.net.irc_map.eql(workspace.casemapping, resolved, nick);
             const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
+            if (is_notice and isServerSourced(&msg)) {
+                if (workspaceTranscriptRoom(workspace, channel)) |active_room|
+                    try appendServerWorkflowReply(&active_room.transcript, &msg);
+                redraw = true;
+                continue;
+            }
             const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             var room = &workspace.rooms.items[room_index];
             const transcript = &room.transcript;
@@ -4413,7 +4430,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
         2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
         301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 354, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
         322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
-        710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733 => true,
+        704, 705, 706, 710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733, 826, 827 => true,
         801...819, 824, 825, 900...905, 907, 908 => true,
         else => false,
     };
@@ -4689,15 +4706,19 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "925") or
         std.mem.eql(u8, command, "906") or
         std.mem.eql(u8, command, "734") or
-        std.mem.eql(u8, command, "491");
+        std.mem.eql(u8, command, "491") or
+        std.mem.eql(u8, command, "409");
 }
 
 fn isOnyxServiceReply(command: []const u8) bool {
     const names = .{
-        "REGISTER",    "VERIFY",     "RESETPASS", "IDENTIFY", "LOGOUT",  "DROP",
-        "ACCOUNTINFO", "ACCOUNTSET", "SASLINFO",  "GHOST",    "RECOVER", "RELEASE",
-        "CHANNEL",     "CS",         "AUTOJOIN",  "GROUP",    "SEEN",    "MEMO",
-        "TEGAMI",      "VHOST",      "CERTADD",   "CERTLIST", "CERTDEL", "SESSIONTOKEN",
+        "REGISTER",    "VERIFY",     "RESETPASS", "IDENTIFY", "LOGOUT",   "DROP",
+        "ACCOUNTINFO", "ACCOUNTSET", "SASLINFO",  "GHOST",    "RECOVER",  "RELEASE",
+        "CHANNEL",     "CS",         "AUTOJOIN",  "GROUP",    "SEEN",     "MEMO",
+        "TEGAMI",      "VHOST",      "CERTADD",   "CERTLIST", "CERTDEL",  "SESSIONTOKEN",
+        "SESSION",     "TOTP",       "KEYTRANS",  "IDENTITY", "WELCOME",  "HELP",
+        "HELPOP",      "TEMPMODE",   "PINS",      "ACCEPT",   "ACTIVITY", "LISTX",
+        "MODEX",       "IRCX",       "ISIRCX",    "CLEAR",
     };
     inline for (names) |name| {
         if (std.ascii.eqlIgnoreCase(command, name)) return true;
@@ -4964,15 +4985,24 @@ fn sendOnyxServiceSlash(
         return true;
     }
     if (std.ascii.eqlIgnoreCase(verb, "logout")) {
-        try client.logoutAccount();
+        client.logoutAccount() catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
         return true;
     }
     if (std.ascii.eqlIgnoreCase(verb, "accountinfo")) {
-        try client.accountInfo(if (count == 0) null else words[0]);
+        client.accountInfo(if (count == 0) null else words[0]) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
         return true;
     }
     if (std.ascii.eqlIgnoreCase(verb, "saslinfo")) {
-        try client.saslInfo();
+        client.saslInfo() catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
         return true;
     }
     if (std.ascii.eqlIgnoreCase(verb, "ghost") or std.ascii.eqlIgnoreCase(verb, "drop")) {
@@ -4980,10 +5010,14 @@ fn sendOnyxServiceSlash(
             try appendSessionNotice(workspace, "Usage: /ghost|/drop <nick-or-account> <password>");
             return true;
         }
-        if (std.ascii.eqlIgnoreCase(verb, "ghost"))
-            try client.ghost(words[0], words[1])
+        const send = if (std.ascii.eqlIgnoreCase(verb, "ghost"))
+            client.ghost(words[0], words[1])
         else
-            try client.dropAccount(words[0], words[1]);
+            client.dropAccount(words[0], words[1]);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
         return true;
     }
     if (std.ascii.eqlIgnoreCase(verb, "recover") or std.ascii.eqlIgnoreCase(verb, "release") or std.ascii.eqlIgnoreCase(verb, "seen")) {
@@ -4991,12 +5025,16 @@ fn sendOnyxServiceSlash(
             try appendSessionNotice(workspace, "That command needs a nickname or account.");
             return true;
         }
-        if (std.ascii.eqlIgnoreCase(verb, "recover"))
-            try client.recover(words[0])
+        const send = if (std.ascii.eqlIgnoreCase(verb, "recover"))
+            client.recover(words[0])
         else if (std.ascii.eqlIgnoreCase(verb, "release"))
-            try client.release(words[0])
+            client.release(words[0])
         else
-            try client.sendService("SEEN", words[0..count]);
+            client.sendService("SEEN", words[0..count]);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
         return true;
     }
     if (!isOnyxServiceSlash(verb)) return false;
@@ -5009,11 +5047,15 @@ fn sendOnyxServiceSlash(
         "MEMO"
     else
         command;
-    try client.sendService(mapped, words[0..count]);
+    client.sendService(mapped, words[0..count]) catch |err| {
+        try rejectServiceIrc(workspace, err);
+        return true;
+    };
     return true;
 }
 
 fn isOnyxServiceSlash(verb: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(verb, "clear")) return false;
     return isOnyxServiceReply(verb) or std.ascii.eqlIgnoreCase(verb, "identify") or
         std.ascii.eqlIgnoreCase(verb, "session");
 }
@@ -5023,6 +5065,7 @@ fn rejectServiceIrc(workspace: *cc.client.workspace.Workspace, err: anyerror) !v
         error.InvalidIrcParameter => "That account command is not allowed.",
         error.AccountRegistrationRequiresTls => "Account commands require a TLS connection.",
         error.AccountRegistrationNotEnabled => "This server did not advertise account registration.",
+        error.InvalidUtf8 => "That text is not valid UTF-8.",
         else => return err,
     };
     try appendSessionNotice(workspace, line);
@@ -6276,7 +6319,13 @@ fn handleInputKey(
             // in the room synchronized without requiring the optional DATA
             // extension; inbound DATA remains accepted for peer compatibility.
             try comic_message.appendSlice(gpa, chat_message.items);
-            try client.privmsg(target, comic_message.items);
+            client.privmsg(target, comic_message.items) catch |err| switch (err) {
+                error.InvalidUtf8 => {
+                    try transcript.addWithOptions("Server", "That message is not valid UTF-8.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                },
+                else => return err,
+            };
             try transcript.addWireMessage(nick, comic_message.items, is_private, null);
             view.shell.setSayMode(.say);
             transcript.trimTo(64);
@@ -6721,6 +6770,8 @@ test "IRCX DATA transport requires numeric 800 enabled state" {
     try std.testing.expect(ircxNumericEnabled(&enabled));
     try std.testing.expect(!ircxNumericEnabled(&unrelated));
     try std.testing.expect(!ircxNumericEnabled(&advertisement));
+    try std.testing.expect(isServerSourced(&cc.net.message.parse(":eshmaki.me NOTICE me :SESSION TOKEN abc")));
+    try std.testing.expect(!isServerSourced(&cc.net.message.parse(":alice!u@h NOTICE me :hi")));
 }
 
 test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup stay live" {
@@ -6840,12 +6891,24 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceReply("CHANNEL"));
     try std.testing.expect(isOnyxServiceReply("AUTOJOIN"));
     try std.testing.expect(isOnyxServiceReply("CERTADD"));
+    try std.testing.expect(isOnyxServiceReply("SESSION"));
+    try std.testing.expect(isOnyxServiceReply("TOTP"));
+    try std.testing.expect(isOnyxServiceReply("HELP"));
     try std.testing.expect(isVisibleServerWorkflowReply("REGISTER"));
     try std.testing.expect(isVisibleServerWorkflowReply("SASLINFO"));
     try std.testing.expect(isVisibleServerWorkflowReply("MEMO"));
     try std.testing.expect(isVisibleServerWorkflowReply("VHOST"));
+    try std.testing.expect(isVisibleServerWorkflowReply("SESSION"));
     try std.testing.expect(isVisibleServerWorkflowReply("354"));
+    try std.testing.expect(isVisibleServerWorkflowReply("704"));
+    try std.testing.expect(isVisibleServerWorkflowReply("706"));
+    try std.testing.expect(isVisibleServerWorkflowReply("826"));
+    try std.testing.expect(isVisibleServerWorkflowReply("827"));
+    try std.testing.expect(isCommandFailureNumeric("409"));
     try std.testing.expect(isVisibleServerWorkflowReply("904"));
+    try std.testing.expect(!isOnyxServiceSlash("clear"));
+    try std.testing.expect(isOnyxServiceSlash("help"));
+    try std.testing.expect(isOnyxServiceSlash("totp"));
     try std.testing.expect(isCommandFailureNumeric("421"));
     try std.testing.expect(isNickFailureNumeric("433"));
     try std.testing.expect(isNickFailureNumeric("437"));
@@ -7203,9 +7266,10 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     }
     if (client.features) |*owned_features| {
         _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& STATUSMSG=!.@+ CHANMODES=beIZ,k,lfj,imnstCTNMSgWOAVUFD NICKLEN=4 CHANNELLEN=6 KEYLEN=3 TOPICLEN=5 AWAYLEN=3 KICKLEN=4 :are supported"));
-        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me NETWORK=Onyx MODES=1 MAXLIST=beIZ:100 EXTBAN=$,acgmrz BOT=B WHOX UTF8ONLY :are supported"));
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me NETWORK=Onyx MODES=1 MAXLIST=beIZ:100 EXTBAN=$,acgmrz BOT=B WHOX UTF8ONLY IRCX :are supported"));
     }
     applyClientIsupport(&workspace, &client);
+    try std.testing.expect(ircxSupportAdvertised(&client));
     try std.testing.expect(workspace.extban.allows('a'));
     try std.testing.expect(!workspace.extban.allows('x'));
     try std.testing.expectEqual(@as(usize, 1), workspace.session_limits.modes);
@@ -7369,6 +7433,11 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SESSION") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/certadd"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CERTADD") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/help register"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "HELP") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/totp status"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOTP") != null);
+    try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/clear"));
     try std.testing.expect(!client.projectsSessionChannels());
 }
 

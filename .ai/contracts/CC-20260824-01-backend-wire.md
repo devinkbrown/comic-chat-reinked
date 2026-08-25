@@ -129,6 +129,16 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 33 leftovers in scope
+
+- Server NOTICE/NOTE without a user prefix stay as Server lines (SESSION TOKEN,
+  IDENTIFY, REGISTER) and are not flood-dropped
+- Honor advertised `IRCX` so PROP/ACCESS/CLIENT work before numeric 800
+- Keep remaining live service verbs visible (`SESSION`, `TOTP`, `HELP` 704–706,
+  `MODEX` 826/827); `/clear` stays local. Map `InvalidUtf8` to English
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 32 leftovers in scope
 
 - Onyx Server is first-class: `onyx/session-sync` ACK plus a resume/restoration
