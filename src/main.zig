@@ -1025,15 +1025,16 @@ fn runChatComic(
             const wire = msg.param(2) orelse continue;
             if (!std.ascii.eqlIgnoreCase(target, channel) or !std.mem.eql(u8, kind, "CCUDI1")) continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, &client, &transcript, who, wire, nick, target, metadata_state.ircx_data, null, &metadata_state)) continue;
+            if (try processComicControl(io, &client, &transcript, who, wire, false, nick, target, metadata_state.ircx_data, null, &metadata_state)) continue;
             _ = cc.proto.udi.parseAnnotation(wire) catch continue;
             try metadata_state.rememberUdi(gpa, target, who, wire);
-        } else if (std.mem.eql(u8, msg.command, "PRIVMSG")) {
-            const target = msg.param(0) orelse continue;
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) {
+            const target = stripStatusmsgTarget(msg.param(0) orelse continue);
             if (!std.ascii.eqlIgnoreCase(target, channel)) continue;
             const text = msg.param(1) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
-            if (try processComicControl(io, &client, &transcript, who, text, nick, target, metadata_state.ircx_data, null, &metadata_state)) {
+            const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
+            if (try processComicControl(io, &client, &transcript, who, text, is_notice, nick, target, metadata_state.ircx_data, null, &metadata_state)) {
                 metadata_state.discardPendingUdi(gpa, target, who);
                 continue;
             }
@@ -1643,6 +1644,11 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
     state.pending_udi.clearRetainingCapacity();
     for (state.pending_profiles.items) |nick| gpa.free(nick);
     state.pending_profiles.clearRetainingCapacity();
+    if (state.transfer) |*transfer| transfer.requestCancel();
+    if (state.pending_dcc) |*offer| {
+        offer.deinit(gpa);
+        state.pending_dcc = null;
+    }
     if (workspace) |rooms| rooms.markDisconnected();
 }
 
@@ -3611,6 +3617,18 @@ fn processWorkspaceMessages(
                 state.status = "killed";
                 return error.IrcServerError;
             }
+        } else if (std.ascii.eqlIgnoreCase(msg.command, "QUIT")) {
+            const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
+            if (std.ascii.eqlIgnoreCase(who, workspace.self_nick)) {
+                const reason = msg.param(0) orelse "quit";
+                var buf: [280]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "Disconnected ({s})", .{reason}) catch "Disconnected.";
+                if (workspace.activeRoom()) |active| {
+                    try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+                }
+                state.status = "disconnected";
+                return error.IrcServerError;
+            }
         } else if (std.ascii.eqlIgnoreCase(msg.command, "ACCOUNT") or
             std.ascii.eqlIgnoreCase(msg.command, "CHGHOST") or
             std.ascii.eqlIgnoreCase(msg.command, "SETNAME"))
@@ -3643,8 +3661,11 @@ fn processWorkspaceMessages(
             redraw = true;
         } else if (isJoinDeniedNumeric(msg.command)) {
             redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
-        } else if (std.mem.eql(u8, msg.command, "432") or std.mem.eql(u8, msg.command, "436")) {
+        } else if (isNickFailureNumeric(msg.command)) {
             redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
+        } else if (std.mem.eql(u8, msg.command, "464") or std.mem.eql(u8, msg.command, "465")) {
+            redraw = (try applyAuthFailure(workspace, state, &msg)) or redraw;
+            return error.IrcServerError;
         } else if (std.mem.eql(u8, msg.command, "305") or std.mem.eql(u8, msg.command, "306")) {
             const away = std.mem.eql(u8, msg.command, "306");
             for (workspace.rooms.items) |*room| {
@@ -3729,7 +3750,7 @@ fn processWorkspaceMessages(
             if (!std.mem.eql(u8, kind, "CCUDI1")) continue;
             const room_index = workspace.find(target) orelse if (std.ascii.eqlIgnoreCase(target, nick)) workspace.active orelse continue else continue;
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else continue;
-            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, nick, target, state.ircx_data, preferences, state)) {
+            if (try processComicControl(io, client, &workspace.rooms.items[room_index].transcript, who, wire, false, nick, target, state.ircx_data, preferences, state)) {
                 redraw = true;
                 continue;
             }
@@ -3740,11 +3761,11 @@ fn processWorkspaceMessages(
             // list. The server has already filtered delivery to us; retain
             // the channel context and render it as a private comic line.
             const target = msg.param(0) orelse continue;
-            const room_index = workspace.find(target) orelse continue;
+            const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             const text = msg.param(2) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             var room = &workspace.rooms.items[room_index];
-            if (try processComicControl(io, client, &room.transcript, who, text, workspace.self_nick, target, state.ircx_data, preferences, state)) {
+            if (try processComicControl(io, client, &room.transcript, who, text, false, workspace.self_nick, room.name, state.ircx_data, preferences, state)) {
                 state.discardPendingUdi(workspace.gpa, target, who);
                 redraw = true;
                 continue;
@@ -3757,38 +3778,40 @@ fn processWorkspaceMessages(
             redraw = true;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) {
             const target = msg.param(0) orelse continue;
-            const is_private = std.ascii.eqlIgnoreCase(target, nick);
-            const room_index = workspace.find(target) orelse if (is_private) workspace.active orelse continue else continue;
+            const resolved = stripStatusmsgTarget(target);
+            const is_private = std.ascii.eqlIgnoreCase(resolved, nick);
+            const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
+            const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             var room = &workspace.rooms.items[room_index];
             const transcript = &room.transcript;
             const text = msg.param(1) orelse continue;
             const who = if (msg.prefix) |p| cc.comic.session.nickFromPrefix(p) else "someone";
             if (observeFlood(state, workspace.gpa, who, monotonicMilliseconds(io), preferences.auto_ignore_count, preferences.auto_ignore_interval_s)) {
-                state.discardPendingUdi(workspace.gpa, target, who);
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
             if (try receiveDccOffer(workspace.gpa, view, state, who, text)) {
-                state.discardPendingUdi(workspace.gpa, target, who);
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
             if (try receiveCallControl(client, view, who, text)) {
-                state.discardPendingUdi(workspace.gpa, target, who);
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
-            if (try processComicControl(io, client, transcript, who, text, nick, target, state.ircx_data, preferences, state)) {
-                state.discardPendingUdi(workspace.gpa, target, who);
+            if (try processComicControl(io, client, transcript, who, text, is_notice, nick, room.name, state.ircx_data, preferences, state)) {
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
             if (!std.ascii.eqlIgnoreCase(who, nick) and try runPersistentRules(workspace.gpa, client, transcript, preferences, if (is_private) "Whisper" else "Message", who, room.name, text)) {
-                state.discardPendingUdi(workspace.gpa, target, who);
+                state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
             }
-            var pending = state.takeUdi(target, who);
+            var pending = state.takeUdi(resolved, who);
             defer if (pending) |*entry| entry.deinit(transcript.gpa);
             try transcript.addWireMessage(
                 who,
@@ -3799,9 +3822,6 @@ fn processWorkspaceMessages(
             transcript.trimTo(64);
             if (workspace.active != room_index) room.unread +|= 1;
             redraw = true;
-        } else if (std.mem.eql(u8, msg.command, "433")) {
-            state.status = "nickname in use";
-            redraw = true;
         }
     }
     return redraw;
@@ -3809,7 +3829,33 @@ fn processWorkspaceMessages(
 
 fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch return std.ascii.eqlIgnoreCase(command, "PROP");
-    return code == 322 or code == 323 or (code >= 801 and code <= 819) or (code >= 913 and code <= 925);
+    return switch (code) {
+        221, 251, 252, 253, 254, 255, 263 => true,
+        311, 312, 313, 314, 317, 318, 319 => true,
+        322, 323, 341, 372, 375, 376, 381, 396, 671 => true,
+        801...819, 900...908, 913...925 => true,
+        else => false,
+    };
+}
+
+fn stripStatusmsgTarget(target: []const u8) []const u8 {
+    if (target.len < 2) return target;
+    if (std.mem.indexOfScalar(u8, "+@%~&", target[0]) == null) return target;
+    const rest = target[1..];
+    if (rest[0] == '#' or rest[0] == '&') return rest;
+    return target;
+}
+
+fn workspaceRoomForIncoming(
+    workspace: *cc.client.workspace.Workspace,
+    target: []const u8,
+    self_nick: []const u8,
+) ?usize {
+    const resolved = stripStatusmsgTarget(target);
+    if (resolved.len > 1 and (resolved[0] == '#' or resolved[0] == '&'))
+        return workspace.ensure(resolved) catch null;
+    if (std.ascii.eqlIgnoreCase(resolved, self_nick)) return workspace.active;
+    return workspace.find(resolved) orelse workspace.active;
 }
 
 fn appendServerWorkflowReply(transcript: *cc.comic.session.Transcript, msg: *const cc.net.message.Message) !void {
@@ -3946,6 +3992,7 @@ fn applyLiveChannelKey(
 fn isCommandFailureNumeric(command: []const u8) bool {
     return std.mem.eql(u8, command, "401") or
         std.mem.eql(u8, command, "404") or
+        std.mem.eql(u8, command, "421") or
         std.mem.eql(u8, command, "441") or
         std.mem.eql(u8, command, "442") or
         std.mem.eql(u8, command, "467") or
@@ -3955,6 +4002,24 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "482") or
         std.mem.eql(u8, command, "501") or
         std.mem.eql(u8, command, "502");
+}
+
+fn isNickFailureNumeric(command: []const u8) bool {
+    return std.mem.eql(u8, command, "432") or
+        std.mem.eql(u8, command, "433") or
+        std.mem.eql(u8, command, "436") or
+        std.mem.eql(u8, command, "437") or
+        std.mem.eql(u8, command, "438");
+}
+
+fn applyAuthFailure(
+    workspace: *cc.client.workspace.Workspace,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    state.status = if (std.mem.eql(u8, msg.command, "464")) "password rejected" else "banned";
+    if (workspace.activeRoom()) |active| try appendServerWorkflowReply(&active.transcript, msg);
+    return true;
 }
 
 fn applyCommandFailure(
@@ -4107,7 +4172,14 @@ fn appendNickNumericLine(
 ) !bool {
     const nick = msg.param(1) orelse "";
     const detail = msg.param(2) orelse msg.command;
-    state.status = if (std.mem.eql(u8, msg.command, "432")) "invalid nickname" else "nickname collision";
+    state.status = if (std.mem.eql(u8, msg.command, "432"))
+        "invalid nickname"
+    else if (std.mem.eql(u8, msg.command, "433"))
+        "nickname in use"
+    else if (std.mem.eql(u8, msg.command, "437") or std.mem.eql(u8, msg.command, "438"))
+        "nickname unavailable"
+    else
+        "nickname collision";
     if (workspace.activeRoom()) |room| {
         var buf: [280]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "Nick {s}: {s}", .{ nick, detail }) catch "Nickname rejected.";
@@ -4287,7 +4359,7 @@ fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
         std.ascii.eqlIgnoreCase(msg.command, "DATA") or
         std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
         std.ascii.eqlIgnoreCase(msg.command, "NOTICE") or
-        std.ascii.eqlIgnoreCase(msg.command, "WHISPER")) return msg.param(0);
+        std.ascii.eqlIgnoreCase(msg.command, "WHISPER")) return if (msg.param(0)) |target| stripStatusmsgTarget(target) else null;
     if (std.mem.eql(u8, msg.command, "331") or
         std.mem.eql(u8, msg.command, "332") or
         std.mem.eql(u8, msg.command, "333") or
@@ -4451,6 +4523,7 @@ fn processComicControl(
     transcript: *cc.comic.session.Transcript,
     who: []const u8,
     wire: []const u8,
+    is_notice: bool,
     self_nick: []const u8,
     reply_target: []const u8,
     ircx_data: bool,
@@ -4459,7 +4532,8 @@ fn processComicControl(
 ) !bool {
     if (try transcript.consumeAvatarAnnouncement(who, wire)) return true;
     if (try transcript.consumeAwayControl(who, wire)) return true;
-    if (try processCtcpRequest(io, client, who, wire, preferences)) return true;
+    if (try processCtcpRequest(io, client, who, wire, is_notice, preferences)) return true;
+    if (is_notice and try appendIncomingCtcpReply(transcript, who, wire)) return true;
     if (wire.len < 2 or wire[0] != '#' or wire[1] != ' ') return false;
 
     const comment = wire[1..];
@@ -4497,8 +4571,9 @@ fn processComicControl(
 /// Handle the source's private CTCP request/reply surface. Email and homepage
 /// replies are intentionally empty: this portable build never exposes local
 /// identity data merely because a peer probed it.
-fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8, wire: []const u8, preferences: ?*const cc.client.preferences.Store) !bool {
+fn processCtcpRequest(io: std.Io, client: *cc.net.client.Client, who: []const u8, wire: []const u8, is_notice: bool, preferences: ?*const cc.client.preferences.Store) !bool {
     if (wire.len < 3 or wire[0] != 0x01 or wire[wire.len - 1] != 0x01) return false;
+    if (is_notice) return false;
     const body = wire[1 .. wire.len - 1];
     const separator = std.mem.indexOfScalar(u8, body, ' ');
     const command = if (separator) |index| body[0..index] else body;
@@ -4577,6 +4652,23 @@ fn consumesUnknownCtcp(wire: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(command, "ACTION") and
         !std.ascii.eqlIgnoreCase(command, "SOUND") and
         !std.ascii.eqlIgnoreCase(command, "DCC");
+}
+
+fn appendIncomingCtcpReply(transcript: *cc.comic.session.Transcript, who: []const u8, wire: []const u8) !bool {
+    const command = ctcpCommandName(wire) orelse return false;
+    if (isSpeechCtcp(wire) or std.ascii.eqlIgnoreCase(command, "DCC")) return false;
+    const body = wire[1 .. wire.len - 1];
+    const separator = std.mem.indexOfScalar(u8, body, ' ');
+    const payload = if (separator) |index| body[index + 1 ..] else "";
+    var display: std.ArrayList(u8) = .empty;
+    defer display.deinit(transcript.gpa);
+    try display.appendSlice(transcript.gpa, command);
+    if (payload.len != 0) {
+        try display.appendSlice(transcript.gpa, ": ");
+        try display.appendSlice(transcript.gpa, payload);
+    }
+    try transcript.addWithOptions(who, display.items, .{ .modes = cc.proto.udi.bm_action });
+    return true;
 }
 
 fn handleInputKey(
@@ -4810,6 +4902,10 @@ test "live roster room lookup includes MODE KICK and topic numerics" {
     try std.testing.expectEqualStrings("#root", messageRoom(&modes).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&invite_only).?);
     try std.testing.expectEqualStrings("#root", messageRoom(&notice).?);
+    const statusmsg = cc.net.message.parse(":alice!u@h PRIVMSG @#root :ops only");
+    try std.testing.expectEqualStrings("#root", messageRoom(&statusmsg).?);
+    const plus_status = cc.net.message.parse(":alice!u@h NOTICE +#root :voices");
+    try std.testing.expectEqualStrings("#root", messageRoom(&plus_status).?);
 }
 
 test "channel mode and invite lines land in the matching room" {
@@ -4909,6 +5005,10 @@ test "nick collision and invalid nick numerics update status" {
     const collision = cc.net.message.parse(":server 436 me stolen :Nickname collision");
     try std.testing.expect(try appendNickNumericLine(&workspace, &state, &collision));
     try std.testing.expectEqualStrings("nickname collision", state.status);
+    const in_use = cc.net.message.parse(":server 433 me taken :Nickname is already in use");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &in_use));
+    try std.testing.expectEqualStrings("nickname in use", state.status);
+    try std.testing.expectEqualStrings("Nick taken: Nickname is already in use", workspace.rooms.items[0].transcript.lines.items[2].text);
 }
 
 test "live MODE key and command failures update membership state" {
@@ -4973,6 +5073,54 @@ test "IRCX DATA transport requires numeric 800 enabled state" {
     try std.testing.expect(ircxNumericEnabled(&enabled));
     try std.testing.expect(!ircxNumericEnabled(&unrelated));
     try std.testing.expect(!ircxNumericEnabled(&advertisement));
+}
+
+test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup stay live" {
+    const gpa = std.testing.allocator;
+    try std.testing.expect(isVisibleServerWorkflowReply("372"));
+    try std.testing.expect(isVisibleServerWorkflowReply("376"));
+    try std.testing.expect(isVisibleServerWorkflowReply("251"));
+    try std.testing.expect(isVisibleServerWorkflowReply("311"));
+    try std.testing.expect(isVisibleServerWorkflowReply("221"));
+    try std.testing.expect(isVisibleServerWorkflowReply("904"));
+    try std.testing.expect(isCommandFailureNumeric("421"));
+    try std.testing.expect(isNickFailureNumeric("433"));
+    try std.testing.expect(isNickFailureNumeric("437"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("315"));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("@#root"));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("+#root"));
+    try std.testing.expectEqualStrings("&local", stripStatusmsgTarget("&local"));
+    try std.testing.expectEqualStrings("alice", stripStatusmsgTarget("alice"));
+
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const root = try workspace.ensure("#root");
+    workspace.rooms.items[root].joined = true;
+    try std.testing.expectEqual(@as(usize, 1), workspaceRoomForIncoming(&workspace, "@#late", "me").?);
+    try std.testing.expectEqual(@as(usize, 1), workspace.find("#late").?);
+    try std.testing.expectEqual(@as(usize, 0), workspaceRoomForIncoming(&workspace, "me", "me").?);
+
+    var transcript = cc.comic.session.Transcript.init(gpa);
+    defer transcript.deinit();
+    try std.testing.expect(try appendIncomingCtcpReply(&transcript, "alice", "\x01VERSION ComicChat Zig Comic mode\x01"));
+    try std.testing.expectEqualStrings("VERSION: ComicChat Zig Comic mode", transcript.lines.items[0].text);
+    try std.testing.expect(!try appendIncomingCtcpReply(&transcript, "alice", "\x01ACTION waves\x01"));
+
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try state.rememberDccOffer(gpa, "alice", .{
+        .filename = "notes.txt",
+        .host_ip = 0x7f000001,
+        .port = 5000,
+        .size = 12,
+    });
+    try std.testing.expect(state.pending_dcc != null);
+    const password = cc.net.message.parse(":server 464 me :Password incorrect");
+    try std.testing.expect(try applyAuthFailure(&workspace, &state, &password));
+    try std.testing.expectEqualStrings("password rejected", state.status);
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(state.pending_dcc == null);
+    try std.testing.expect(!workspace.rooms.items[0].joined);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

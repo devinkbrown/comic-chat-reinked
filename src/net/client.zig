@@ -155,6 +155,9 @@ const Registration = struct {
 
         if (self.sasl_session) |*session| {
             if (std.ascii.eqlIgnoreCase(msg.command, "AUTHENTICATE") or isSaslNumeric(msg.command)) {
+                // After CAP/SASL finishes, later 90x replies are session
+                // events (reauth failure, logout) and must reach the app.
+                if (self.done) return false;
                 const event = session.handle(out, msg.*) catch |err| switch (err) {
                     error.ServerSignatureMismatch => {
                         const cap_event = try self.cap.saslComplete(out);
@@ -883,7 +886,7 @@ pub const Client = struct {
 
     pub fn privmsg(self: *Client, target: []const u8, text: []const u8) !void {
         try self.validateOutgoingText(text);
-        if (self.capabilityEnabled("echo-message")) if (self.features) |*state| try state.recordEcho(target, text);
+        try self.recordOutgoingEcho(target, text);
         try self.appendCommandTrailing("PRIVMSG", &.{ target, text });
         try self.queueOut(.interactive, false, false);
     }
@@ -917,9 +920,13 @@ pub const Client = struct {
         defer tags.deinit(self.gpa);
         try tags.appendSlice(self.gpa, "+draft/channel-context=");
         try message.escapeTagValue(&tags, self.gpa, channel);
-        if (self.capabilityEnabled("echo-message")) if (self.features) |*state| try state.recordEcho(target, text);
+        try self.recordOutgoingEcho(target, text);
         try self.appendCommandWithTagsAndTrailing("PRIVMSG", &.{ target, text }, tags.items, true);
         try self.queueOut(.interactive, false, false);
+    }
+
+    fn recordOutgoingEcho(self: *Client, target: []const u8, text: []const u8) !void {
+        if (self.features) |*state| try state.recordEcho(target, text);
     }
 
     /// Emit the NOTICE form used by Microsoft's CTCP information replies.
@@ -964,7 +971,7 @@ pub const Client = struct {
         defer tags.deinit(self.gpa);
         try tags.appendSlice(self.gpa, "+draft/reply=");
         try message.escapeTagValue(&tags, self.gpa, msgid);
-        if (self.capabilityEnabled("echo-message")) if (self.features) |*state| try state.recordEcho(target, text);
+        try self.recordOutgoingEcho(target, text);
         try self.appendCommandWithNarrowTags("PRIVMSG", &.{ target, text }, tags.items);
         try self.queueOut(.interactive, false, false);
     }
@@ -1550,9 +1557,7 @@ pub const Client = struct {
         defer tags.deinit(self.gpa);
         try tags.appendSlice(self.gpa, "+onyx/topic=");
         try message.escapeTagValue(&tags, self.gpa, topic);
-        if (std.mem.eql(u8, command, "PRIVMSG"))
-            if (self.capabilityEnabled("echo-message"))
-                if (self.features) |*state| try state.recordEcho(target, text);
+        if (std.mem.eql(u8, command, "PRIVMSG")) try self.recordOutgoingEcho(target, text);
         try self.appendCommandWithTagsAndTrailing(command, &.{ target, text }, tags.items, true);
         try self.queueOut(.interactive, false, false);
     }
@@ -1933,6 +1938,29 @@ test "authenticated resume swallows 433 until SESSION commands are sent" {
     try std.testing.expect(try registration.sendSessionCommands(&out));
     var later = message.parse(":irc 433 alex newnick :Nickname is already in use");
     try std.testing.expect(!try registration.consume(&out, &later, &upgrade));
+}
+
+test "post-registration SASL numerics are not swallowed" {
+    const gpa = std.testing.allocator;
+    var authzid = [_]u8{};
+    var authcid = [_]u8{ 'u', 's', 'e', 'r' };
+    var password = [_]u8{ 'p', 'w' };
+    var credentials = sasl.Credentials{
+        .authorization_identity = &authzid,
+        .authentication_identity = &authcid,
+        .password = &password,
+    };
+    var registration = Registration.init(gpa, "irc.example", .tls, .{ .credentials = &credentials });
+    defer registration.deinit();
+    registration.done = true;
+    registration.sasl_session = sasl.Session.init(gpa, &credentials, .{});
+    registration.sasl_session.?.phase = .complete;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var upgrade: ?u16 = null;
+    var failed = message.parse(":irc 904 user :SASL authentication failed");
+    try std.testing.expect(!try registration.consume(&out, &failed, &upgrade));
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
 test "unsigned SCRAM 903 completes CAP instead of stalling registration" {
@@ -2672,6 +2700,37 @@ test "join and create remember restoration and replay JOIN without chat" {
     try std.testing.expect(std.mem.indexOf(u8, queued, "CHATHISTORY") == null);
     client.forgetRestoration("#vault");
     try std.testing.expect(!client.hasRestorationTargets());
+}
+
+test "outgoing PRIVMSG records an echo without echo-message" {
+    const gpa = std.testing.allocator;
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = irc.LineFramer.init(gpa),
+        .tx = policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = policy.Deadlines.init(0, .{}),
+        .aggregator = features_mod.Aggregator.init(gpa, .{}),
+    };
+    client.features = try features_mod.State.init(gpa, "me", .{});
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.features.?.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    try client.privmsg("#c", "hello");
+    try std.testing.expect(!client.capabilityEnabled("echo-message"));
+    try std.testing.expect(try client.features.?.observe(&message.parse(":me!u@h PRIVMSG #c :hello")));
+    try std.testing.expect(!try client.features.?.observe(&message.parse(":me!u@h PRIVMSG #c :hello")));
 }
 
 test "IRCX tagged data rejects malformed draft tags" {

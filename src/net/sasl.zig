@@ -206,7 +206,7 @@ pub const Session = struct {
             std.mem.eql(u8, msg.command, "905") or
             std.mem.eql(u8, msg.command, "906"))
         {
-            if (self.phase == .complete) return .none;
+            if (self.phase == .complete or self.phase == .failed) return .failed;
             return self.startNext(out, .retrying) catch |err| switch (err) {
                 error.NoSupportedMechanism => {
                     self.finish(.failed);
@@ -817,6 +817,25 @@ test "908 refreshes mechanisms and 902 and 907 are terminal" {
     defer session2.deinit();
     try std.testing.expectEqual(Event.already_authenticated, try session2.handle(&out, message.parse(":irc 907 nick :already")));
     try std.testing.expect(credentials2.zeroized);
+}
+
+test "904 after a completed exchange is a failure rather than silence" {
+    const gpa = std.testing.allocator;
+    var authzid = [_]u8{'a'};
+    var authcid = [_]u8{'b'};
+    var password = [_]u8{'c'};
+    var credentials = Credentials{
+        .authorization_identity = &authzid,
+        .authentication_identity = &authcid,
+        .password = &password,
+    };
+    var session = Session.init(gpa, &credentials, .{});
+    defer session.deinit();
+    session.phase = .complete;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try std.testing.expectEqual(Event.failed, try session.handle(&out, message.parse(":irc 904 nick :SASL authentication failed")));
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
 test "RFC 7677 SCRAM-SHA-256 vector verifies nonce, proof, and server signature" {

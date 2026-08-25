@@ -56,12 +56,16 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - [x] PR lists what was fixed and honest leftovers
 - [x] No desktop UI redesign
 
-## Wave 2 leftovers in scope
+## Wave 6 leftovers in scope
 
-- Client-owned Restoration snapshot survives reconnect (`take`/`adopt` + 001 replay)
-- LIST vs LISTX atoms, PROP lists, ACCESS levels/duration/mask
-- Case-insensitive SOUND/ACTION, BDrop2/legacy skip, HeresInfo request gate
-- Incoming 818/PROP CLIENT `bk` applies bundled backdrop
+- Always record outgoing echoes so a matching self PRIVMSG is suppressed
+- Post-registration 433/437/438 land as nick failure lines
+- 464/465 fail the live session; 421 is a visible command failure
+- IRCX WHISPER and STATUSMSG `@#channel` ensure the channel tab
+- Disconnect cancels an in-flight DCC and drops a pending offer
+- Mid-session SASL 90x reaches the application after registration
+- Connect MOTD, LUSERS, WHOIS, and incoming CTCP replies are visible
+- Self QUIT from another attachment fails the connection like self KILL
 
 ## Verification
 
