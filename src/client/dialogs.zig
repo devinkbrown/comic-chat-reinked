@@ -81,7 +81,7 @@ pub const Field = struct { label: []const u8, hint: []const u8 = "", kind: Field
 pub const specs = [_]Spec{
     .{ .id = .about, .resource = "IDD_ABOUTBOX", .title = "About Comic Chat", .group = .files, .source_w = 279, .source_h = 137 },
     .{ .id = .room_list, .resource = "IDD_ROOMLIST", .title = "Browse rooms", .group = .rooms, .source_w = 400, .source_h = 255 },
-    .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Settings", .group = .application, .source_w = 360, .source_h = 300 },
+    .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Studio", .group = .application, .source_w = 360, .source_h = 300 },
     .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "CAST card", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose character", .group = .connection, .source_w = 360, .source_h = 260 },
     .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Backdrop", .group = .connection, .source_w = 252, .source_h = 218 },
@@ -96,7 +96,7 @@ pub const specs = [_]Spec{
     .{ .id = .user_list, .resource = "IDD_USERLIST", .title = "CAST list", .group = .rooms, .source_w = 395, .source_h = 263 },
     .{ .id = .whisper, .resource = "IDD_WHISPERBOX", .title = "Whisper", .group = .rooms, .source_w = 334, .source_h = 196 },
     .{ .id = .comics_view, .resource = "IDD_COMICS_VIEW", .title = "Page layout", .group = .connection, .source_w = 252, .source_h = 218 },
-    .{ .id = .automation, .resource = "IDD_AUTOMATION_PAGE", .title = "Automation", .group = .automation, .source_w = 252, .source_h = 218 },
+    .{ .id = .automation, .resource = "IDD_AUTOMATION_PAGE", .title = "Greeting", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .rules, .resource = "IDD_RULESPAGE", .title = "Rules", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .edit_rule, .resource = "IDD_EDITRULE", .title = "Edit rule", .group = .automation, .source_w = 265, .source_h = 260 },
     .{ .id = .channel_create, .resource = "IDD_CHANNELCREATE", .title = "Create room", .group = .rooms, .source_w = 186, .source_h = 194 },
@@ -114,7 +114,7 @@ pub const specs = [_]Spec{
     .{ .id = .rename_loaded_set, .resource = "IDD_RENAMELOADEDSET", .title = "Rename open set", .group = .automation, .source_w = 258, .source_h = 103 },
     .{ .id = .rename_set, .resource = "IDD_RENAMESET", .title = "Rename rule set", .group = .automation, .source_w = 226, .source_h = 79 },
     .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Online notifications", .group = .automation, .source_w = 252, .source_h = 218 },
-    .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule settings", .group = .automation, .source_w = 186, .source_h = 95 },
+    .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule matching", .group = .automation, .source_w = 186, .source_h = 95 },
     .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Online CAST", .group = .automation, .source_w = 262, .source_h = 111 },
     .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Wire list", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Sign in", .group = .connection, .source_w = 198, .source_h = 127 },
@@ -153,7 +153,7 @@ pub fn prompt(id: Id) ?[]const u8 {
         .away => "Away message",
         .password => "Account password",
         .channel_password => "Room password",
-        .choose_color => "Ink value",
+        .choose_color => "Ink",
         .sound => "Sound",
         .set_text_font, .text_font => "Font name and size",
         .rename_loaded_set, .rename_set, .create_set => "Rule set name",
@@ -204,7 +204,7 @@ pub fn fields(id: Id) []const Field {
         },
         .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST limit", .hint = "Optional" }, .{ .label = "Room password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and limits", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password", .hint = "Needed if the room is locked" }},
-        .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "List limit", .hint = "Optional; blank means unlimited" } },
+        .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "List cap", .hint = "Optional; blank means unlimited" } },
         .user_list => &.{ .{ .label = "CAST member", .hint = "Choose a visible CAST member" }, .{ .label = "Name filter", .hint = "Optional name filter" } },
         .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban", .hint = "Optional name pattern" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
@@ -213,7 +213,7 @@ pub fn fields(id: Id) []const Field {
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound", .kind = .choice }, .{ .label = "With balloon", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
-        .choose_color => &.{ .{ .label = "Ink value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current ink", .kind = .preview } },
+        .choose_color => &.{ .{ .label = "Ink", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current ink", .kind = .preview } },
         .comics_view => &.{ .{ .label = "Page view", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
         .automation => &.{ .{ .label = "Greeting how", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving CAST" }, .{ .label = "Repeat cap", .hint = "8" }, .{ .label = "Repeat window", .hint = "Seconds" } },
         .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Match text", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action text", .hint = "Message, room or sound" } },
@@ -337,7 +337,7 @@ pub fn requiresInput(id: Id) bool {
 pub fn primaryLabel(id: Id) []const u8 {
     return switch (id) {
         .setup => "Open wire",
-        .settings => "Save settings",
+        .settings => "Save studio",
         .servers => "Open wire",
         .personal => "Save card",
         .character => "Choose character",
@@ -496,7 +496,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Room, CAST, server, connection, or link", fields(.ircx_events)[1].hint);
     try std.testing.expectEqualStrings("Use %nick% for the arriving CAST", fields(.automation)[1].hint);
     try std.testing.expectEqualStrings("Save away", primaryLabel(.away));
-    try std.testing.expectEqualStrings("Save settings", primaryLabel(.settings));
+    try std.testing.expectEqualStrings("Save studio", primaryLabel(.settings));
     try std.testing.expectEqualStrings("Save ink", primaryLabel(.choose_color));
     try std.testing.expectEqualStrings("Kick CAST", primaryLabel(.kick));
     try std.testing.expectEqualStrings("Invite CAST", primaryLabel(.invite));
@@ -510,7 +510,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Sunday PDF", get(.print_preview).title);
     try std.testing.expectEqualStrings("Accent", fields(.settings)[1].label);
     try std.testing.expectEqualStrings("Color theme", fields(.settings)[0].label);
-    try std.testing.expectEqualStrings("Ink value", fields(.choose_color)[0].label);
+    try std.testing.expectEqualStrings("Ink", fields(.choose_color)[0].label);
     try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
     try std.testing.expectEqualStrings("Named properties", get(.ircx_properties).title);
     try std.testing.expectEqualStrings("Online notifications", get(.notifications).title);
@@ -557,7 +557,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Wire", fields(.connection_features)[0].label);
     try std.testing.expectEqualStrings("Expression", fields(.character)[1].label);
     try std.testing.expectEqualStrings("Room password", fields(.channel)[1].label);
-    try std.testing.expectEqualStrings("List limit", fields(.room_list)[2].label);
+    try std.testing.expectEqualStrings("List cap", fields(.room_list)[2].label);
     try std.testing.expectEqualStrings("Wire", fields(.notifications)[3].label);
     try std.testing.expectEqualStrings("Notice", fields(.notifications)[4].label);
     try std.testing.expectEqualStrings("Secure link", fields(.call_link)[2].label);
@@ -595,6 +595,10 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Note", fields(.invitation)[1].label);
     try std.testing.expectEqualStrings("Rule on", fields(.advanced_rule_settings)[1].label);
     try std.testing.expectEqualStrings("Match case", fields(.advanced_rule_settings)[2].label);
+    try std.testing.expectEqualStrings("Studio", get(.settings).title);
+    try std.testing.expectEqualStrings("Greeting", get(.automation).title);
+    try std.testing.expectEqualStrings("Rule matching", get(.advanced_rule_settings).title);
+    try std.testing.expectEqualStrings("Ink", prompt(.choose_color).?);
     try std.testing.expectEqualStrings("Timeout", fields(.room_access)[3].label);
     try std.testing.expectEqualStrings("With balloon", fields(.sound)[1].label);
     try std.testing.expectEqualStrings("Apply set", primaryLabel(.rule_sets));
@@ -671,6 +675,13 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Account", &.{ "Wire account", "Account" }));
     try std.testing.expect(matchesAny("Sound name", &.{ "Sound", "Sound name" }));
     try std.testing.expect(matchesAny("Connect before browsing rooms.", &.{ "Connect first to browse rooms.", "Connect before browsing rooms." }));
+    try std.testing.expect(matchesAny("Settings", &.{ "Studio", "Settings" }));
+    try std.testing.expect(matchesAny("Save settings", &.{ "Save studio", "Save settings" }));
+    try std.testing.expect(matchesAny("Automation", &.{ "Greeting", "Automation" }));
+    try std.testing.expect(matchesAny("Rule settings", &.{ "Rule matching", "Rule settings" }));
+    try std.testing.expect(matchesAny("Ink value", &.{ "Ink", "Ink value" }));
+    try std.testing.expect(matchesAny("List limit", &.{ "List cap", "List limit" }));
+    try std.testing.expect(matchesAny("Fill the first field before continuing.", &.{ "Fill the first field first.", "Fill the first field before continuing." }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 

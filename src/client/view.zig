@@ -230,8 +230,8 @@ pub const View = struct {
                 .right => self.shell.moveEmotion(1, 0),
                 .up => self.shell.moveEmotion(0, -1),
                 .down => self.shell.moveEmotion(0, 1),
-                .home => self.shell.neutralEmotion(),
-                .end => self.shell.outerEmotion(),
+                .home, .page_up => self.shell.neutralEmotion(),
+                .end, .page_down => self.shell.outerEmotion(),
                 .escape => {
                     self.shell.focus = .composer;
                     return true;
@@ -2162,7 +2162,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             0 => "Copy lines",
             1 => "Insert page break",
             2 => "Delete lines",
-            else => "Settings",
+            else => "Studio",
         },
         2 => switch (item) {
             0 => "Sunday page",
@@ -2213,14 +2213,14 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Sign in",
             3 => "Sign-in name",
             4 => "Wire features",
-            5 => "Automation",
+            5 => "Greeting",
             6 => "Rules",
             7 => "Rule sets",
             8 => "Online notifications",
             9 => "Online CAST",
             else => "About Comic Chat",
         },
-        else => "Settings",
+        else => "Studio",
     };
 }
 
@@ -3111,7 +3111,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
         const settings = panel_layout.settings;
         const connection_label = if (std.mem.indexOf(u8, status, "nickname in use") != null) "Sign-in name" else "Wire setup";
         ui.drawButton(c, connection.x, connection.y, connection.w, connection_label, .primary, hovered_action == .connection);
-        ui.drawButton(c, settings.x, settings.y, settings.w, "Settings", .secondary, hovered_action == .settings);
+        ui.drawButton(c, settings.x, settings.y, settings.w, "Studio", .secondary, hovered_action == .settings);
         if (hovered_action == .connection) ui.drawFocusRing(c, connection);
         if (hovered_action == .settings) ui.drawFocusRing(c, settings);
         ui.drawDismissHint(c, panel, "Esc closes panel");
@@ -3123,7 +3123,7 @@ const EmptyPageCopy = struct { title: []const u8, detail: []const u8, waiting: b
 fn emptyPageCopy(status: []const u8) EmptyPageCopy {
     const tone = ui.statusTone(status);
     if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - open Wire setup", .waiting = true };
-    if (isOfflineStatus(status)) return .{ .title = "Sunday page is offline", .detail = "Connect to ink the first balloon", .waiting = true };
+    if (isOfflineStatus(status)) return .{ .title = "Sunday page is off the wire", .detail = "Connect to ink the first balloon", .waiting = true };
     if (tone != .success) return .{ .title = "Sunday page is on hold", .detail = "Hold for the wire", .waiting = true };
     return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
 }
@@ -3157,7 +3157,7 @@ fn statusPanelHeading(status: []const u8) []const u8 {
     if (tone == .success) return "On the wire";
     if (tone == .failure) return "Wire failed";
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken";
-    if (isOfflineStatus(status)) return "Sunday page is offline";
+    if (isOfflineStatus(status)) return "Sunday page is off the wire";
     if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
@@ -3179,7 +3179,7 @@ fn statusBarLabel(status: []const u8) []const u8 {
     if (tone == .success) return "On the wire";
     if (tone == .failure) return failureStatusLabel(status);
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - open Sign-in name";
-    if (isOfflineStatus(status)) return "Sunday page is offline - open Wire setup";
+    if (isOfflineStatus(status)) return "Sunday page is off the wire - open Wire setup";
     if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
@@ -4218,7 +4218,7 @@ test "menu information architecture has one settings connection and transfer ent
         var item: u8 = 0;
         while (item < menuItemCount(menu)) : (item += 1) {
             const label = menuItemLabel(menu, item);
-            if (std.mem.eql(u8, label, "Settings")) settings_count += 1;
+            if (std.mem.eql(u8, label, "Studio")) settings_count += 1;
             if (std.mem.eql(u8, label, "Wire setup")) connection_count += 1;
             if (std.ascii.eqlIgnoreCase(label, "File transfer")) transfer_count += 1;
         }
@@ -4694,11 +4694,11 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Wire failed", statusPanelHeading("Connection failed - click for settings"));
 
     const offline = emptyPageCopy("offline");
-    try std.testing.expectEqualStrings("Sunday page is offline", offline.title);
+    try std.testing.expectEqualStrings("Sunday page is off the wire", offline.title);
     try std.testing.expectEqualStrings("Connect to ink the first balloon", offline.detail);
     try std.testing.expectEqualStrings("Connect first", emptyCastCopy("offline"));
     try std.testing.expectEqualStrings("Connect, then ink the next balloon...", composerPlaceholder("offline"));
-    try std.testing.expectEqualStrings("Sunday page is offline", statusPanelHeading("offline"));
+    try std.testing.expectEqualStrings("Sunday page is off the wire", statusPanelHeading("offline"));
 
     const waiting = emptyPageCopy("reconnecting");
     try std.testing.expectEqualStrings("Sunday page is on hold", waiting.title);
@@ -4713,8 +4713,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Ink the next balloon...", composerPlaceholder("connected"));
     try std.testing.expectEqualStrings("On the wire", statusPanelHeading("connected"));
     try std.testing.expectEqualStrings("On the wire", statusBarLabel("connected"));
-    try std.testing.expectEqualStrings("Sunday page is offline - open Wire setup", statusBarLabel("offline"));
-    try std.testing.expectEqualStrings("Sunday page is offline - open Wire setup", statusBarLabel("Disconnected"));
+    try std.testing.expectEqualStrings("Sunday page is off the wire - open Wire setup", statusBarLabel("offline"));
+    try std.testing.expectEqualStrings("Sunday page is off the wire - open Wire setup", statusBarLabel("Disconnected"));
     try std.testing.expectEqualStrings("Off", statusTabLabel("Disconnected"));
     try std.testing.expectEqualStrings("Hold on the wire", statusBarLabel("reconnecting"));
     try std.testing.expectEqualStrings("Wire failed (refused) - open Wire setup", statusBarLabel("Connection failed (refused) - click for settings"));
@@ -4729,6 +4729,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Wire failed (refused) - open Wire setup"));
     try std.testing.expectEqualStrings("Copy lines", menuItemLabel(1, 0));
     try std.testing.expectEqualStrings("Delete lines", menuItemLabel(1, 2));
+    try std.testing.expectEqualStrings("Studio", menuItemLabel(1, 3));
+    try std.testing.expectEqualStrings("Greeting", menuItemLabel(6, 5));
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
     try std.testing.expectEqualStrings("Name", statusTabLabel("nickname in use"));
     try std.testing.expectEqualStrings("Sign-in name is taken", statusPanelHeading("nickname in use"));
@@ -5092,9 +5094,16 @@ test "emotion Home and End jump to first and last intensity" {
     view.shell.emotion_radius = 48;
     try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.home));
     try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.end));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.page_up));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.page_down));
     try std.testing.expect(view.handleFocusedKey(.end, 0));
     try std.testing.expect(view.shell.emotion_x != 0 or view.shell.emotion_y != 0);
     try std.testing.expect(view.handleFocusedKey(.home, 0));
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_x);
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_y);
+    try std.testing.expect(view.handleFocusedKey(.page_down, 0));
+    try std.testing.expect(view.shell.emotion_x != 0 or view.shell.emotion_y != 0);
+    try std.testing.expect(view.handleFocusedKey(.page_up, 0));
     try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_x);
     try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_y);
 }

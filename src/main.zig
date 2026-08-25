@@ -2507,7 +2507,7 @@ fn applyDialogAction(
         return;
     }
     if (cc.client.dialogs.requiresInput(id) and value.len == 0) {
-        view.setDialogNotice("Fill the first field before continuing.");
+        view.setDialogNotice("Fill the first field first.");
         return;
     }
     const maybe_client = network.clientPtr();
@@ -2540,7 +2540,7 @@ fn applyDialogAction(
             }
             if (limit.len != 0) {
                 for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("The room search limit must be a number.");
+                    view.setDialogNotice("The room search cap must be a number.");
                     return;
                 };
             }
@@ -2580,7 +2580,7 @@ fn applyDialogAction(
             try client.joinWithKey(room.name, value);
         },
         .password => {
-            view.setDialogNotice("Account passwords stay in the password file.");
+            view.setDialogNotice("Wire account passwords stay in the password file.");
             return;
         },
         .channel_create => {
@@ -3763,18 +3763,18 @@ fn finishNotificationWho(gpa: std.mem.Allocator, state: *ChatState, workspace: *
     for (state.notification_current.items) |current| {
         if (!containsIgnoreCase(state.notification_previous.items, current)) {
             var text: [256]u8 = undefined;
-            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched CAST is online.", .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} is on the wire.", .{current}) catch "A watched CAST is on the wire.", .{ .modes = cc.proto.udi.bm_action });
             if (state.desktop_notification) |old| gpa.free(old);
-            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched CAST is online.");
+            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} is on the wire.", .{current}) catch "A watched CAST is on the wire.");
             changed = true;
         }
     }
     for (state.notification_previous.items) |previous| {
         if (!containsIgnoreCase(state.notification_current.items, previous)) {
             var text: [256]u8 = undefined;
-            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched CAST went offline.", .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} went off the wire.", .{previous}) catch "A watched CAST went off the wire.", .{ .modes = cc.proto.udi.bm_action });
             if (state.desktop_notification) |old| gpa.free(old);
-            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched CAST went offline.");
+            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} went off the wire.", .{previous}) catch "A watched CAST went off the wire.");
             changed = true;
         }
     }
@@ -3861,7 +3861,7 @@ fn runPersistentRules(
         if (std.ascii.eqlIgnoreCase(rule.action, "Ignore")) {
             suppress = true;
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Notify")) {
-            try transcript.addWithOptions("Automation", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Greeting", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Reply")) {
             if (value.len != 0) try client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value);
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Action")) {
