@@ -175,6 +175,17 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 50 leftovers in scope
+
+- Live `470` forwards JOIN the destination so the composer is not stuck
+  on "joining" after `+f`
+- `/identify` and the password dialog send a trailing 6-digit TOTP as
+  the third IDENTIFY argument
+- `/accountset` value, `/cs REGISTER` password, and `/vhost APPROVE`
+  reason keep leftover-of-line text
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 49 leftovers in scope
 
 - Resume-token `onyx/session-sync` with an empty local restoration skips the

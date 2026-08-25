@@ -3752,7 +3752,8 @@ fn applyDialogAction(
             network.runtime.auth.user = network.runtime.preferences.sasl_user.items;
             network.runtime.auth.password_file = network.runtime.preferences.sasl_password_file.items;
             if (maybe_client) |client| {
-                client.identify(account, password, "") catch |err| {
+                const secret, const totp = splitTrailingTotp(password);
+                client.identify(account, secret, totp) catch |err| {
                     try rejectDialogIrc(view, err, "Enter a valid account name and password.");
                     return;
                 };
@@ -4113,6 +4114,20 @@ fn leftoverComposerSlash(text: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(rest, "comic") or std.ascii.eqlIgnoreCase(rest, "text")) return false;
     }
     return true;
+}
+
+fn isTotpCode(value: []const u8) bool {
+    if (value.len != 6) return false;
+    for (value) |ch| if (ch < '0' or ch > '9') return false;
+    return true;
+}
+
+fn splitTrailingTotp(secret: []const u8) struct { []const u8, []const u8 } {
+    const trimmed = std.mem.trim(u8, secret, " \t");
+    const split = std.mem.lastIndexOfScalar(u8, trimmed, ' ') orelse return .{ trimmed, "" };
+    const last = std.mem.trim(u8, trimmed[split + 1 ..], " \t");
+    if (!isTotpCode(last)) return .{ trimmed, "" };
+    return .{ std.mem.trim(u8, trimmed[0..split], " \t"), last };
 }
 
 fn slashRestAfter(rest: []const u8, skip: usize) []const u8 {
@@ -5306,12 +5321,12 @@ fn sendOnyxServiceSlash(
         return true;
     };
     if (std.ascii.eqlIgnoreCase(verb, "identify")) {
-        const password = slashRestAfter(rest, 1);
+        const password, const totp = splitTrailingTotp(slashRestAfter(rest, 1));
         if (password.len == 0) {
             try appendSessionNotice(workspace, "Usage: /identify <account> <password> [code]");
             return true;
         }
-        client.identify(words[0], password, "") catch |err| {
+        client.identify(words[0], password, totp) catch |err| {
             try rejectServiceIrc(workspace, err);
             return true;
         };
@@ -6086,6 +6101,24 @@ fn sendOnyxServiceSlash(
         return true;
     }
     if ((std.ascii.eqlIgnoreCase(verb, "cs") or std.ascii.eqlIgnoreCase(verb, "channel")) and
+        count >= 1 and std.ascii.eqlIgnoreCase(words[0], "REGISTER"))
+    {
+        if (count < 2) {
+            try appendSessionNotice(workspace, "Usage: /cs REGISTER <#channel> [password]");
+            return true;
+        }
+        const password = slashRestAfter(rest, 2);
+        const send = if (password.len == 0)
+            client.sendService("CHANNEL", &.{ "REGISTER", words[1] })
+        else
+            client.sendService("CHANNEL", &.{ "REGISTER", words[1], password });
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if ((std.ascii.eqlIgnoreCase(verb, "cs") or std.ascii.eqlIgnoreCase(verb, "channel")) and
         count >= 1 and std.ascii.eqlIgnoreCase(words[0], "SET"))
     {
         if (count < 3) {
@@ -6103,17 +6136,37 @@ fn sendOnyxServiceSlash(
         };
         return true;
     }
-    if (std.ascii.eqlIgnoreCase(verb, "vhost") and count >= 1 and std.ascii.eqlIgnoreCase(words[0], "DENY")) {
+    if (std.ascii.eqlIgnoreCase(verb, "vhost") and count >= 1 and
+        (std.ascii.eqlIgnoreCase(words[0], "DENY") or std.ascii.eqlIgnoreCase(words[0], "APPROVE")))
+    {
         if (count < 2) {
-            try appendSessionNotice(workspace, "Usage: /vhost DENY <account> [reason]");
+            try appendSessionNotice(workspace, "Usage: /vhost DENY|APPROVE <account> [reason]");
             return true;
         }
+        var sub_buf: [8]u8 = undefined;
+        const subcommand = std.ascii.upperString(&sub_buf, words[0]);
         const reason = slashRestAfter(rest, 2);
         const send = if (reason.len == 0)
-            client.sendService("VHOST", &.{ "DENY", words[1] })
+            client.sendService("VHOST", &.{ subcommand, words[1] })
         else
-            client.sendService("VHOST", &.{ "DENY", words[1], reason });
+            client.sendService("VHOST", &.{ subcommand, words[1], reason });
         send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "accountset")) {
+        if (count < 4) {
+            try appendSessionNotice(workspace, "Usage: /accountset <account> <password> <field> <value>");
+            return true;
+        }
+        const value = slashRestAfter(rest, 3);
+        if (value.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /accountset <account> <password> <field> <value>");
+            return true;
+        }
+        client.sendService("ACCOUNTSET", &.{ words[0], words[1], words[2], value }) catch |err| {
             try rejectServiceIrc(workspace, err);
             return true;
         };
@@ -6448,6 +6501,29 @@ fn applyChannelForward(
     const line = std.fmt.bufPrint(&buf, "Forwarded from {s} to {s}", .{ from, dest }) catch "Room forwarded.";
     if (workspace.find(dest) orelse workspace.active) |index| {
         try workspace.rooms.items[index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    if (workspace.find(dest)) |dest_index| {
+        const from_index = workspace.find(from);
+        if ((from_index == null or from_index.? != dest_index) and !workspace.rooms.items[dest_index].joined) {
+            const key = workspace.rooms.items[dest_index].join_key orelse "";
+            if (try requestJoinWithKey(client, workspace, dest, key)) |notice| {
+                if (key.len != 0) {
+                    if (try requestJoinWithKey(client, workspace, dest, "")) |again| {
+                        try workspace.rooms.items[dest_index].transcript.addWithOptions(
+                            "Server",
+                            again,
+                            .{ .modes = cc.proto.udi.bm_action },
+                        );
+                    }
+                } else {
+                    try workspace.rooms.items[dest_index].transcript.addWithOptions(
+                        "Server",
+                        notice,
+                        .{ .modes = cc.proto.udi.bm_action },
+                    );
+                }
+            }
+        }
     }
     refreshJoinedState(workspace, state, "joining");
     return true;
@@ -8275,6 +8351,12 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expectEqualStrings("", parseJoinSlash("/join").?.channel);
     try std.testing.expectEqualStrings("My channel rules", slashRestAfter("SET #zig DESC My channel rules", 3));
     try std.testing.expectEqualStrings("was abusive", slashRestAfter("DENY alice was abusive", 2));
+    const totp_secret, const totp_code = splitTrailingTotp("secret 123456");
+    try std.testing.expectEqualStrings("secret", totp_secret);
+    try std.testing.expectEqualStrings("123456", totp_code);
+    const spaced_secret, const spaced_totp = splitTrailingTotp("my secret");
+    try std.testing.expectEqualStrings("my secret", spaced_secret);
+    try std.testing.expectEqualStrings("", spaced_totp);
     try std.testing.expectEqualStrings("my horse", slashRestAfter("alice * my horse", 2));
     try std.testing.expectEqualStrings("my secret", slashRestAfter("alice my secret", 1));
     try std.testing.expectEqualStrings("new pass", slashRestAfter("old new pass", 1));
@@ -8793,6 +8875,7 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
     try std.testing.expectEqualStrings("#vault", state.last_invite_channel.?);
     try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[vault].transcript.lines.items[0].text, "Forwarded from #old to #vault") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "JOIN #vault") != null);
     try client.queryMode("#vault");
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #vault\r\n") != null);
     const dest_modes = cc.net.message.parse(":server 324 me #vault +ntk destkey");
@@ -8887,6 +8970,14 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "IDENTIFY alice") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/identify alice my secret"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "IDENTIFY alice :my secret") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/identify alice secret 123456"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "IDENTIFY alice secret :123456") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accountset alice secret email foo@bar.com extra"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCOUNTSET alice secret email :foo@bar.com extra") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/cs REGISTER #zig my horse"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CHANNEL REGISTER #zig :my horse") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/vhost APPROVE alice looks good"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "VHOST APPROVE alice :looks good") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/register alice * my horse"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "REGISTER alice * :my horse") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ghost alice my secret"));
