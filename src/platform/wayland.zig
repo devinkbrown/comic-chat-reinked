@@ -42,7 +42,9 @@
 //! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
 //! when advertised. A supplied `XDG_ACTIVATION_TOKEN` is consumed through
 //! `xdg_activation_v1` so a launcher-started window can take focus (not
-//! used for notify/urgency). When a decoration manager is advertised, the client
+//! used for notify/urgency). `openPath` requests a fresh
+//! `xdg_activation_v1` token for `xdg-open` when advertised.
+//! When a decoration manager is advertised, the client
 //! requests server-side decorations (`zxdg` or `xdg`) and re-requests SSD
 //! once if the compositor configures client-side mode. xdg-shell records
 //! maximized/fullscreen/tiled/suspended configure states, records
@@ -127,7 +129,13 @@ const xdg_surface_ack_configure: u16 = 4;
 const xdg_toplevel_destroy: u16 = 0;
 const xdg_toplevel_set_title: u16 = 2;
 const xdg_toplevel_set_app_id: u16 = 3;
+const xdg_activation_get_token: u16 = 1;
 const xdg_activation_activate: u16 = 2;
+const activation_token_destroy: u16 = 0;
+const activation_token_set_serial: u16 = 1;
+const activation_token_set_app_id: u16 = 2;
+const activation_token_set_surface: u16 = 3;
+const activation_token_commit: u16 = 4;
 const xdg_toplevel_set_max_size: u16 = 7;
 const xdg_toplevel_set_min_size: u16 = 8;
 const xdg_min_width: u32 = 160;
@@ -771,7 +779,12 @@ pub const Window = struct {
     }
 
     pub fn openPath(self: *Window, gpa: std.mem.Allocator, path: []const u8) !void {
-        return services.openPath(gpa, self.conn.io, path);
+        if (self.takeOutgoingActivationToken()) |token| {
+            defer self.gpa.free(token);
+            return services.openPathActivated(gpa, self.conn.io, path, token);
+        }
+        var fallback: [64]u8 = undefined;
+        return services.openPathActivated(gpa, self.conn.io, path, services.generatedStartupId(&fallback));
     }
 
     pub fn printPath(self: *Window, gpa: std.mem.Allocator, path: []const u8) !void {
@@ -2215,6 +2228,50 @@ pub const Window = struct {
         try sendTwoU32(&self.conn, self.toplevel_icon_id, toplevel_icon_add_buffer, buffer.id, 1);
         try sendTwoU32(&self.conn, self.toplevel_icon_manager_id, toplevel_icon_set_icon, self.xdg_toplevel_id, self.toplevel_icon_id);
         self.icon_buffer = buffer;
+    }
+
+    fn takeOutgoingActivationToken(self: *Window) ?[]u8 {
+        if (self.activation_id == 0 or self.surface_id == 0) return null;
+        const token_id = self.conn.allocId() catch return null;
+        sendOneU32(&self.conn, self.activation_id, xdg_activation_get_token, token_id) catch return null;
+        if (self.last_serial != 0 and self.seat_id != 0) {
+            sendTwoU32(&self.conn, token_id, activation_token_set_serial, self.last_serial, self.seat_id) catch {};
+        }
+        sendString(&self.conn, self.gpa, token_id, activation_token_set_app_id, "comicchat") catch {};
+        sendOneU32(&self.conn, token_id, activation_token_set_surface, self.surface_id) catch {};
+        sendEmpty(&self.conn, token_id, activation_token_commit) catch {
+            sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+            return null;
+        };
+        sendEmpty(&self.conn, self.surface_id, surface_commit) catch {};
+        const callback = self.conn.allocId() catch {
+            sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+            return null;
+        };
+        sendOneU32(&self.conn, wl_display, display_sync, callback) catch {
+            sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+            return null;
+        };
+        var token: ?[]u8 = null;
+        while (true) {
+            const msg = self.conn.readMessage(self.gpa) catch {
+                if (token) |bytes| self.gpa.free(bytes);
+                sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+                return null;
+            };
+            defer msg.deinit(self.gpa);
+            if (msg.object == token_id and msg.opcode == 0) {
+                if (parseWireString(msg.body)) |value| {
+                    if (value.len != 0 and token == null) token = self.gpa.dupe(u8, value) catch null;
+                } else |_| {}
+                continue;
+            }
+            if (msg.object == callback and msg.opcode == 0) {
+                sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+                return token;
+            }
+            _ = self.dispatch(msg) catch {};
+        }
     }
 
     fn activateStartupToken(self: *Window) !void {

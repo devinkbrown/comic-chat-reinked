@@ -37,7 +37,8 @@
 //!     while hidden or fully obscured; MapNotify exposes), a scaled
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
-//!     `_NET_STARTUP_INFO` remove after MapWindow, EnterNotify cursor restore,
+//!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
+//!     for `xdg-open`, EnterNotify cursor restore,
 //!     XSETTINGS owner re-watch after DestroyNotify (that owner does not close
 //!     the chat),
 //!     allowed actions,
@@ -592,7 +593,9 @@ pub const Window = struct {
     }
 
     pub fn openPath(self: *Window, gpa: std.mem.Allocator, path: []const u8) !void {
-        return services.openPath(gpa, self.conn.io, path);
+        var token_buf: [80]u8 = undefined;
+        const time: u32 = if (self.last_user_time != 0) self.last_user_time else 1;
+        return services.openPathActivated(gpa, self.conn.io, path, services.generatedStartupIdTimed(&token_buf, time));
     }
 
     pub fn printPath(self: *Window, gpa: std.mem.Allocator, path: []const u8) !void {

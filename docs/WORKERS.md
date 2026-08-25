@@ -139,9 +139,11 @@ hash.
   `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
   `xdg_toplevel_icon_v1` when advertised. Wayland consumes
-  `XDG_ACTIVATION_TOKEN` via `xdg_activation_v1`; X11 sets `_NET_STARTUP_ID`
-  from that token or `DESKTOP_STARTUP_ID` and sends the startup-notification
-  remove ClientMessage after MapWindow. EnterNotify reinstalls the scaled
+  `XDG_ACTIVATION_TOKEN` via `xdg_activation_v1` and requests a fresh token
+  for `xdg-open`; X11 sets `_NET_STARTUP_ID`
+  from that token or `DESKTOP_STARTUP_ID`, sends the startup-notification
+  remove ClientMessage after MapWindow, and exports a unique startup id
+  when opening a path. EnterNotify reinstalls the scaled
   cursor. See `xkb.zig` and
   `compose_file.zig` for the exact parsing scope. Do not add an AT-SPI bus
   or a Wayland→X11 fallback.

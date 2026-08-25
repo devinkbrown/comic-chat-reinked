@@ -272,7 +272,8 @@ tables, accepts committed IME text through text-input-v3 (multiline hint,
 composer-strip cursor rectangle, confirming-key de-dupe), restores held
 modifiers from the keyboard-enter keys array and Caps Lock from the
 conventional Lock modifier bit, consumes `XDG_ACTIVATION_TOKEN` via
-`xdg_activation_v1` so a launcher-started window can take focus, maps native touch contacts to
+`xdg_activation_v1` so a launcher-started window can take focus and requests a
+fresh token for `xdg-open`, maps native touch contacts to
 the shared interaction contract, tracks entered `wl_output` integer scale
 plus `wp_fractional_scale_v1` / `wp_viewporter` and
 `wl_surface.preferred_buffer_scale` when advertised, advertises xdg-shell
@@ -316,7 +317,7 @@ installs a scaled core pointer and `_NET_WM_ICON`, raises urgency on
 `notify` until FocusIn (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
 present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
 `_NET_WM_USER_TIME`, `_NET_STARTUP_ID` plus a startup-notification remove
-after map, EnterNotify cursor restore, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
+after map, an outgoing `DESKTOP_STARTUP_ID` for `xdg-open`, EnterNotify cursor restore, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
 replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,

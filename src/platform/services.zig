@@ -5,7 +5,8 @@
 //! X server cannot complete the native transfer (including `wl-paste --primary`
 //! / `xclip -selection primary` when PRIMARY is missing), plus notifications
 //! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
-//! printing. Incoming desktop file-list MIME and receive-only RTF are parsed
+//! printing. `xdg-open` can carry an outgoing activation / startup token.
+//! Incoming desktop file-list MIME and receive-only RTF are parsed
 //! here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
 //! internal application fallback.
@@ -1066,7 +1067,38 @@ pub fn notify(gpa: std.mem.Allocator, io: std.Io, title: []const u8, body: []con
 }
 
 pub fn openPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    return openPathActivated(gpa, io, path, null);
+}
+
+/// Opens a path/URL with `xdg-open`, exporting an activation token so the
+/// launched window can take focus. `token` becomes both
+/// `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`.
+pub fn openPathActivated(gpa: std.mem.Allocator, io: std.Io, path: []const u8, token: ?[]const u8) !void {
+    if (token) |value| {
+        var act_buf: [576]u8 = undefined;
+        var start_buf: [576]u8 = undefined;
+        if (activationEnvArgs(value, &act_buf, &start_buf)) |env| {
+            return runNoOutput(gpa, io, &.{ "env", env.activation, env.startup, "xdg-open", path });
+        }
+    }
     return runNoOutput(gpa, io, &.{ "xdg-open", path });
+}
+
+pub fn generatedStartupId(buf: []u8) ?[]const u8 {
+    return generatedStartupIdTimed(buf, 1);
+}
+
+pub fn generatedStartupIdTimed(buf: []u8, time: u32) ?[]const u8 {
+    const pid: u32 = @intCast(@max(0, linux.getpid()));
+    return std.fmt.bufPrint(buf, "reinked-{d}-{d}", .{ pid, time }) catch null;
+}
+
+pub fn activationEnvArgs(token: []const u8, act_buf: []u8, start_buf: []u8) ?struct { activation: []const u8, startup: []const u8 } {
+    if (token.len == 0 or token.len >= 512) return null;
+    if (std.mem.indexOfScalar(u8, token, 0) != null) return null;
+    const activation = std.fmt.bufPrint(act_buf, "XDG_ACTIVATION_TOKEN={s}", .{token}) catch return null;
+    const startup = std.fmt.bufPrint(start_buf, "DESKTOP_STARTUP_ID={s}", .{token}) catch return null;
+    return .{ .activation = activation, .startup = startup };
 }
 
 pub fn printPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
@@ -1301,6 +1333,20 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
 test "notify-send uses a normal urgency hint" {
     try std.testing.expectEqualStrings("--urgency=normal", notify_urgency_flag);
     try std.testing.expectEqualStrings("--icon=applications-internet", notify_icon_flag);
+}
+
+test "activation env args export both token names and reject empty or huge tokens" {
+    var act: [576]u8 = undefined;
+    var start: [576]u8 = undefined;
+    const env = activationEnvArgs("focus-1", &act, &start).?;
+    try std.testing.expectEqualStrings("XDG_ACTIVATION_TOKEN=focus-1", env.activation);
+    try std.testing.expectEqualStrings("DESKTOP_STARTUP_ID=focus-1", env.startup);
+    try std.testing.expect(activationEnvArgs("", &act, &start) == null);
+    try std.testing.expect(activationEnvArgs("bad\x00token", &act, &start) == null);
+    var id_buf: [80]u8 = undefined;
+    const generated = generatedStartupIdTimed(&id_buf, 9).?;
+    try std.testing.expect(std.mem.startsWith(u8, generated, "reinked-"));
+    try std.testing.expect(std.mem.endsWith(u8, generated, "-9"));
 }
 
 test "isHtmlMime accepts charset parameters" {
