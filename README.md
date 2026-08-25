@@ -287,7 +287,7 @@ decode including receive-only `text/plain;charset=utf-16` and `text/html`, and C
 normalized to LF), pastes PRIMARY on middle-click as typed keys, injects
 text/`file:` drops as typed keys with `data_offer.set_actions(copy)`, shows
 a `wp_cursor_shape_v1` or scaled shm pointer, and sets
-`xdg_toplevel_icon_v1` when advertised. Armenian and Georgian keysyms type
+`xdg_toplevel_icon_v1` when advertised. Armenian, Georgian, and Thai keysyms type
 without an IME.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
