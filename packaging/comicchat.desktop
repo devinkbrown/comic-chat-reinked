@@ -1,9 +1,13 @@
 [Desktop Entry]
 Type=Application
-Name=Reinked
-Comment=Open a Reinked conversation or locator
+Name=Comic Chat
+GenericName=Comic Chat
+Comment=Turn IRC into a source-faithful comic page
 Exec=reinked %f
-Icon=applications-internet
+TryExec=reinked
+Icon=comicchat
+StartupWMClass=comicchat
 Terminal=false
-Categories=Network;Chat;
+Categories=Network;Chat;InstantMessaging;
 MimeType=application/x-comicchat-conversation;application/x-comicchat-locator;
+Keywords=IRC;IRCX;comic;chat;

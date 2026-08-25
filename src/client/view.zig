@@ -3,7 +3,7 @@
 //! The workspace geometry follows the established splitter composition:
 //! room tabs above an 80/20 conversation/member split, a fixed-height say
 //! window below the page/text view, and (in comic mode) a 30/70 member/bodycam
-//! split on the right. The skin is modernized, but the spatial contract is not.
+//! split on the right. Ink Sunday chrome frames a source-faithful page.
 
 const std = @import("std");
 const session = @import("../comic/session.zig");
@@ -70,6 +70,7 @@ pub const Action = union(enum) {
     send,
     quit,
     connection,
+    persist_layout,
     dialog_accept: dialogs.Id,
     dialog_cancel: dialogs.Id,
     dialog_browse: dialogs.Id,
@@ -112,7 +113,11 @@ pub const View = struct {
     focused_say_action: u8 = 0,
     hovered_composer: bool = false,
     hovered_status: bool = false,
+    hovered_status_tab: bool = false,
+    hovered_room_tab: ?usize = null,
+    hovered_room_overflow: bool = false,
     hovered_status_action: ?StatusActionHover = null,
+    focused_status_action: ?StatusActionHover = null,
     hovered_column_control: ?ColumnControlHover = null,
     hovered_member: ?usize = null,
     status_panel_open: bool = false,
@@ -133,6 +138,8 @@ pub const View = struct {
     room_tab_count: usize = 1,
     room_tab_first: usize = 0,
     can_moderate: bool = false,
+    wire_live: bool = true,
+    name_taken: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, initial_width: u32, initial_height: u32) !View {
         return .{
@@ -193,25 +200,53 @@ pub const View = struct {
     /// the body camera keeps the source arrow-key and Home behavior.
     pub fn handleFocusedKey(self: *View, key: platform_event.Key, member_count: usize) bool {
         if (self.status_panel_open and key == .escape) {
-            self.status_panel_open = false;
-            self.hovered_status_action = null;
+            self.closeStatusPanel();
             return true;
         }
         switch (self.shell.focus) {
-            .members => switch (key) {
-                .up => self.shell.moveMemberSelection(member_count, -1),
-                .down => self.shell.moveMemberSelection(member_count, 1),
-                .home => if (member_count > 0) self.shell.selectMember(0),
-                .end => if (member_count > 0) self.shell.selectMember(member_count - 1),
-                else => return false,
+            .members => {
+                const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, self.shell.content_mode == .comic, self.shell.show_members);
+                const viewport = memberViewport(layout.members, self.shell.member_view == .icons);
+                const step: i32 = @intCast(viewport.step);
+                const page: i32 = @intCast(@max(1, viewport.visible));
+                switch (key) {
+                    .up => self.shell.moveMemberSelection(member_count, -step),
+                    .down => self.shell.moveMemberSelection(member_count, step),
+                    .left => if (self.shell.member_view == .icons) self.shell.moveMemberSelection(member_count, -1) else return false,
+                    .right => if (self.shell.member_view == .icons) self.shell.moveMemberSelection(member_count, 1) else return false,
+                    .page_up => self.shell.moveMemberSelection(member_count, -page),
+                    .page_down => self.shell.moveMemberSelection(member_count, page),
+                    .home => if (member_count > 0) self.shell.selectMember(0),
+                    .end => if (member_count > 0) self.shell.selectMember(member_count - 1),
+                    .escape => {
+                        self.shell.focus = .composer;
+                        return true;
+                    },
+                    else => return false,
+                }
             },
             .emotion => switch (key) {
                 .left => self.shell.moveEmotion(-1, 0),
                 .right => self.shell.moveEmotion(1, 0),
                 .up => self.shell.moveEmotion(0, -1),
                 .down => self.shell.moveEmotion(0, 1),
-                .home => self.shell.neutralEmotion(),
+                .home, .page_up => self.shell.neutralEmotion(),
+                .end, .page_down => self.shell.outerEmotion(),
+                .escape => {
+                    self.shell.focus = .composer;
+                    return true;
+                },
                 else => return false,
+            },
+            .composer => {
+                if (key != .escape) return false;
+                self.shell.focus = .navigation;
+                return true;
+            },
+            .transcript => {
+                if (key != .escape) return false;
+                self.shell.focus = .composer;
+                return true;
             },
             else => return false,
         }
@@ -229,20 +264,80 @@ pub const View = struct {
     pub fn handleFocusedActionKey(self: *View, key: platform_event.Key) ?Action {
         switch (self.shell.focus) {
             .toolbar => switch (key) {
-                .left, .up => self.focused_toolbar = (self.focused_toolbar + @as(u8, @intCast(ui.ToolbarLayout.button_count)) - 1) % @as(u8, @intCast(ui.ToolbarLayout.button_count)),
-                .right, .down => self.focused_toolbar = (self.focused_toolbar + 1) % @as(u8, @intCast(ui.ToolbarLayout.button_count)),
-                .home => self.focused_toolbar = 0,
-                .end => self.focused_toolbar = @intCast(ui.ToolbarLayout.button_count - 1),
+                .left, .up => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, false, self.wire_live),
+                .right, .down => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, true, self.wire_live),
+                .home, .page_up => self.focused_toolbar = firstEnabledToolbar(self.wire_live),
+                .end, .page_down => self.focused_toolbar = lastEnabledToolbar(self.wire_live),
                 .enter => return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]),
-                else => return null,
+                .char => |code| if (code == ' ') return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]) else return .none,
+                .escape => {
+                    self.shell.focus = .navigation;
+                    return .none;
+                },
+                .tab => return null,
+                else => return .none,
             },
             .say_actions => switch (key) {
-                .left, .up => self.focused_say_action = (self.focused_say_action + @as(u8, @intCast(geometry.say_button_count)) - 1) % @as(u8, @intCast(geometry.say_button_count)),
-                .right, .down => self.focused_say_action = (self.focused_say_action + 1) % @as(u8, @intCast(geometry.say_button_count)),
-                .home => self.focused_say_action = 0,
-                .end => self.focused_say_action = @intCast(geometry.say_button_count - 1),
+                .left, .up => self.focused_say_action = nextEnabledSayAction(self.focused_say_action, false, self.wire_live),
+                .right, .down => self.focused_say_action = nextEnabledSayAction(self.focused_say_action, true, self.wire_live),
+                .home, .page_up => self.focused_say_action = firstEnabledSayAction(self.wire_live),
+                .end, .page_down => self.focused_say_action = lastEnabledSayAction(self.wire_live),
                 .enter => return self.activateSayAction(self.focused_say_action),
-                else => return null,
+                .char => |code| if (code == ' ') return self.activateSayAction(self.focused_say_action) else return .none,
+                .escape => {
+                    self.shell.focus = .composer;
+                    return .none;
+                },
+                .tab => return null,
+                else => return .none,
+            },
+            .status => switch (key) {
+                .enter => return self.activateFocusedStatus(),
+                .char => |code| if (code == ' ') return self.activateFocusedStatus() else return .none,
+                .left, .up => {
+                    if (self.status_panel_open) self.focused_status_action = .connection;
+                },
+                .right, .down => {
+                    if (self.status_panel_open) self.focused_status_action = .settings;
+                },
+                .home => {
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .connection;
+                },
+                .end => {
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .settings;
+                },
+                .page_up => {
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .connection;
+                },
+                .page_down => {
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .settings;
+                },
+                .escape => {
+                    if (self.status_panel_open) {
+                        self.closeStatusPanel();
+                        return .none;
+                    }
+                    self.shell.focus = .navigation;
+                    return .none;
+                },
+                .tab => return null,
+                else => return .none,
+            },
+            .members => switch (key) {
+                .enter => return self.activateFocusedMember(),
+                .char => |code| if (code == ' ') return self.activateFocusedMember() else return .none,
+                .up, .down, .left, .right, .home, .end, .page_up, .page_down, .escape, .tab => return null,
+                else => return .none,
+            },
+            .emotion => switch (key) {
+                .enter => return .send_expression,
+                .char => |code| if (code == ' ') return .send_expression else return .none,
+                .left, .right, .up, .down, .home, .end, .escape, .tab, .page_up, .page_down => return null,
+                else => return .none,
             },
             else => return null,
         }
@@ -257,33 +352,85 @@ pub const View = struct {
                 self.hovered_context_item = null;
                 self.focused_context_item = null;
             },
-            .up => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse 0, false, self.can_moderate),
-            .down => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate),
-            .home => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate),
-            .end => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate),
-            .enter => {
-                const item = self.focused_context_item orelse firstEnabledContextItem(kind, self.can_moderate);
-                self.context_menu = null;
-                self.hovered_context_item = null;
-                self.focused_context_item = null;
-                if (kind == .body_camera and item == 3) return .send_expression;
-                self.invokeContextItem(kind, item);
-            },
-            else => return null,
+            .up, .left => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse 0, false, self.can_moderate, self.wire_live),
+            .down, .right => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate, self.wire_live),
+            .home, .page_up => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live),
+            .end, .page_down => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate, self.wire_live),
+            .enter => return self.activateFocusedContextItem(),
+            .char => |code| if (code == ' ') return self.activateFocusedContextItem() else return .none,
+            else => return .none,
         }
         return .none;
     }
 
     pub fn handleTranscriptKey(self: *View, key: platform_event.Key, total_lines: usize, extend: bool) bool {
+        const pages_history = self.shell.focus == .composer or self.shell.focus == .toolbar or self.shell.focus == .say_actions or self.shell.focus == .status or self.shell.focus == .emotion;
+        if (pages_history) {
+            switch (key) {
+                .page_up => {
+                    self.pageEarlier(total_lines);
+                    return true;
+                },
+                .page_down => {
+                    self.pageLater();
+                    return true;
+                },
+                .home => if (self.shell.focus == .status) {
+                    self.jumpEarliest(total_lines);
+                    return true;
+                } else return false,
+                .end => if (self.shell.focus == .status) {
+                    self.jumpLatest();
+                    return true;
+                } else return false,
+                else => return false,
+            }
+        }
         if (self.shell.focus != .transcript) return false;
         switch (key) {
             .up => self.shell.moveTranscriptSelection(total_lines, -1, extend),
             .down => self.shell.moveTranscriptSelection(total_lines, 1, extend),
             .home => self.shell.selectTranscriptLine(total_lines, 0, extend),
             .end => if (total_lines > 0) self.shell.selectTranscriptLine(total_lines, total_lines - 1, extend),
+            .page_up => self.pageEarlier(total_lines),
+            .page_down => self.pageLater(),
+            .escape => {
+                if (self.shell.transcript_cursor == null) return false;
+                self.shell.transcript_cursor = null;
+                self.shell.transcript_anchor = null;
+            },
             else => return false,
         }
         return true;
+    }
+
+    /// Alt+letter opens Page/Ink/Show/Look/Room/CAST/Tools. Alt+Down
+    /// opens the hovered menu, or Page. Alt+F/E/V still open those menus.
+    /// Alt+O still opens Look.
+    pub fn handleMenuAccelerator(self: *View, key: platform_event.Key, alt: bool) ?Action {
+        if (!alt or self.active_dialog != null or self.context_menu != null) return null;
+        const menu: u8 = switch (key) {
+            .down => self.hovered_menu orelse 0,
+            .char => |code| label: {
+                const ch = std.math.cast(u8, code) orelse return null;
+                break :label switch (std.ascii.toLower(ch)) {
+                    'f' => 0,
+                    'e' => 1,
+                    'v' => 2,
+                    'o' => 3,
+                    'r' => 4,
+                    'm' => 5,
+                    't' => 6,
+                    else => return null,
+                };
+            },
+            else => return null,
+        };
+        self.active_menu = menu;
+        self.hovered_menu = menu;
+        self.shell.focus = .navigation;
+        self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate, self.wire_live);
+        return .none;
     }
 
     /// Keyboard navigation for the complete menu bar. A menu owns arrow,
@@ -295,10 +442,41 @@ pub const View = struct {
             switch (key) {
                 .enter, .down => {
                     self.active_menu = self.hovered_menu orelse 0;
-                    self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate);
+                    self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
                     return .none;
                 },
-                else => return null,
+                .char => |code| if (code == ' ') {
+                    self.active_menu = self.hovered_menu orelse 0;
+                    self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
+                    return .none;
+                } else return .none,
+                .left, .right => {
+                    const comic_mode = self.shell.content_mode == .comic;
+                    const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
+                    const viewport = tabViewport(layout, comic_mode);
+                    if (key == .right and self.room_tab_first + viewport.capacity < self.room_tab_count)
+                        return .{ .room_tab = self.room_tab_first + viewport.capacity };
+                    if (key == .left and self.room_tab_first > 0)
+                        return .{ .room_tab = self.room_tab_first - 1 };
+                    return .none;
+                },
+                .home => if (self.room_tab_count > 0) return .{ .room_tab = 0 } else return .none,
+                .end => if (self.room_tab_count > 0) return .{ .room_tab = self.room_tab_count - 1 } else return .none,
+                .page_up => if (self.room_tab_first > 0) return .{ .room_tab = self.room_tab_first - 1 } else return .none,
+                .page_down => {
+                    const comic_mode = self.shell.content_mode == .comic;
+                    const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
+                    const viewport = tabViewport(layout, comic_mode);
+                    if (self.room_tab_first + viewport.capacity < self.room_tab_count)
+                        return .{ .room_tab = self.room_tab_first + viewport.capacity };
+                    return .none;
+                },
+                .escape => {
+                    self.shell.focus = .composer;
+                    return .none;
+                },
+                .tab => return null,
+                else => return .none,
             }
         };
         switch (key) {
@@ -309,13 +487,14 @@ pub const View = struct {
             .left, .right => {
                 const count: u8 = @intCast(menu_labels.len);
                 self.active_menu = if (key == .left) (menu + count - 1) % count else (menu + 1) % count;
-                self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate);
+                self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
             },
-            .up => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse 0, false, self.can_moderate),
-            .down => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse menuItemCount(menu) - 1, true, self.can_moderate),
-            .home => self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate),
-            .end => self.hovered_menu_item = lastEnabledMenuItem(menu, self.can_moderate),
-            .enter => return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate)),
+            .up => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse 0, false, self.can_moderate, self.wire_live),
+            .down => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse menuItemCount(menu) - 1, true, self.can_moderate, self.wire_live),
+            .home, .page_up => self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate, self.wire_live),
+            .end, .page_down => self.hovered_menu_item = lastEnabledMenuItem(menu, self.can_moderate, self.wire_live),
+            .enter => return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate, self.wire_live)),
+            .char => |code| if (code == ' ') return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate, self.wire_live)) else return .none,
             else => return .none,
         }
         return .none;
@@ -331,6 +510,14 @@ pub const View = struct {
 
     pub fn jumpLatest(self: *View) void {
         self.shell.jumpLatest();
+    }
+
+    fn jumpEarliest(self: *View, total_lines: usize) void {
+        if (total_lines <= 9) {
+            self.shell.history_offset = 0;
+            return;
+        }
+        self.shell.history_offset = total_lines - 9;
     }
 
     pub fn setContentMode(self: *View, mode: shell_mod.ContentMode) void {
@@ -376,11 +563,42 @@ pub const View = struct {
         self.hovered_dialog_browse = null;
         self.hovered_say_action = null;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_column_control = null;
         self.hovered_member = null;
         self.context_menu = null;
         self.hovered_context_item = null;
         self.active_dialog = id;
+        if (id == .settings) self.prefillSettingsFromAppearance();
+    }
+
+    fn prefillSettingsFromAppearance(self: *View) void {
+        const theme = if (self.appearance.mode == .dark) "Dark studio" else "Light studio";
+        const accent = switch (self.appearance.accent) {
+            .cobalt => "Vermillion",
+            .violet => "Violet",
+            .forest => "Forest",
+        };
+        const contrast = if (self.appearance.high_contrast) "High contrast" else "Usual";
+        const page = if (self.shell.content_mode == .text) "Text" else "Comic";
+        const panels = switch (self.shell.comic_columns) {
+            1 => "1 panel",
+            2 => "2 panels",
+            3 => "3 panels",
+            5 => "5 panels",
+            6 => "6 panels",
+            else => "4 panels",
+        };
+        const members = if (self.shell.show_members) "Shown" else "Hidden";
+        const member_layout = if (self.shell.member_view == .list) "List" else "Portraits";
+        const details = if (self.status_detailed) "Full" else "Tight";
+        const values = [_][]const u8{ theme, accent, contrast, page, panels, members, member_layout, details };
+        for (values, 0..) |value, index| {
+            self.dialog_editors[index].clear();
+            self.dialog_editors[index].paste(value) catch {};
+        }
     }
 
     pub fn openConnectionDialog(self: *View, host: []const u8, port: u16, use_tls: bool) void {
@@ -428,7 +646,7 @@ pub const View = struct {
                 if (ui.contains(dialogBrowseRect(dialog_layout.fieldRectScrolled(index, self.dialog_first_field)), pointer.x, pointer.y)) index else null
             else
                 null;
-            const changed = self.hovered_dialog_button != next or self.hovered_dialog_field != next_field or self.hovered_dialog_browse != next_browse or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_column_control != null or self.hovered_member != null;
+            const changed = self.hovered_dialog_button != next or self.hovered_dialog_field != next_field or self.hovered_dialog_browse != next_browse or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_column_control != null or self.hovered_member != null;
             self.hovered_dialog_button = next;
             self.hovered_dialog_field = next_field;
             self.hovered_dialog_browse = next_browse;
@@ -438,6 +656,9 @@ pub const View = struct {
             self.hovered_say_action = null;
             self.hovered_composer = false;
             self.hovered_status = false;
+            self.hovered_status_tab = false;
+            self.hovered_room_tab = null;
+            self.hovered_room_overflow = false;
             self.hovered_column_control = null;
             self.hovered_member = null;
             return changed;
@@ -465,24 +686,30 @@ pub const View = struct {
             const target = hit_test.shell(layout, self.shell.content_mode == .comic, self.shell.member_view == .icons, pointer.x, pointer.y, member_count);
             if (target == .menu) {
                 const next_menu = target.menu;
-                const changed = self.active_menu != next_menu or self.hovered_menu != next_menu or self.hovered_menu_item != null or self.hovered_say_action != null or self.hovered_status or self.hovered_column_control != null or self.hovered_member != null;
+                const changed = self.active_menu != next_menu or self.hovered_menu != next_menu or self.hovered_menu_item != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_column_control != null or self.hovered_member != null;
                 self.active_menu = next_menu;
                 self.hovered_menu = next_menu;
                 self.hovered_menu_item = null;
                 self.hovered_toolbar = null;
                 self.hovered_say_action = null;
                 self.hovered_status = false;
+                self.hovered_status_tab = false;
+                self.hovered_room_tab = null;
+                self.hovered_room_overflow = false;
                 self.hovered_column_control = null;
                 self.hovered_member = null;
                 return changed;
             }
             const item = menuPopupItem(self.canvas.width, menu, pointer.x, pointer.y);
-            const changed = self.hovered_menu_item != item or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_status or self.hovered_column_control != null or self.hovered_member != null;
+            const changed = self.hovered_menu_item != item or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_column_control != null or self.hovered_member != null;
             self.hovered_menu_item = item;
             self.hovered_menu = null;
             self.hovered_toolbar = null;
             self.hovered_say_action = null;
             self.hovered_status = false;
+            self.hovered_status_tab = false;
+            self.hovered_room_tab = null;
+            self.hovered_room_overflow = false;
             self.hovered_column_control = null;
             self.hovered_member = null;
             return changed;
@@ -502,7 +729,14 @@ pub const View = struct {
             .toolbar => |index| self.setHover(null, index),
             .say_action => |index| self.setContentHover(index, null, null),
             .composer => self.setComposerHover(),
-            .status_window, .connection_status => self.setStatusHover(),
+            .status_window => self.setStatusTabHover(),
+            .room_tab => if (roomOverflowContains(layout, comic_mode, self.room_tab_count, self.room_tab_first, pointer.x, pointer.y))
+                self.setRoomOverflowHover()
+            else if (roomTabIndexAt(self, layout, comic_mode, pointer.x)) |index|
+                self.setRoomTabHover(index)
+            else
+                self.setHover(null, null),
+            .connection_status => self.setStatusHover(),
             .comic_columns_decrease => self.setContentHover(null, .decrease, null),
             .comic_columns_increase => self.setContentHover(null, .increase, null),
             .member => |index| self.setContentHover(null, null, index),
@@ -511,13 +745,16 @@ pub const View = struct {
     }
 
     fn setHover(self: *View, menu: ?u8, toolbar: ?u8) bool {
-        const changed = self.hovered_menu != menu or self.hovered_menu_item != null or self.hovered_toolbar != toolbar or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != menu or self.hovered_menu_item != null or self.hovered_toolbar != toolbar or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = menu;
         self.hovered_menu_item = null;
         self.hovered_toolbar = toolbar;
         self.hovered_say_action = null;
         self.hovered_composer = false;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -525,13 +762,16 @@ pub const View = struct {
     }
 
     fn setContentHover(self: *View, say_action: ?u8, column_control: ?ColumnControlHover, member: ?usize) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != say_action or self.hovered_composer or self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != column_control or self.hovered_member != member;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != say_action or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != column_control or self.hovered_member != member;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = say_action;
         self.hovered_composer = false;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = column_control;
         self.hovered_member = member;
@@ -539,13 +779,16 @@ pub const View = struct {
     }
 
     fn setComposerHover(self: *View) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or !self.hovered_composer or self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or !self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = null;
         self.hovered_composer = true;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -553,13 +796,67 @@ pub const View = struct {
     }
 
     fn setStatusHover(self: *View) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or !self.hovered_status or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or !self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = null;
         self.hovered_composer = false;
         self.hovered_status = true;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
+        self.hovered_status_action = null;
+        self.hovered_column_control = null;
+        self.hovered_member = null;
+        return changed;
+    }
+
+    fn setStatusTabHover(self: *View) bool {
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or !self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        self.hovered_menu = null;
+        self.hovered_menu_item = null;
+        self.hovered_toolbar = null;
+        self.hovered_say_action = null;
+        self.hovered_composer = false;
+        self.hovered_status = false;
+        self.hovered_status_tab = true;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
+        self.hovered_status_action = null;
+        self.hovered_column_control = null;
+        self.hovered_member = null;
+        return changed;
+    }
+
+    fn setRoomTabHover(self: *View, tab: usize) bool {
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != tab or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        self.hovered_menu = null;
+        self.hovered_menu_item = null;
+        self.hovered_toolbar = null;
+        self.hovered_say_action = null;
+        self.hovered_composer = false;
+        self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = tab;
+        self.hovered_room_overflow = false;
+        self.hovered_status_action = null;
+        self.hovered_column_control = null;
+        self.hovered_member = null;
+        return changed;
+    }
+
+    fn setRoomOverflowHover(self: *View) bool {
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or !self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        self.hovered_menu = null;
+        self.hovered_menu_item = null;
+        self.hovered_toolbar = null;
+        self.hovered_say_action = null;
+        self.hovered_composer = false;
+        self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = true;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -567,13 +864,16 @@ pub const View = struct {
     }
 
     fn setStatusActionHover(self: *View, action: ?StatusActionHover) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_action != action or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != action or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
         self.hovered_say_action = null;
         self.hovered_composer = false;
         self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = action;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -685,6 +985,16 @@ pub const View = struct {
                 }
             },
             .char => |ch| {
+                if (self.dialog_action_focus) |button| {
+                    if (ch == ' ') {
+                        if (button == .cancel) {
+                            _ = self.closeDialog();
+                            return .{ .dialog_cancel = id };
+                        }
+                        return .{ .dialog_accept = id };
+                    }
+                    return .none;
+                }
                 if (self.dialog_browse_focus) return .none;
                 if (modifiers.control) {
                     const shortcut = if (ch <= 0x7f) std.ascii.toLower(@intCast(ch)) else 0;
@@ -697,6 +1007,8 @@ pub const View = struct {
                 } else if (dialogs.fieldAcceptsText(id, self.dialog_field) and editor.text().len < 512) {
                     try editor.insert(ch);
                     self.dialog_notice = "";
+                } else if (ch == ' ' and dialogs.fields(id)[self.dialog_field].kind == .choice) {
+                    self.cycleDialogChoice(id, self.dialog_field);
                 }
             },
             .backspace => if (dialogs.fieldAcceptsText(id, self.dialog_field) and self.dialog_action_focus == null and !self.dialog_browse_focus) {
@@ -707,7 +1019,12 @@ pub const View = struct {
                 editor.delete();
                 self.dialog_notice = "";
             },
-            .left => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+            .left => {
+                if (self.dialog_action_focus) |button| {
+                    if (button == .cancel) self.dialog_action_focus = .primary;
+                    return .none;
+                }
+                if (self.dialog_browse_focus) return .none;
                 if (self.dialog_gallery_focus) |gallery_focus| {
                     if (self.dialog_field == 0) {
                         switch (gallery_focus) {
@@ -723,7 +1040,12 @@ pub const View = struct {
                 else if (dialogs.fieldAcceptsText(id, self.dialog_field))
                     if (modifiers.shift) editor.extendLeft() else editor.left();
             },
-            .right => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+            .right => {
+                if (self.dialog_action_focus) |button| {
+                    if (button == .primary and dialogs.showsCancel(id)) self.dialog_action_focus = .cancel;
+                    return .none;
+                }
+                if (self.dialog_browse_focus) return .none;
                 if (self.dialog_gallery_focus) |gallery_focus| {
                     if (self.dialog_field == 0) {
                         switch (gallery_focus) {
@@ -739,15 +1061,125 @@ pub const View = struct {
                 else if (dialogs.fieldAcceptsText(id, self.dialog_field))
                     if (modifiers.shift) editor.extendRight() else editor.right();
             },
-            .home => if (dialogs.fieldAcceptsText(id, self.dialog_field) and self.dialog_action_focus == null and !self.dialog_browse_focus) {
-                if (modifiers.shift) editor.extendHome() else editor.home();
+            .home => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .family;
+                    return .none;
+                }
+                if (self.dialog_action_focus != null or self.dialog_browse_focus or dialogJumpsFieldExtreme(id, self.dialog_field)) {
+                    self.focusDialogExtreme(id, false);
+                } else if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
+                    self.setDialogChoiceExtreme(id, self.dialog_field, false);
+                } else if (dialogs.fieldAcceptsText(id, self.dialog_field)) {
+                    if (modifiers.shift) editor.extendHome() else editor.home();
+                }
             },
-            .end => if (dialogs.fieldAcceptsText(id, self.dialog_field) and self.dialog_action_focus == null and !self.dialog_browse_focus) {
-                if (modifiers.shift) editor.extendEnd() else editor.end();
+            .end => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .next;
+                    return .none;
+                }
+                if (self.dialog_action_focus != null or self.dialog_browse_focus or dialogJumpsFieldExtreme(id, self.dialog_field)) {
+                    self.focusDialogExtreme(id, true);
+                } else if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
+                    self.setDialogChoiceExtreme(id, self.dialog_field, true);
+                } else if (dialogs.fieldAcceptsText(id, self.dialog_field)) {
+                    if (modifiers.shift) editor.extendEnd() else editor.end();
+                }
+            },
+            .up => {
+                if (self.dialog_action_focus != null) {
+                    self.focusDialogLastField(id);
+                    return .none;
+                }
+                if (self.dialog_browse_focus) {
+                    self.dialog_browse_focus = false;
+                    return .none;
+                }
+                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
+                    self.cycleDialogChoiceDirection(id, self.dialog_field, false);
+            },
+            .down => {
+                if (self.dialog_action_focus != null) return .none;
+                if (self.dialog_browse_focus) {
+                    self.dialog_browse_focus = false;
+                    self.dialog_action_focus = .primary;
+                    return .none;
+                }
+                if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
+                    self.cycleDialogChoiceDirection(id, self.dialog_field, true);
+                } else if (isLastFocusableDialogField(id, self.dialog_field)) {
+                    self.dialog_action_focus = .primary;
+                }
+            },
+            .page_up => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .family;
+                    return .none;
+                }
+                if (self.dialog_action_focus != null or self.dialog_browse_focus) {
+                    self.focusDialogExtreme(id, false);
+                    return .none;
+                }
+                if (self.dialog_first_field > 0) self.dialog_first_field -= 1;
+            },
+            .page_down => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .next;
+                    return .none;
+                }
+                if (self.dialog_action_focus != null or self.dialog_browse_focus) {
+                    self.focusDialogExtreme(id, true);
+                    return .none;
+                }
+                const layout = dialogLayout(self.canvas.width, self.canvas.height, dialogs.get(id));
+                const maximum = dialogs.fields(id).len -| layout.visibleRows();
+                if (self.dialog_first_field < maximum) self.dialog_first_field += 1;
             },
             else => {},
         }
         return .none;
+    }
+
+    fn focusDialogExtreme(self: *View, id: dialogs.Id, last: bool) void {
+        self.dialog_browse_focus = false;
+        if (last) {
+            self.dialog_action_focus = if (dialogs.showsCancel(id)) .cancel else .primary;
+            return;
+        }
+        for (dialogs.fields(id), 0..) |field, index| {
+            if (!dialogFieldFocusable(field)) continue;
+            self.dialog_field = index;
+            self.dialog_action_focus = null;
+            self.ensureDialogFieldVisible(id);
+            return;
+        }
+        self.dialog_action_focus = .primary;
+    }
+
+    fn isLastFocusableDialogField(id: dialogs.Id, field: usize) bool {
+        var last: usize = 0;
+        var found = false;
+        for (dialogs.fields(id), 0..) |item, index| {
+            if (!dialogFieldFocusable(item)) continue;
+            last = index;
+            found = true;
+        }
+        return found and field == last;
+    }
+
+    fn focusDialogLastField(self: *View, id: dialogs.Id) void {
+        self.dialog_browse_focus = false;
+        var index = dialogs.fields(id).len;
+        while (index > 0) {
+            index -= 1;
+            if (!dialogFieldFocusable(dialogs.fields(id)[index])) continue;
+            self.dialog_field = index;
+            self.dialog_action_focus = null;
+            self.ensureDialogFieldVisible(id);
+            return;
+        }
+        self.dialog_action_focus = .primary;
     }
 
     fn ensureDialogFieldVisible(self: *View, id: dialogs.Id) void {
@@ -833,18 +1265,19 @@ pub const View = struct {
             const status_layout = ui.StatusPanelLayout.init(self.canvas.width, self.canvas.height, self.status_detailed);
             const panel = status_layout.rect;
             if (!ui.contains(panel, pointer.x, pointer.y)) {
-                self.status_panel_open = false;
-                self.hovered_status_action = null;
+                self.closeStatusPanel();
                 return .none;
             }
             if (ui.contains(status_layout.connection, pointer.x, pointer.y)) {
-                self.status_panel_open = false;
-                self.hovered_status_action = null;
+                self.closeStatusPanel();
+                if (self.name_taken) {
+                    self.openDialog(.nickname);
+                    return .none;
+                }
                 return .connection;
             }
             if (ui.contains(status_layout.settings, pointer.x, pointer.y)) {
-                self.status_panel_open = false;
-                self.hovered_status_action = null;
+                self.closeStatusPanel();
                 self.openDialog(.settings);
                 return .none;
             }
@@ -856,7 +1289,7 @@ pub const View = struct {
             self.context_menu = null;
             self.hovered_context_item = null;
             if (item) |selected| {
-                if (!contextItemEnabled(kind, selected, self.can_moderate)) return .none;
+                if (!contextItemEnabled(kind, selected, self.can_moderate, self.wire_live)) return .none;
                 if (kind == .body_camera and selected == 3) return .send_expression;
                 self.invokeContextItem(kind, selected);
             }
@@ -917,23 +1350,20 @@ pub const View = struct {
             },
             .room_tab => room: {
                 self.shell.focus = .navigation;
-                const first_x = layout.tabs.x + 114;
-                const tab_width: i32 = 164;
-                const viewport = tabViewport(layout, comic_mode);
-                if (pointer.x >= viewport.right) break :room .none;
-                const raw = @divTrunc(pointer.x - first_x, tab_width);
-                if (raw < 0) break :room .none;
-                const index = self.room_tab_first + @as(usize, @intCast(raw));
-                if (index >= self.room_tab_count) break :room .none;
-                break :room .{ .room_tab = index };
+                if (nextOverflowRoom(layout, comic_mode, self.room_tab_count, self.room_tab_first, pointer.x, pointer.y)) |index|
+                    break :room .{ .room_tab = index };
+                break :room if (roomTabIndexAt(self, layout, comic_mode, pointer.x)) |index|
+                    .{ .room_tab = index }
+                else
+                    .none;
             },
             .comic_columns_decrease => columns: {
                 self.shell.decreaseComicColumns();
-                break :columns .none;
+                break :columns .persist_layout;
             },
             .comic_columns_increase => columns: {
                 self.shell.increaseComicColumns();
-                break :columns .none;
+                break :columns .persist_layout;
             },
             .transcript => focus: {
                 if (self.selectTranscriptAt(layout.transcript, pointer.x, pointer.y, total_lines)) self.shell.focus = .transcript;
@@ -941,6 +1371,9 @@ pub const View = struct {
             },
             .composer => focus: {
                 self.shell.focus = .composer;
+                if (composerSendRect(layout.say_editor)) |send| {
+                    if (ui.contains(send, pointer.x, pointer.y)) break :focus .send;
+                }
                 break :focus .{ .composer_cursor = .{ .x = pointer.x, .y = pointer.y } };
             },
             .say_action => |index| say: {
@@ -960,8 +1393,13 @@ pub const View = struct {
                 break :emotion .none;
             },
             .status_window, .connection_status => status: {
+                self.shell.focus = .status;
                 self.status_panel_open = !self.status_panel_open;
-                if (!self.status_panel_open) self.hovered_status_action = null;
+                if (self.status_panel_open) {
+                    self.focused_status_action = .connection;
+                } else {
+                    self.closeStatusPanel();
+                }
                 self.active_menu = null;
                 break :status .none;
             },
@@ -1021,10 +1459,11 @@ pub const View = struct {
         self.context_x = x;
         self.context_y = y;
         self.hovered_context_item = null;
-        self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate);
+        self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live);
     }
 
     fn activateToolbar(self: *View, index: u8) Action {
+        if (!toolbarCommandEnabled(index, self.wire_live)) return .none;
         if (index == 0) return .connection;
         switch (index) {
             1, 3, 19, 20, 21, 22 => {},
@@ -1036,7 +1475,7 @@ pub const View = struct {
             8 => self.toggleMembers(),
             10 => self.openDialog(.away),
             11, 14, 15, 16 => self.openDialog(.personal),
-            12 => self.openDialog(.notifications),
+            12 => self.openDialog(.user_list),
             13 => self.openDialog(.whisper),
             17 => self.openDialog(.set_text_font),
             18, 23 => self.openDialog(.choose_color),
@@ -1046,6 +1485,7 @@ pub const View = struct {
     }
 
     fn activateSayAction(self: *View, index: u8) Action {
+        if (!sayActionEnabled(index, self.wire_live)) return .none;
         self.focused_say_action = index;
         self.shell.focus = .say_actions;
         if (index == @intFromEnum(shell_mod.SayMode.sound)) {
@@ -1054,7 +1494,53 @@ pub const View = struct {
         }
         self.shell.setSayMode(@enumFromInt(index));
         self.shell.focus = .say_actions;
-        return .send;
+        return .none;
+    }
+
+    fn activateFocusedMember(self: *View) Action {
+        if (!self.wire_live) return .none;
+        self.openDialog(.whisper);
+        return .none;
+    }
+
+    fn activateFocusedStatus(self: *View) Action {
+        if (!self.status_panel_open) {
+            self.status_panel_open = true;
+            self.focused_status_action = .connection;
+            return .none;
+        }
+        const action = self.focused_status_action orelse .connection;
+        self.closeStatusPanel();
+        return switch (action) {
+            .connection => connection: {
+                if (self.name_taken) {
+                    self.openDialog(.nickname);
+                    break :connection .none;
+                }
+                break :connection .connection;
+            },
+            .settings => settings: {
+                self.openDialog(.settings);
+                break :settings .none;
+            },
+        };
+    }
+
+    fn closeStatusPanel(self: *View) void {
+        self.status_panel_open = false;
+        self.hovered_status_action = null;
+        self.focused_status_action = null;
+    }
+
+    fn activateFocusedContextItem(self: *View) Action {
+        const kind = self.context_menu orelse return .none;
+        const item = self.focused_context_item orelse firstEnabledContextItem(kind, self.can_moderate, self.wire_live);
+        self.context_menu = null;
+        self.hovered_context_item = null;
+        self.focused_context_item = null;
+        if (kind == .body_camera and item == 3) return .send_expression;
+        self.invokeContextItem(kind, item);
+        return .none;
     }
 
     fn invokeContextItem(self: *View, kind: ContextKind, item: u8) void {
@@ -1082,6 +1568,26 @@ pub const View = struct {
 
     fn cycleDialogChoice(self: *View, id: dialogs.Id, index: usize) void {
         self.cycleDialogChoiceDirection(id, index, true);
+    }
+
+    fn setDialogChoiceExtreme(self: *View, id: dialogs.Id, index: usize, last: bool) void {
+        const options = dialogs.choiceOptions(id, index);
+        if (options.len == 0 or index >= self.dialog_editors.len) return;
+        const editor = &self.dialog_editors[index];
+        var choice: usize = if (last) options.len - 1 else 0;
+        if (id == .character and index == 0 and options.len % 3 == 0) {
+            const family_len = options.len / 3;
+            for (options, 0..) |option, option_index| {
+                if (std.mem.eql(u8, editor.text(), option)) {
+                    const family_start = @divTrunc(option_index, family_len) * family_len;
+                    choice = if (last) family_start + family_len - 1 else family_start;
+                    break;
+                }
+            }
+        }
+        editor.clear();
+        editor.paste(options[choice]) catch {};
+        if (id == .character) self.syncCharacterSelectionSummary();
     }
 
     fn cycleDialogChoiceDirection(self: *View, id: dialogs.Id, index: usize, forward: bool) void {
@@ -1192,6 +1698,8 @@ pub const View = struct {
         ui.activateAppearance(self.appearance);
         defer ui.activateAppearance(.{});
         self.can_moderate = false;
+        self.wire_live = ui.statusTone(status) == .success;
+        self.name_taken = std.mem.indexOf(u8, status, "nickname in use") != null;
         for (transcript.roster.items) |member| if (member.is_self and !member.departed) {
             self.can_moderate = member.role.canModerate();
             break;
@@ -1203,46 +1711,46 @@ pub const View = struct {
         self.canvas.clear(ui.current.chrome);
 
         drawMenuBar(&self.canvas, layout.menu, self.active_menu, self.hovered_menu);
-        drawToolBar(&self.canvas, layout.toolbar, comic_mode, self.hovered_toolbar, if (self.shell.focus == .toolbar) self.focused_toolbar else null);
-        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control);
+        drawToolBar(&self.canvas, layout.toolbar, comic_mode, self.hovered_toolbar, if (self.shell.focus == .toolbar) self.focused_toolbar else null, self.wire_live);
+        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab or self.shell.focus == .status, self.hovered_room_tab, self.hovered_room_overflow, status);
         drawSplitters(&self.canvas, layout, comic_mode);
 
         if (comic_mode) {
-            try self.drawComicBuffer(layout.transcript, transcript);
+            try self.drawComicBuffer(layout.transcript, transcript, status);
         } else {
-            self.drawTextBuffer(layout.transcript, transcript);
+            self.drawTextBuffer(layout.transcript, transcript, status);
         }
         if (layout.right.w > 0) {
             ui.drawInspectorRail(&self.canvas, layout.right);
-            try self.drawMemberList(layout.members, transcript, self.shell.member_view == .icons);
+            try self.drawMemberList(layout.members, transcript, self.shell.member_view == .icons, status);
             if (comic_mode) try self.drawBodyCamera(layout.body_camera, transcript);
         }
-        drawSayWindow(&self.canvas, layout, input, cursor, selection, self.shell.focus == .composer, self.hovered_composer, self.shell.say_mode, self.hovered_say_action, if (self.shell.focus == .say_actions) self.focused_say_action else null);
-        drawStatusBar(&self.canvas, layout.status, self.hoveredToolbarLabel() orelse status, transcript.activeMemberCount(), self.hovered_status);
+        drawSayWindow(&self.canvas, layout, input, cursor, selection, self.shell.focus == .composer, self.hovered_composer, self.shell.say_mode, self.hovered_say_action, if (self.shell.focus == .say_actions) self.focused_say_action else null, status, self.wire_live);
+        drawStatusBar(&self.canvas, layout.status, statusBarLabel(status), transcript.activeMemberCount(), self.hovered_status, self.shell.focus == .status);
 
         if (self.shell.focus == .transcript) drawFocus(&self.canvas, layout.transcript);
         if (self.shell.focus == .members) drawFocus(&self.canvas, layout.members);
         if (self.shell.focus == .emotion) drawFocus(&self.canvas, layout.body_camera);
-        if (self.hovered_toolbar) |index| drawToolbarTooltip(&self.canvas, layout, index);
-        if (self.hovered_say_action) |index| drawSayActionTooltip(&self.canvas, layout, index);
-        if (self.active_menu) |menu| drawMenuPopup(&self.canvas, menu, self.hovered_menu_item, self.shell, self.can_moderate);
-        if (self.context_menu) |kind| drawContextPopup(&self.canvas, kind, self.context_x, self.context_y, self.hovered_context_item orelse self.focused_context_item, self.shell.emotion_frozen, self.can_moderate);
-        if (self.status_panel_open) drawStatusPanel(&self.canvas, status, transcript.activeMemberCount(), self.shell, self.appearance, self.status_detailed, self.hovered_status_action);
+        if (self.hovered_toolbar) |index| drawToolbarTooltip(&self.canvas, layout, index, self.wire_live);
+        if (self.hovered_say_action) |index| drawSayActionTooltip(&self.canvas, layout, index, self.wire_live);
+        if (self.hovered_room_overflow) drawOverflowTooltip(&self.canvas, layout, comic_mode, tabs.len, self.room_tab_first);
+        if (self.hovered_status_tab) drawStatusTabTooltip(&self.canvas, layout, status);
+        if (self.hovered_status) drawStatusBarTooltip(&self.canvas, layout, status);
+        if (self.hovered_room_tab) |index| if (index < tabs.len) drawRoomTabTooltip(&self.canvas, layout, comic_mode, tabs[index].label, index);
+        if (self.hovered_column_control) |_| drawColumnTooltip(&self.canvas, layout, self.shell.comic_columns);
+        if (self.active_menu) |menu| drawMenuPopup(&self.canvas, menu, self.hovered_menu_item, self.shell, self.can_moderate, self.wire_live);
+        if (self.context_menu) |kind| drawContextPopup(&self.canvas, kind, self.context_x, self.context_y, self.hovered_context_item orelse self.focused_context_item, self.shell.emotion_frozen, self.can_moderate, self.wire_live);
+        if (self.status_panel_open) drawStatusPanel(&self.canvas, status, transcript.activeMemberCount(), self.shell, self.appearance, self.status_detailed, self.hovered_status_action orelse self.focused_status_action);
         if (self.active_dialog) |id| drawDialog(&self.canvas, dialogs.get(id), &self.dialog_editors, self.dialog_field, self.dialog_first_field, self.dialog_action_focus, self.hovered_dialog_field, self.hovered_dialog_browse, self.dialog_notice, self.hovered_dialog_button);
-    }
-
-    fn hoveredToolbarLabel(self: *const View) ?[]const u8 {
-        const index = self.hovered_toolbar orelse return null;
-        return toolbarLabel(index);
     }
 
     pub fn semanticSnapshot(self: *const View, status: []const u8, tabs: []const Tab, active_tab: usize) accessibility.Snapshot {
         const comic_mode = self.shell.content_mode == .comic;
         const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
         var snapshot: accessibility.Snapshot = .{ .status = status };
-        snapshot.append(.{ .id = "reinked", .role = .window, .bounds = .{ .x = 0, .y = 0, .w = @intCast(self.canvas.width), .h = @intCast(self.canvas.height) }, .label = "Reinked" });
-        snapshot.append(.{ .id = "menu", .role = .menu_bar, .bounds = layout.menu, .label = "Application menu", .focused = self.shell.focus == .navigation });
-        snapshot.append(.{ .id = "toolbar", .role = .toolbar, .bounds = layout.toolbar, .label = "Application tools", .focused = self.shell.focus == .toolbar });
+        snapshot.append(.{ .id = "comic-chat", .role = .window, .bounds = .{ .x = 0, .y = 0, .w = @intCast(self.canvas.width), .h = @intCast(self.canvas.height) }, .label = "Comic Chat" });
+        snapshot.append(.{ .id = "menu", .role = .menu_bar, .bounds = layout.menu, .label = "Sunday menu", .focused = self.shell.focus == .navigation });
+        snapshot.append(.{ .id = "toolbar", .role = .toolbar, .bounds = layout.toolbar, .label = "Sunday tools", .focused = self.shell.focus == .toolbar });
         const toolbar_layout = ui.ToolbarLayout.init(layout.toolbar);
         for (ui.ToolbarLayout.command_ids, 0..) |command, index| if (toolbar_layout.buttonRect(index)) |bounds| snapshot.append(.{
             .id = toolbarSemanticId(index),
@@ -1270,9 +1778,16 @@ pub const View = struct {
                 .focused = index == active_tab and self.shell.focus == .navigation,
             });
         }
+        if (roomOverflowRect(layout, comic_mode, tabs.len, self.room_tab_first)) |overflow| snapshot.append(.{
+            .id = "room-overflow",
+            .role = .button,
+            .bounds = overflow,
+            .label = "More rooms",
+            .focused = self.hovered_room_overflow,
+        });
         snapshot.append(.{ .id = "transcript", .role = .transcript, .bounds = layout.transcript, .label = "Conversation", .focused = self.shell.focus == .transcript });
-        if (layout.right.w > 0) snapshot.append(.{ .id = "members", .role = .member_list, .bounds = layout.members, .label = "Members", .focused = self.shell.focus == .members });
-        snapshot.append(.{ .id = "composer", .role = .composer, .bounds = layout.say_editor, .label = "Message", .focused = self.shell.focus == .composer });
+        if (layout.right.w > 0) snapshot.append(.{ .id = "members", .role = .member_list, .bounds = layout.members, .label = "CAST", .focused = self.shell.focus == .members });
+        snapshot.append(.{ .id = "composer", .role = .composer, .bounds = layout.say_editor, .label = "Balloon", .focused = self.shell.focus == .composer });
         var action_index: i32 = 0;
         while (action_index < geometry.say_button_count) : (action_index += 1) snapshot.append(.{
             .id = sayActionSemanticId(@intCast(action_index)),
@@ -1282,8 +1797,9 @@ pub const View = struct {
             .selected = @as(i32, @intFromEnum(self.shell.say_mode)) == action_index,
             .focused = self.shell.focus == .say_actions and self.focused_say_action == action_index,
         });
-        snapshot.append(.{ .id = "status", .role = .button, .bounds = layout.status, .label = status, .focused = self.hovered_status });
-        if (self.status_panel_open) snapshot.append(.{ .id = "status-panel", .role = .dialog, .bounds = statusPanelRect(self.canvas.width, self.canvas.height, self.status_detailed), .label = "Connection and activity status", .focused = true });
+        snapshot.append(.{ .id = "status-tab", .role = .button, .bounds = .{ .x = layout.tabs.x, .y = layout.tabs.y, .w = 108, .h = layout.tabs.h }, .label = statusTabLabel(status), .selected = self.status_panel_open, .focused = self.shell.focus == .status });
+        snapshot.append(.{ .id = "status", .role = .button, .bounds = layout.status, .label = statusBarLabel(status), .focused = self.shell.focus == .status });
+        if (self.status_panel_open) snapshot.append(.{ .id = "status-panel", .role = .dialog, .bounds = statusPanelRect(self.canvas.width, self.canvas.height, self.status_detailed), .label = "Wire and activity status", .focused = true });
         if (self.active_menu) |menu| {
             const popup = ui.PopupLayout.menu(self.canvas.width, menuStart(menu), geometry.menu_height, menuPopupRect(self.canvas.width, menu).w, menuItemCount(menu));
             snapshot.append(.{ .id = "active-menu", .role = .menu, .bounds = popup.rect, .label = menu_labels[menu], .focused = true });
@@ -1294,12 +1810,12 @@ pub const View = struct {
                 .bounds = popup.itemRect(item).?,
                 .label = menuItemLabel(menu, item),
                 .selected = self.hovered_menu_item == item,
-                .enabled = menuItemEnabled(menu, item, self.can_moderate),
+                .enabled = menuItemEnabled(menu, item, self.can_moderate, self.wire_live),
             });
         }
         if (self.context_menu) |kind| {
             const popup = ui.PopupLayout.anchored(self.canvas.width, self.canvas.height, self.context_x, self.context_y, 196, contextItemCount(kind));
-            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "Member actions" else "Body camera actions", .focused = true });
+            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "CAST menu" else "Figure menu", .focused = true });
             var item: u8 = 0;
             while (item < contextItemCount(kind)) : (item += 1) snapshot.append(.{
                 .id = contextSemanticId(kind, item),
@@ -1308,7 +1824,7 @@ pub const View = struct {
                 .label = contextItemLabel(kind, item, self.shell.emotion_frozen),
                 .selected = self.focused_context_item == item,
                 .focused = self.focused_context_item == item,
-                .enabled = contextItemEnabled(kind, item, self.can_moderate),
+                .enabled = contextItemEnabled(kind, item, self.can_moderate, self.wire_live),
             });
         }
         if (self.active_dialog) |id| {
@@ -1338,7 +1854,7 @@ pub const View = struct {
                 .id = "dialog-browse",
                 .role = .button,
                 .bounds = dialogBrowseRect(dialog_layout.fieldRectScrolled(index, self.dialog_first_field)),
-                .label = "Browse files",
+                .label = "Pick path",
                 .focused = self.dialog_browse_focus,
             });
             if (id == .character) {
@@ -1376,26 +1892,24 @@ pub const View = struct {
         return snapshot;
     }
 
-    fn drawComicBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) !void {
+    fn drawComicBuffer(self: *View, rect: Rect, transcript: *const session.Transcript, status: []const u8) !void {
         ui.drawContentSurface(&self.canvas, rect, true);
         if (rect.w <= 0 or rect.h <= 0) return;
-        if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "No messages yet - type below and press Enter", self.shell.comic_columns);
-            return;
-        }
 
         const all = transcript.lines.items;
         const range = self.shell.visibleRange(all.len, 9);
-        const visible = all[range.start..range.end];
-        const lines = try self.gpa.alloc(strip.Line, visible.len);
+        // Source AddLine/hysteresis/RNG consume the whole prefix. A 9-line
+        // slice would replan those panels as a new first page.
+        const prefix = all[0..range.end];
+        const lines = try self.gpa.alloc(strip.Line, prefix.len);
         defer self.gpa.free(lines);
-        const target_views = try self.gpa.alloc([]strip.Participant, visible.len);
+        const target_views = try self.gpa.alloc([]strip.Participant, prefix.len);
         var target_views_count: usize = 0;
         defer {
             for (target_views[0..target_views_count]) |targets| self.gpa.free(targets);
             self.gpa.free(target_views);
         }
-        for (visible, 0..) |line, i| {
+        for (prefix, 0..) |line, i| {
             const targets = try self.gpa.alloc(strip.Participant, line.talk_targets.len);
             target_views[i] = targets;
             target_views_count += 1;
@@ -1436,19 +1950,31 @@ pub const View = struct {
             .reserve_page_columns = true,
         });
         defer page.deinit(self.gpa);
-        blitFit(&self.canvas, page.pixels, page.width, page.height, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
+        blitSourcePage(&self.canvas, page.pixels, page.width, page.height, rect.x + 8, rect.y + 8, rect.w - 16, rect.h - 16);
+
+        if (all.len == 0) {
+            const empty = emptyPageCopy(status);
+            const caption_w = @min(400, @max(220, rect.w - 40));
+            const caption_h: i32 = 88;
+            ui.drawEmptyCaption(&self.canvas, .{
+                .x = rect.x + @divTrunc(rect.w - caption_w, 2),
+                .y = rect.bottom() - caption_h - 12,
+                .w = caption_w,
+                .h = caption_h,
+            }, empty.title, empty.detail);
+        }
 
         if (self.shell.history_offset > 0) {
-            const label = "Earlier messages - Page Down returns toward latest";
-            ui.drawHistoryBanner(&self.canvas, rect, label);
+            ui.drawHistoryBanner(&self.canvas, rect, "Earlier page — Page Down returns to the latest panels");
         }
         ui.drawVerticalScrollbar(&self.canvas, rect, all.len, 9, range.start);
     }
 
-    fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) void {
+    fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript, status: []const u8) void {
         ui.drawContentSurface(&self.canvas, rect, false);
         if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "No messages yet - type below and press Enter", 1);
+            const empty = emptyPageCopy(status);
+            drawEmptyBuffer(&self.canvas, rect, empty.title, empty.detail, 1);
             return;
         }
         // The text view is a calm reading surface rather than a debug log:
@@ -1481,15 +2007,15 @@ pub const View = struct {
         return false;
     }
 
-    fn drawMemberList(self: *View, rect: Rect, transcript: *const session.Transcript, icon_mode: bool) !void {
+    fn drawMemberList(self: *View, rect: Rect, transcript: *const session.Transcript, icon_mode: bool, status: []const u8) !void {
         ui.drawMemberRailSurface(&self.canvas, rect);
         if (rect.h <= 0) return;
         var count_buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buf, "{d}", .{transcript.activeMemberCount()}) catch "0";
-        ui.drawPaneCountHeader(&self.canvas, rect, "In this room", count);
+        ui.drawPaneCountHeader(&self.canvas, rect, "CAST", count);
         const content = Rect{ .x = rect.x, .y = rect.y + 30, .w = rect.w, .h = @max(0, rect.h - 30) };
         if (transcript.roster.items.len == 0) {
-            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 40 }, "No members yet", "People appear here when they join");
+            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 52 }, "Playbill empty", emptyCastCopy(status));
             return;
         }
         const viewport = memberViewport(rect, icon_mode);
@@ -1501,7 +2027,7 @@ pub const View = struct {
         for (transcript.roster.items[start..], start..) |member, index| {
             if (y + 24 > content.bottom()) break;
             const selected = if (self.shell.selected_member) |selected_index| selected_index == index else member.is_self;
-            ui.drawMemberRow(&self.canvas, .{ .x = content.x, .y = y, .w = content.w, .h = 24 }, member.nick, member.role.badge(), selected, member.departed, member.away, self.hovered_member == index);
+            ui.drawMemberRow(&self.canvas, .{ .x = content.x, .y = y, .w = content.w, .h = 24 }, member.nick, memberRoleChip(member.role), selected, member.departed, member.away, self.hovered_member == index);
             y += 24;
         }
         ui.drawVerticalScrollbar(&self.canvas, content, transcript.roster.items.len, visible_rows, start);
@@ -1531,7 +2057,11 @@ pub const View = struct {
             var icon = bgb.decodeIcon(self.gpa, avatar) catch continue;
             defer icon.deinit(self.gpa);
             blitHeightBottomAlphaSmooth(&self.canvas, icon.pixels, icon.width, icon.height, cell.x + @divTrunc(cell.w - 52, 2), cell.y + 6, 52, 52);
-            if (member.role.badge().len != 0) ui.drawPill(&self.canvas, .{ .x = cell.right() - 25, .y = cell.y + 5, .w = 20, .h = 18 }, member.role.badge(), true);
+            const role_chip = memberRoleChip(member.role);
+            if (role_chip.len != 0) {
+                const pill_w = Canvas.uiTextWidth(role_chip) + 16;
+                ui.drawPill(&self.canvas, .{ .x = cell.right() - pill_w - 5, .y = cell.y + 5, .w = pill_w, .h = 18 }, role_chip, true);
+            }
             const name_w = Canvas.uiTextWidth(member.nick);
             drawTextEllipsized(
                 &self.canvas,
@@ -1644,6 +2174,8 @@ pub const View = struct {
                 7 => self.openDialog(.room_access),
                 8 => self.openDialog(.ircx_events),
                 9 => self.openDialog(.favorite_rooms),
+                11 => self.openDialog(.invitation),
+                12 => self.openDialog(.channel_password),
                 else => {},
             },
             5 => switch (item) {
@@ -1658,12 +2190,15 @@ pub const View = struct {
             },
             6 => switch (item) {
                 0 => self.openDialog(.setup),
-                1 => self.openDialog(.connection_features),
-                2 => self.openDialog(.automation),
-                3 => self.openDialog(.rules),
-                4 => self.openDialog(.rule_sets),
-                5 => self.openDialog(.notifications),
-                6 => self.openDialog(.notification_users),
+                1 => self.openDialog(.servers),
+                2 => self.openDialog(.password),
+                3 => self.openDialog(.nickname),
+                4 => self.openDialog(.connection_features),
+                5 => self.openDialog(.automation),
+                6 => self.openDialog(.rules),
+                7 => self.openDialog(.rule_sets),
+                8 => self.openDialog(.notifications),
+                9 => self.openDialog(.notification_users),
                 else => self.openDialog(.about),
             },
             else => {},
@@ -1673,18 +2208,19 @@ pub const View = struct {
     fn activateMenuItem(self: *View, menu: u8, item: u8) Action {
         self.active_menu = null;
         self.hovered_menu_item = null;
-        if (!menuItemEnabled(menu, item, self.can_moderate)) return .none;
+        if (!menuItemEnabled(menu, item, self.can_moderate, self.wire_live)) return .none;
         if (isConnectionMenuItem(menu, item)) return .connection;
         if (isQuitMenuItem(menu, item)) return .quit;
         if (menu == 1 and item < 3) return .{ .transcript_command = item };
         if (menu == 3 and item >= 5) return .{ .composer_format = item - 5 };
         if (menu == 4 and item == 10) return .child_window;
         self.invokeMenuItem(menu, item);
+        if (menu == 2 and item <= 4) return .persist_layout;
         return .{ .menu = menu };
     }
 };
 
-const menu_labels = [_][]const u8{ "File", "Edit", "View", "Format", "Room", "Member", "Tools" };
+const menu_labels = [_][]const u8{ "Page", "Ink", "Show", "Look", "Room", "CAST", "Tools" };
 
 fn menuStart(menu: u8) i32 {
     var x: i32 = 170;
@@ -1698,9 +2234,9 @@ fn menuItemCount(menu: u8) u8 {
         0 => 7,
         3 => 8,
         2 => 6,
-        4 => 11,
+        4 => 13,
         5 => 8,
-        6 => 8,
+        6 => 11,
         1 => 4,
         else => 1,
     };
@@ -1710,71 +2246,145 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
     return switch (menu) {
         0 => switch (item) {
             0 => "Open conversation",
-            1 => "Open chat locator",
+            1 => "Open locator",
             2 => "Recent conversations",
             3 => "Save conversation",
-            4 => "Export comic image",
-            5 => "Print and PDF preview",
-            else => "Exit",
+            4 => "Export Sunday page",
+            5 => "Sunday PDF",
+            else => "Close Comic Chat",
         },
         1 => switch (item) {
-            0 => "Copy selected messages",
-            1 => "Insert page break",
-            2 => "Delete selected messages",
-            else => "Settings",
+            0 => "Copy ink",
+            1 => "Insert page fold",
+            2 => "Clear ink",
+            else => "Studio",
         },
         2 => switch (item) {
-            0 => "Comic view",
-            1 => "Text view",
-            2 => "Show members",
-            3 => "Member icons",
-            4 => "Member list",
-            else => "Comic view options",
+            0 => "Sunday page",
+            1 => "Conversation",
+            2 => "Show CAST",
+            3 => "CAST portraits",
+            4 => "CAST list",
+            else => "Page layout",
         },
         3 => switch (item) {
             0 => "Text font",
-            1 => "Text color",
-            2 => "Background",
+            1 => "Ink color",
+            2 => "Backdrop",
             3 => "Character",
-            4 => "Personal profile",
-            5 => "Bold selection",
-            6 => "Italic selection",
-            else => "Underline selection",
+            4 => "CAST card",
+            5 => "Bold ink",
+            6 => "Italic ink",
+            else => "Underline ink",
         },
         4 => switch (item) {
-            0 => "Room list",
-            1 => "Enter room",
+            0 => "Browse rooms",
+            1 => "Join room",
             2 => "Create room",
-            3 => "Room properties",
-            4 => "Set away message",
-            5 => "Message of the day",
-            6 => "IRCX properties",
+            3 => "Room details",
+            4 => "Away message",
+            5 => "Bulletin",
+            6 => "Named properties",
             7 => "Room access",
-            8 => "IRCX operator events",
+            8 => "Room events",
             9 => "Favorite rooms",
-            else => "Open room in new window",
+            10 => "Open room aside",
+            11 => "Room invitation",
+            else => "Room password",
         },
         5 => switch (item) {
-            0 => "User list",
-            1 => "Member profile",
+            0 => "CAST list",
+            1 => "CAST profile",
             2 => "Whisper",
-            3 => "Invite member",
-            4 => "Kick member",
-            5 => "Ban or unban",
+            3 => "Invite CAST",
+            4 => "Kick CAST",
+            5 => "Ban or free",
             6 => "File transfer",
             else => "Send call link",
         },
         6 => switch (item) {
-            0 => "Connection setup",
-            1 => "Connection features",
-            2 => "Automation",
-            3 => "Rules",
-            4 => "Rule sets",
-            5 => "Logon notifications",
-            6 => "Online notification users",
-            else => "About Reinked",
+            0 => "Wire setup",
+            1 => "Wire list",
+            2 => "Sign in",
+            3 => "Sign-in name",
+            4 => "Wire features",
+            5 => "Greeting",
+            6 => "Rule book",
+            7 => "Rule sets",
+            8 => "Watch CAST",
+            9 => "Live CAST",
+            else => "About Comic Chat",
         },
-        else => "Settings",
+        else => "Studio",
+    };
+}
+
+fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
+    if ((menu == 4 or menu == 5) and !connected) return "Connect first";
+    return switch (menu) {
+        0 => switch (item) {
+            0, 1, 2 => "Open",
+            3, 4, 5 => "Save",
+            else => "Close",
+        },
+        1 => switch (item) {
+            3 => "Studio",
+            else => "Ink",
+        },
+        2 => switch (item) {
+            2, 3, 4 => "CAST",
+            else => "Page",
+        },
+        3 => switch (item) {
+            5, 6, 7 => "Type",
+            else => "Look",
+        },
+        4 => switch (item) {
+            0 => "List",
+            1 => "Join",
+            2 => "New",
+            3 => "Room",
+            4 => "Away",
+            5 => "Bulletin",
+            6, 7, 8 => "Room",
+            9 => "Favorite",
+            11 => "Invite",
+            12 => "Room",
+            else => "Room",
+        },
+        5 => switch (item) {
+            0 => "List",
+            1 => "Card",
+            2 => "Say",
+            3 => "Room",
+            4, 5 => "Moderate",
+            6 => "File",
+            else => "Call",
+        },
+        6 => switch (item) {
+            0, 1, 2, 3, 4 => "Wire",
+            10 => "About",
+            else => "Rule",
+        },
+        else => "",
+    };
+}
+
+fn contextItemHint(kind: ContextKind, item: u8, connected: bool) []const u8 {
+    if (kind == .member and !connected) return "Connect first";
+    return switch (kind) {
+        .member => switch (item) {
+            0 => "Say",
+            1 => "Card",
+            2 => "Room",
+            else => "Moderate",
+        },
+        .body_camera => switch (item) {
+            0 => "Hold",
+            1 => "CAST",
+            2 => "Reset",
+            else => "Send",
+        },
     };
 }
 
@@ -1789,8 +2399,11 @@ fn isQuitMenuItem(menu: u8, item: u8) bool {
 fn menuPopupRect(canvas_width: u32, menu: u8) Rect {
     var content_width: i32 = 210;
     var item: u8 = 0;
-    while (item < menuItemCount(menu)) : (item += 1)
-        content_width = @max(content_width, Canvas.uiTextWidth(menuItemLabel(menu, item)) + 52);
+    while (item < menuItemCount(menu)) : (item += 1) {
+        const hint = menuItemHint(menu, item, true);
+        const hint_w: i32 = if (hint.len == 0) 0 else Canvas.uiTextWidth(hint) + 18;
+        content_width = @max(content_width, Canvas.uiTextWidth(menuItemLabel(menu, item)) + 56 + hint_w);
+    }
     return ui.PopupLayout.menu(canvas_width, menuStart(menu), geometry.menu_height, content_width, menuItemCount(menu)).rect;
 }
 
@@ -1801,19 +2414,27 @@ fn menuPopupItem(canvas_width: u32, menu: u8, x: i32, y: i32) ?u8 {
 
 fn drawMenuBar(c: *Canvas, rect: Rect, active: ?u8, hovered: ?u8) void {
     ui.drawMenuBarSurface(c, rect);
-    ui.drawAppBrand(c, rect, "Reinked");
+    ui.drawAppBrand(c, rect, "Comic Chat");
     var x = rect.x + 170;
+    var overflow = false;
     for (menu_labels, 0..) |item, raw_index| {
         const index: u8 = @intCast(raw_index);
         const selected = active == index or hovered == index;
         const item_w = Canvas.uiTextWidth(item) + 16;
-        if (x + item_w > rect.right() - 8) break;
+        const edition_reserve: i32 = if (rect.w >= 760) Canvas.uiTextWidth(ui.mastheadEdition(rect.w)) + 42 else 8;
+        if (x + item_w > rect.right() - edition_reserve) {
+            overflow = true;
+            break;
+        }
         ui.drawMenuLabel(c, x, rect.y, item_w, item, selected);
         x += Canvas.uiTextWidth(item) + 28;
     }
+    if (overflow and x + 28 <= rect.right() - 8) {
+        ui.drawInkChip(c, .{ .x = x, .y = rect.y + 6, .w = 26, .h = 20 }, "...", false);
+    }
 }
 
-fn drawMenuPopup(c: *Canvas, menu: u8, hovered: ?u8, shell: shell_mod.State, can_moderate: bool) void {
+fn drawMenuPopup(c: *Canvas, menu: u8, hovered: ?u8, shell: shell_mod.State, can_moderate: bool, connected: bool) void {
     const layout = ui.PopupLayout.menu(c.width, menuStart(menu), geometry.menu_height, menuPopupRect(c.width, menu).w, menuItemCount(menu));
     const rect = layout.rect;
     ui.drawPopupListSurface(c, layout);
@@ -1822,8 +2443,8 @@ fn drawMenuPopup(c: *Canvas, menu: u8, hovered: ?u8, shell: shell_mod.State, can
         const item_rect = layout.itemRect(item).?;
         if (menuStartsGroup(menu, item))
             ui.drawMenuGroupDivider(c, rect, item_rect.y);
-        const enabled = menuItemEnabled(menu, item, can_moderate);
-        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, menuItemLabel(menu, item), hovered == item, menuItemChecked(menu, item, shell), enabled);
+        const enabled = menuItemEnabled(menu, item, can_moderate, connected);
+        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, menuItemLabel(menu, item), menuItemHint(menu, item, connected), hovered == item, menuItemChecked(menu, item, shell), enabled);
     }
 }
 
@@ -1833,41 +2454,42 @@ fn menuStartsGroup(menu: u8, item: u8) bool {
         1 => item == 3,
         2 => item == 2 or item == 5,
         3 => item == 2 or item == 5,
-        4 => item == 3 or item == 6 or item == 9 or item == 10,
+        4 => item == 3 or item == 6 or item == 9 or item == 10 or item == 11,
         5 => item == 2 or item == 4 or item == 6,
-        6 => item == 2 or item == 5 or item == 7,
+        6 => item == 5 or item == 8 or item == 10,
         else => false,
     };
 }
 
-fn menuItemEnabled(menu: u8, item: u8, can_moderate: bool) bool {
+fn menuItemEnabled(menu: u8, item: u8, can_moderate: bool, connected: bool) bool {
+    if ((menu == 4 or menu == 5) and !connected) return false;
     if (can_moderate) return true;
     return !((menu == 4 and (item == 3 or item == 7 or item == 8)) or
         (menu == 5 and (item == 4 or item == 5)));
 }
 
-fn firstEnabledMenuItem(menu: u8, can_moderate: bool) u8 {
+fn firstEnabledMenuItem(menu: u8, can_moderate: bool, connected: bool) u8 {
     var item: u8 = 0;
-    while (item < menuItemCount(menu)) : (item += 1) if (menuItemEnabled(menu, item, can_moderate)) return item;
+    while (item < menuItemCount(menu)) : (item += 1) if (menuItemEnabled(menu, item, can_moderate, connected)) return item;
     return 0;
 }
 
-fn lastEnabledMenuItem(menu: u8, can_moderate: bool) u8 {
+fn lastEnabledMenuItem(menu: u8, can_moderate: bool, connected: bool) u8 {
     var item = menuItemCount(menu);
     while (item > 0) {
         item -= 1;
-        if (menuItemEnabled(menu, item, can_moderate)) return item;
+        if (menuItemEnabled(menu, item, can_moderate, connected)) return item;
     }
     return 0;
 }
 
-fn nextEnabledMenuItem(menu: u8, current: u8, forward: bool, can_moderate: bool) u8 {
+fn nextEnabledMenuItem(menu: u8, current: u8, forward: bool, can_moderate: bool, connected: bool) u8 {
     const count = menuItemCount(menu);
     var item = current;
     var checked: u8 = 0;
     while (checked < count) : (checked += 1) {
         item = if (forward) (item + 1) % count else (item + count - 1) % count;
-        if (menuItemEnabled(menu, item, can_moderate)) return item;
+        if (menuItemEnabled(menu, item, can_moderate, connected)) return item;
     }
     return current;
 }
@@ -1895,15 +2517,15 @@ fn contextItemLabel(kind: ContextKind, item: u8, frozen: bool) []const u8 {
     return switch (kind) {
         .member => switch (item) {
             0 => "Whisper",
-            1 => "Personal profile",
-            2 => "Invite to room",
-            3 => "Kick from room",
-            else => "Ban or unban",
+            1 => "CAST profile",
+            2 => "Invite CAST",
+            3 => "Kick CAST",
+            else => "Ban or free",
         },
         .body_camera => switch (item) {
-            0 => if (frozen) "Unfreeze expression" else "Freeze expression",
-            1 => "Change character",
-            2 => "Return to neutral",
+            0 => if (frozen) "Release expression" else "Hold expression",
+            1 => "Choose character",
+            2 => "Neutral expression",
             else => "Send expression",
         },
     };
@@ -1918,18 +2540,19 @@ fn contextPopupItem(width: u32, height: u32, kind: ContextKind, anchor_x: i32, a
     return layout.itemAt(x, y);
 }
 
-fn drawContextPopup(c: *Canvas, kind: ContextKind, anchor_x: i32, anchor_y: i32, hovered: ?u8, frozen: bool, can_moderate: bool) void {
+fn drawContextPopup(c: *Canvas, kind: ContextKind, anchor_x: i32, anchor_y: i32, hovered: ?u8, frozen: bool, can_moderate: bool, connected: bool) void {
     const layout = ui.PopupLayout.anchored(c.width, c.height, anchor_x, anchor_y, 196, contextItemCount(kind));
     ui.drawPopupListSurface(c, layout);
     var item: u8 = 0;
     while (item < contextItemCount(kind)) : (item += 1) {
         const item_rect = layout.itemRect(item).?;
-        const enabled = contextItemEnabled(kind, item, can_moderate);
-        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, contextItemLabel(kind, item, frozen), hovered == item, kind == .body_camera and item == 0 and frozen, enabled);
+        const enabled = contextItemEnabled(kind, item, can_moderate, connected);
+        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, contextItemLabel(kind, item, frozen), contextItemHint(kind, item, connected), hovered == item, kind == .body_camera and item == 0 and frozen, enabled);
     }
 }
 
-fn contextItemEnabled(kind: ContextKind, item: u8, can_moderate: bool) bool {
+fn contextItemEnabled(kind: ContextKind, item: u8, can_moderate: bool, connected: bool) bool {
+    if (kind == .member and !connected) return false;
     return kind != .member or item < 3 or can_moderate;
 }
 
@@ -1939,26 +2562,35 @@ fn contextSemanticId(kind: ContextKind, item: u8) []const u8 {
     return if (kind == .member) member[item] else camera[item];
 }
 
-fn firstEnabledContextItem(kind: ContextKind, can_moderate: bool) u8 {
-    return nextEnabledContextItem(kind, 0, true, can_moderate);
-}
-
-fn lastEnabledContextItem(kind: ContextKind, can_moderate: bool) u8 {
-    return nextEnabledContextItem(kind, contextItemCount(kind) - 1, false, can_moderate);
-}
-
-fn nextEnabledContextItem(kind: ContextKind, start: u8, forward: bool, can_moderate: bool) u8 {
-    const count = contextItemCount(kind);
-    var item = start % count;
-    var attempts: u8 = 0;
-    while (attempts < count) : (attempts += 1) {
-        if (contextItemEnabled(kind, item, can_moderate)) return item;
-        item = if (forward) (item + 1) % count else (item + count - 1) % count;
+fn firstEnabledContextItem(kind: ContextKind, can_moderate: bool, connected: bool) u8 {
+    var item: u8 = 0;
+    while (item < contextItemCount(kind)) : (item += 1) {
+        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
     }
     return 0;
 }
 
-fn drawToolBar(c: *Canvas, rect: Rect, comic_mode: bool, hovered: ?u8, focused: ?u8) void {
+fn lastEnabledContextItem(kind: ContextKind, can_moderate: bool, connected: bool) u8 {
+    var item = contextItemCount(kind);
+    while (item > 0) {
+        item -= 1;
+        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
+    }
+    return 0;
+}
+
+fn nextEnabledContextItem(kind: ContextKind, start: u8, forward: bool, can_moderate: bool, connected: bool) u8 {
+    const count = contextItemCount(kind);
+    var item = start % count;
+    var checked: u8 = 0;
+    while (checked < count) : (checked += 1) {
+        item = if (forward) (item + 1) % count else (item + count - 1) % count;
+        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
+    }
+    return start % count;
+}
+
+fn drawToolBar(c: *Canvas, rect: Rect, comic_mode: bool, hovered: ?u8, focused: ?u8, connected: bool) void {
     ui.drawToolbarSurface(c, rect);
     const toolbar_layout = ui.ToolbarLayout.init(rect);
     for (ui.ToolbarLayout.group_counts, 0..) |_, group| if (toolbar_layout.groupRect(group)) |group_rect| ui.drawToolbarGroup(c, group_rect);
@@ -1978,7 +2610,8 @@ fn drawToolBar(c: *Canvas, rect: Rect, comic_mode: bool, hovered: ?u8, focused: 
     };
     for (primary, 0..) |item, position| {
         if (toolbar_layout.buttonRect(position)) |button| {
-            _ = drawModernToolButton(c, item.glyph, button.x, button.y, item.selected, hovered == item.index);
+            const enabled = toolbarCommandEnabled(item.index, connected);
+            _ = drawModernToolButton(c, item.glyph, button.x, button.y, item.selected, hovered == item.index and enabled, !enabled);
             if (focused == @as(u8, @intCast(position))) ui.drawFocusRing(c, button);
         }
     }
@@ -1988,31 +2621,31 @@ const ToolGlyph = ui.ToolGlyph;
 
 fn toolbarLabel(index: u8) []const u8 {
     return switch (index) {
-        0 => "Connection setup",
-        1 => "Disconnect",
-        2 => "Enter room",
+        0 => "Wire setup",
+        1 => "Leave the wire",
+        2 => "Join room",
         3 => "Leave room",
         4 => "Create room",
-        5 => "Comic view",
-        6 => "Text view",
+        5 => "Sunday page",
+        6 => "Conversation",
         7 => "Browse rooms",
-        8 => "Show or hide members",
+        8 => "Show or hide CAST",
         9 => "Favorite rooms",
-        10 => "Set away message",
-        11 => "Personal profile",
-        12 => "Ignore member",
+        10 => "Away message",
+        11 => "CAST card",
+        12 => "Ignore CAST",
         13 => "Send a whisper",
-        14 => "Email member",
-        15 => "Open home page",
-        16 => "Start meeting",
+        14 => "Email CAST",
+        15 => "Open homepage",
+        16 => "Send call link",
         17 => "Choose text font",
-        18 => "Choose text color",
+        18 => "Choose ink",
         19 => "Bold",
         20 => "Italic",
         21 => "Underline",
         22 => "Fixed-width text",
         23 => "Insert symbol",
-        else => "Reinked tool",
+        else => "Sunday tool",
     };
 }
 
@@ -2032,10 +2665,10 @@ fn toolbarButtonX(rect: Rect, index: u8) ?i32 {
     return null;
 }
 
-fn drawToolbarTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
+fn drawToolbarTooltip(c: *Canvas, layout: geometry.Layout, index: u8, connected: bool) void {
     const button_x = toolbarButtonX(layout.toolbar, index) orelse return;
     const label = toolbarLabel(index);
-    const hint = toolbarHint(index);
+    const hint = if (!toolbarCommandEnabled(index, connected)) "Connect first" else toolbarHint(index);
     const width = @min(230, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
     const x = std.math.clamp(button_x - 4, 6, @max(6, layout.toolbar.right() - width - 6));
     ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, label, hint);
@@ -2043,21 +2676,95 @@ fn drawToolbarTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
 
 fn toolbarHint(index: u8) []const u8 {
     return switch (index) {
-        0 => "File",
-        2 => "Network",
-        4, 7 => "Layout",
-        5, 13 => "Member",
-        6 => "Refresh",
-        8 => "Message",
-        10, 17 => "Text",
-        11 => "Profile",
-        18 => "Color",
-        else => "Tool",
+        0 => "Wire",
+        2 => "Join",
+        4 => "New",
+        5 => "Page",
+        6 => "Text",
+        7 => "Rooms",
+        8 => "CAST",
+        10 => "Away",
+        11 => "Card",
+        13 => "Say",
+        17 => "Type",
+        18 => "Ink",
+        else => "Sunday",
     };
 }
 
-fn drawModernToolButton(c: *Canvas, glyph: ToolGlyph, x: i32, y: i32, selected: bool, hovered: bool) i32 {
-    const glyph_color = ui.drawCommandTile(c, x, y, selected, hovered);
+fn toolbarCommandEnabled(index: u8, connected: bool) bool {
+    return switch (index) {
+        2, 4, 7, 10, 13 => connected,
+        else => true,
+    };
+}
+
+fn nextEnabledToolbar(current: u8, forward: bool, connected: bool) u8 {
+    const count: u8 = @intCast(ui.ToolbarLayout.button_count);
+    var item = current;
+    var checked: u8 = 0;
+    while (checked < count) : (checked += 1) {
+        item = if (forward) (item + 1) % count else (item + count - 1) % count;
+        if (toolbarCommandEnabled(ui.ToolbarLayout.command_ids[item], connected)) return item;
+    }
+    return current;
+}
+
+fn firstEnabledToolbar(connected: bool) u8 {
+    const count: u8 = @intCast(ui.ToolbarLayout.button_count);
+    var item: u8 = 0;
+    while (item < count) : (item += 1) {
+        if (toolbarCommandEnabled(ui.ToolbarLayout.command_ids[item], connected)) return item;
+    }
+    return 0;
+}
+
+fn lastEnabledToolbar(connected: bool) u8 {
+    var item: u8 = @intCast(ui.ToolbarLayout.button_count);
+    while (item > 0) {
+        item -= 1;
+        if (toolbarCommandEnabled(ui.ToolbarLayout.command_ids[item], connected)) return item;
+    }
+    return 0;
+}
+
+fn sayActionEnabled(index: u8, connected: bool) bool {
+    return switch (index) {
+        2, 4 => connected,
+        else => true,
+    };
+}
+
+fn nextEnabledSayAction(current: u8, forward: bool, connected: bool) u8 {
+    const count: u8 = @intCast(geometry.say_button_count);
+    var item = current;
+    var checked: u8 = 0;
+    while (checked < count) : (checked += 1) {
+        item = if (forward) (item + 1) % count else (item + count - 1) % count;
+        if (sayActionEnabled(item, connected)) return item;
+    }
+    return current;
+}
+
+fn firstEnabledSayAction(connected: bool) u8 {
+    var item: u8 = 0;
+    while (item < geometry.say_button_count) : (item += 1) {
+        if (sayActionEnabled(item, connected)) return item;
+    }
+    return 0;
+}
+
+fn lastEnabledSayAction(connected: bool) u8 {
+    var item: u8 = @intCast(geometry.say_button_count);
+    while (item > 0) {
+        item -= 1;
+        if (sayActionEnabled(item, connected)) return item;
+    }
+    return 0;
+}
+
+fn drawModernToolButton(c: *Canvas, glyph: ToolGlyph, x: i32, y: i32, selected: bool, hovered: bool, disabled: bool) i32 {
+    const glyph_color = ui.drawCommandTileState(c, x, y, selected, hovered, disabled);
     ui.drawToolGlyph(c, glyph, x + 8, y + 8, glyph_color);
     return x + 32;
 }
@@ -2086,6 +2793,41 @@ fn tabViewport(layout: geometry.Layout, comic_mode: bool) TabViewport {
     };
 }
 
+fn roomTabIndexAt(self: *const View, layout: geometry.Layout, comic_mode: bool, x: i32) ?usize {
+    const first_x = layout.tabs.x + 114;
+    const tab_width: i32 = 164;
+    const viewport = tabViewport(layout, comic_mode);
+    if (x >= viewport.right) return null;
+    if (roomOverflowContains(layout, comic_mode, self.room_tab_count, self.room_tab_first, x, layout.tabs.y + 10)) return null;
+    const raw = @divTrunc(x - first_x, tab_width);
+    if (raw < 0) return null;
+    const index = self.room_tab_first + @as(usize, @intCast(raw));
+    if (index >= self.room_tab_count) return null;
+    return index;
+}
+
+fn roomOverflowRect(layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize) ?Rect {
+    const viewport = tabViewport(layout, comic_mode);
+    if (count <= viewport.capacity) return null;
+    _ = first_visible;
+    const chip = Rect{ .x = viewport.right - 26, .y = layout.tabs.y + 8, .w = 26, .h = 20 };
+    if (chip.x < viewport.first_x) return null;
+    return chip;
+}
+
+fn roomOverflowContains(layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize, x: i32, y: i32) bool {
+    const chip = roomOverflowRect(layout, comic_mode, count, first_visible) orelse return false;
+    return ui.contains(chip, x, y);
+}
+
+fn nextOverflowRoom(layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize, x: i32, y: i32) ?usize {
+    if (!roomOverflowContains(layout, comic_mode, count, first_visible, x, y) or count == 0) return null;
+    const viewport = tabViewport(layout, comic_mode);
+    const last_visible = first_visible + @min(viewport.capacity, count - first_visible);
+    if (last_visible < count) return last_visible;
+    return 0;
+}
+
 fn updateTabViewport(self: *View, layout: geometry.Layout, comic_mode: bool, count: usize, active: usize) void {
     const capacity = tabViewport(layout, comic_mode).capacity;
     if (count <= capacity) {
@@ -2098,12 +2840,13 @@ fn updateTabViewport(self: *View, layout: geometry.Layout, comic_mode: bool, cou
     self.room_tab_first = @min(self.room_tab_first, count - capacity);
 }
 
-fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover) void {
+fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover, status_selected: bool, status_hovered: bool, hovered_room: ?usize, overflow_hovered: bool, status: []const u8) void {
     const rect = layout.tabs;
     ui.drawTabStrip(c, rect);
     const status_w: i32 = 108;
-    ui.drawStatusTab(c, rect);
-    ui.drawStatusTabContent(c, rect);
+    ui.drawStatusTab(c, rect, status_selected, status_hovered);
+    ui.drawStatusTabContent(c, rect, status_selected, ui.statusTone(status), statusTabLabel(status));
+    if (status_hovered) ui.drawFocusRing(c, .{ .x = rect.x + 8, .y = rect.y + 6, .w = 96, .h = rect.h - 12 });
     const viewport = tabViewport(layout, comic_mode);
     const first_x = rect.x + status_w + 6;
     const tab_w: i32 = 164;
@@ -2112,7 +2855,11 @@ fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, activ
         const x = first_x + slot * tab_w;
         if (x + tab_w > viewport.right) break;
         const width = tab_w;
-        ui.drawConversationTab(c, .{ .x = x, .y = rect.y + 5, .w = width, .h = rect.h - 5 }, tab.label, tab.unread, index == active, focused and index == active);
+        ui.drawConversationTab(c, .{ .x = x, .y = rect.y + 5, .w = width, .h = rect.h - 5 }, tab.label, tab.unread, index == active, focused and index == active, hovered_room == index);
+    }
+    if (roomOverflowRect(layout, comic_mode, tabs.len, first_visible)) |chip| {
+        ui.drawInkChip(c, chip, "...", overflow_hovered);
+        if (overflow_hovered) ui.drawFocusRing(c, chip);
     }
     if (comic_mode and layout.transcript.w >= 430) drawComicColumnControl(c, layout, comic_columns, column_hover);
 }
@@ -2283,17 +3030,29 @@ fn placeEditorCursor(editor: *input_mod.Editor, window: TextWindow, local_x: i32
     editor.selection_anchor = null;
 }
 
-fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor: usize, selection: ?TextSelection, focused: bool, hovered: bool, say_mode: shell_mod.SayMode, hovered_action: ?u8, focused_action: ?u8) void {
+fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor: usize, selection: ?TextSelection, focused: bool, hovered: bool, say_mode: shell_mod.SayMode, hovered_action: ?u8, focused_action: ?u8, status: []const u8, connected: bool) void {
     const edit = layout.say_editor;
     ui.drawComposerSurface(c, layout.say);
     const editor_layout = ui.ComposerEditorLayout.init(edit);
     ui.drawComposerEditor(c, editor_layout, focused, hovered, input.len > 0);
     const content_rect = editor_layout.content;
+    const mode = sayActionLabel(@intFromEnum(say_mode));
+    const mode_w: i32 = if (edit.w >= 220 and input.len == 0) Canvas.uiTextWidth(mode) + 18 else 0;
+    const send = composerSendRect(edit);
+    const send_w: i32 = if (send) |rect| rect.w else 0;
+    if (mode_w > 0) ui.drawComposerModeChip(c, .{ .x = edit.x + 14, .y = edit.y + 13, .w = mode_w, .h = 18 }, mode, focused);
+    if (send) |rect| {
+        const hot = focused or hovered;
+        ui.drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 2, if (hot) ui.current.accent else ui.current.layer);
+        drawTextEllipsized(c, "Send", rect.x + 8, rect.y + 1, rect.w - 16, if (hot) ui.current.layer else ui.current.ink);
+    }
     if (input.len == 0) {
-        const placeholder_x = edit.x + 18 + placeholderGap(focused);
-        drawTextEllipsized(c, "Write a message...", placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18, ui.current.secondary);
+        const placeholder_x = edit.x + 18 + placeholderGap(focused) + if (mode_w > 0) mode_w + 6 else 0;
+        const placeholder = composerPlaceholder(status);
+        drawTextEllipsized(c, placeholder, placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - send_w, ui.current.secondary);
     } else {
-        const viewport = composerViewport(input, cursor, content_rect.w);
+        const text_w = @max(0, content_rect.w - if (send_w > 0) send_w + 8 else 0);
+        const viewport = composerViewport(input, cursor, text_w);
         for (viewport.rows[0..viewport.count], 0..) |row, row_index| {
             const window = row.window;
             const text_y = editor_layout.rowY(row_index, viewport.count);
@@ -2306,7 +3065,7 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
                     ui.drawTextSelection(c, editor_layout.selectionRect(selection_x, text_y, selection_w));
                 }
             }
-            drawTextEllipsized(c, input[window.start..window.end], content_rect.x, text_y, content_rect.w, ui.current.ink);
+            drawTextEllipsized(c, input[window.start..window.end], content_rect.x, text_y, text_w, ui.current.ink);
             if (row.cursor_row and focused) {
                 const safe_cursor = std.math.clamp(@min(cursor, input.len), window.start, window.end);
                 const caret_x = editor_layout.caretX(content_rect.x + Canvas.uiTextWidth(input[window.start..safe_cursor]));
@@ -2321,25 +3080,84 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     var x = layout.say_actions.x;
     for (glyphs, 0..) |glyph, index| {
         const selected = @intFromEnum(say_mode) == index;
-        const glyph_color = ui.drawActionTile(c, x, layout.say_actions.y, layout.say_action_size, layout.say_actions.h, selected, hovered_action == @as(u8, @intCast(index)));
+        const disabled = !sayActionEnabled(@intCast(index), connected);
+        const glyph_color = ui.drawActionTileState(c, x, layout.say_actions.y, layout.say_action_size, layout.say_actions.h, selected, hovered_action == @as(u8, @intCast(index)), disabled);
         ui.drawSayGlyph(c, glyph, x + @divTrunc(layout.say_action_size - 16, 2), layout.say_actions.y + 18, glyph_color);
         if (focused_action == @as(u8, @intCast(index))) ui.drawFocusRing(c, .{ .x = x, .y = layout.say_actions.y, .w = layout.say_action_size, .h = layout.say_actions.h });
         x += layout.say_action_size;
     }
-    if (focused) drawFocus(c, layout.say);
 }
 
-fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
+fn composerSendRect(edit: Rect) ?Rect {
+    if (edit.w < 220) return null;
+    const send_w = Canvas.uiTextWidth("Send") + 20;
+    return .{ .x = edit.right() - send_w - 10, .y = edit.y + 13, .w = send_w, .h = 18 };
+}
+
+fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8, connected: bool) void {
     if (index >= geometry.say_button_count) return;
     const label = sayActionLabel(index);
-    const width = Canvas.uiTextWidth(label) + 20;
+    const hint = if (!sayActionEnabled(index, connected)) "Connect first" else switch (index) {
+        0 => "Talk",
+        1 => "Think",
+        2 => "Quiet",
+        3 => "Do",
+        else => "Play",
+    };
+    const width = @min(220, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
     const action_x = layout.say_actions.x + @as(i32, index) * layout.say_action_size;
     const x = std.math.clamp(action_x + @divTrunc(layout.say_action_size - width, 2), 6, @max(6, layout.transcript.right() - width - 6));
-    ui.drawTooltip(c, .{ .x = x, .y = layout.say.y - 34, .w = width, .h = 28 }, label);
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.say.y - 34, .w = width, .h = 28 }, label, hint);
 }
 
-fn drawStatusBar(c: *Canvas, rect: Rect, status: []const u8, member_count: usize, hovered: bool) void {
-    ui.drawStatusBar(c, rect.x, rect.y, rect.w, rect.h, status, member_count, hovered);
+fn drawOverflowTooltip(c: *Canvas, layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize) void {
+    const chip = roomOverflowRect(layout, comic_mode, count, first_visible) orelse return;
+    const hidden = if (count > first_visible) count - first_visible else 0;
+    const viewport = tabViewport(layout, comic_mode);
+    const unseen = if (hidden > viewport.capacity) hidden - viewport.capacity else if (first_visible > 0) first_visible else hidden;
+    var hint_buf: [16]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, "{d} hidden", .{@max(1, unseen)}) catch "More";
+    const width = @min(220, Canvas.uiTextWidth("More rooms") + Canvas.uiTextWidth(hint) + 38);
+    const x = std.math.clamp(chip.x - 4, 6, @max(6, layout.tabs.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, "More rooms", hint);
+}
+
+fn drawStatusTabTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
+    const label = statusTabLabel(status);
+    const width = @min(200, Canvas.uiTextWidth(label) + Canvas.uiTextWidth("Panel") + 38);
+    ui.drawTooltipWithHint(c, .{ .x = layout.tabs.x + 8, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, label, "Panel");
+}
+
+fn drawStatusBarTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
+    const label = statusBarLabel(status);
+    const hint = if (ui.statusTone(status) == .success) "Live" else if (std.mem.indexOf(u8, status, "nickname in use") != null) "Name" else "Wire";
+    const width = @min(260, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
+    const x = std.math.clamp(layout.status.x + 8, 6, @max(6, layout.status.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.status.y - 34, .w = width, .h = 28 }, label, hint);
+}
+
+fn drawRoomTabTooltip(c: *Canvas, layout: geometry.Layout, comic_mode: bool, label: []const u8, index: usize) void {
+    const viewport = tabViewport(layout, comic_mode);
+    const slot: i32 = @intCast(index -| @as(usize, @intCast(@max(0, @as(i32, @intCast(index)) - @as(i32, @intCast(viewport.capacity))))));
+    _ = slot;
+    const width = @min(220, Canvas.uiTextWidth(label) + Canvas.uiTextWidth("Page") + 38);
+    const tab_x = viewport.first_x + @as(i32, @intCast(index)) * 164;
+    const x = std.math.clamp(tab_x, 6, @max(6, layout.tabs.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, label, "Page");
+}
+
+fn drawColumnTooltip(c: *Canvas, layout: geometry.Layout, columns: u8) void {
+    var hint_buf: [16]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, "{d} across", .{columns}) catch "4 across";
+    const width = @min(200, Canvas.uiTextWidth("Panels") + Canvas.uiTextWidth(hint) + 38);
+    const control = geometry.comicColumnControl(layout);
+    const x = std.math.clamp(control.x - 8, 6, @max(6, layout.tabs.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, "Panels", hint);
+}
+
+fn drawStatusBar(c: *Canvas, rect: Rect, status: []const u8, member_count: usize, hovered: bool, focused: bool) void {
+    ui.drawStatusBar(c, rect.x, rect.y, rect.w, rect.h, status, member_count, hovered or focused);
+    if (focused) ui.drawFocusRing(c, rect);
 }
 
 fn statusPanelRect(width: u32, height: u32, detailed: bool) Rect {
@@ -2353,41 +3171,132 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     ui.drawAnchoredPopoverSurface(c, panel, panel.x + 30);
     const tone = ui.statusTone(status);
     ui.drawStatusIdentity(c, .{ .x = panel.x + 16, .y = panel.y + 15, .w = 34, .h = 34 }, tone);
-    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, "Connection & activity", status);
+    const heading = statusPanelHeading(status);
+    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, heading, statusPanelDetail(status));
     ui.drawSectionRule(c, panel.x + 16, panel.y + 60, panel.w - 32);
 
     var members_buf: [32]u8 = undefined;
-    const members = std.fmt.bufPrint(&members_buf, "{d} active member{s}", .{ member_count, if (member_count == 1) "" else "s" }) catch "Member activity";
+    const members = std.fmt.bufPrint(&members_buf, "{d} on CAST", .{member_count}) catch "CAST activity";
     var panels_buf: [32]u8 = undefined;
     const panels = std.fmt.bufPrint(&panels_buf, "{d} panels across", .{shell.comic_columns}) catch "Panel layout";
     const metric_gap: i32 = 8;
     const metric_w = @divTrunc(panel.w - 36 - metric_gap, 2);
     const first_metric_y = panel.y + 69;
     if (panel_layout.show_metrics) {
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = first_metric_y, .w = metric_w, .h = 38 }, "ROOM", members);
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = first_metric_y, .w = metric_w, .h = 38 }, "VIEW", if (shell.content_mode == .comic) panels else "Text transcript");
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = first_metric_y, .w = metric_w, .h = 38 }, "CAST", members);
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = first_metric_y, .w = metric_w, .h = 38 }, "PAGE", if (shell.content_mode == .comic) panels else "Conversation");
     }
     if (show_details) {
         const detail_y = first_metric_y + 40;
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = detail_y, .w = metric_w, .h = 38 }, "MEMBERS", if (!shell.show_members) "Pane hidden" else if (shell.member_view == .icons) "Portrait cards" else "Compact list");
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = detail_y, .w = metric_w, .h = 38 }, "RAIL", if (!shell.show_members) "CAST hidden" else if (shell.member_view == .icons) "Portrait cards" else "Compact list");
         const theme_label = switch (appearance.accent) {
-            .cobalt => "Cobalt",
+            .cobalt => "Vermillion",
             .violet => "Violet",
             .forest => "Forest",
         };
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = detail_y, .w = metric_w, .h = 38 }, "STUDIO", if (appearance.mode == .dark) "Dark studio" else theme_label);
+        var studio_buf: [32]u8 = undefined;
+        const studio = if (appearance.mode == .dark)
+            std.fmt.bufPrint(&studio_buf, "Dark / {s}", .{theme_label}) catch "Dark studio"
+        else
+            std.fmt.bufPrint(&studio_buf, "Light / {s}", .{theme_label}) catch "Light studio";
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = detail_y, .w = metric_w, .h = 38 }, "INK", studio);
     }
     if (panel_layout.show_actions) {
         const connection = panel_layout.connection;
         const settings = panel_layout.settings;
-        ui.drawButton(c, connection.x, connection.y, connection.w, "Connection setup", .primary, hovered_action == .connection);
-        ui.drawButton(c, settings.x, settings.y, settings.w, "Settings", .secondary, hovered_action == .settings);
-        ui.drawDismissHint(c, panel, "Esc closes");
+        const connection_label = if (std.mem.indexOf(u8, status, "nickname in use") != null) "Sign-in name" else "Wire setup";
+        ui.drawButton(c, connection.x, connection.y, connection.w, connection_label, .primary, hovered_action == .connection);
+        ui.drawButton(c, settings.x, settings.y, settings.w, "Studio", .secondary, hovered_action == .settings);
+        if (hovered_action == .connection) ui.drawFocusRing(c, connection);
+        if (hovered_action == .settings) ui.drawFocusRing(c, settings);
+        ui.drawDismissHint(c, panel, "Esc closes panel");
     }
 }
 
-fn drawEmptyBuffer(c: *Canvas, rect: Rect, text: []const u8, columns: u8) void {
-    ui.drawEmptyState(c, rect.x, rect.y, rect.w, rect.h, text, columns);
+const EmptyPageCopy = struct { title: []const u8, detail: []const u8, waiting: bool };
+
+fn emptyPageCopy(status: []const u8) EmptyPageCopy {
+    const tone = ui.statusTone(status);
+    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - open Wire setup", .waiting = true };
+    if (isOfflineStatus(status)) return .{ .title = "Sunday page is off the wire", .detail = "Connect to ink the first balloon", .waiting = true };
+    if (tone != .success) return .{ .title = "Sunday page is on hold", .detail = "Hold for the wire", .waiting = true };
+    return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
+}
+
+fn emptyCastCopy(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .failure) return "Wire failed";
+    if (tone != .success) return "Connect first";
+    return "Join a room";
+}
+
+fn composerPlaceholder(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .failure) return "Wire failed - Connect, then ink...";
+    if (isOfflineStatus(status)) return "Connect, then ink the next balloon...";
+    if (tone != .success) return "Hold on the wire...";
+    return "Ink the next balloon...";
+}
+
+fn statusTabLabel(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "Live";
+    if (tone == .failure) return "Fail";
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Name";
+    if (isOfflineStatus(status)) return "Off";
+    return "Hold";
+}
+
+fn statusPanelHeading(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "On the wire";
+    if (tone == .failure) return "Wire failed";
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken";
+    if (isOfflineStatus(status)) return "Sunday page is off the wire";
+    if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
+    if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
+    if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
+    if (std.mem.eql(u8, status, "connecting")) return "Connecting to the wire";
+    return "Hold on the wire";
+}
+
+fn statusPanelDetail(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "Live";
+    if (tone == .failure) return failureStatusLabel(status);
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Choose another sign-in name";
+    if (isOfflineStatus(status)) return "Connect to ink the first balloon";
+    return "Hold for the wire";
+}
+
+fn statusBarLabel(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "On the wire";
+    if (tone == .failure) return failureStatusLabel(status);
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken - open Sign-in name";
+    if (isOfflineStatus(status)) return "Sunday page is off the wire - open Wire setup";
+    if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
+    if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
+    if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
+    if (std.mem.eql(u8, status, "connecting")) return "Connecting to the wire";
+    return "Hold on the wire";
+}
+
+fn isOfflineStatus(status: []const u8) bool {
+    return std.mem.indexOf(u8, status, "offline") != null or std.mem.indexOf(u8, status, "Disconnected") != null or std.mem.indexOf(u8, status, "disconnected") != null;
+}
+
+fn failureStatusLabel(status: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, status, "(refused)") != null) return "Wire failed (refused) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(timeout)") != null) return "Wire failed (timeout) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(reset)") != null) return "Wire failed (reset) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(TLS)") != null) return "Wire failed (TLS) - open Wire setup";
+    if (std.mem.indexOf(u8, status, "(unreachable)") != null) return "Wire failed (unreachable) - open Wire setup";
+    return "Wire failed - open Wire setup";
+}
+
+fn drawEmptyBuffer(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8, columns: u8) void {
+    ui.drawEmptyState(c, rect.x, rect.y, rect.w, rect.h, title, detail, columns);
 }
 
 fn drawFocus(c: *Canvas, rect: Rect) void {
@@ -2399,15 +3308,29 @@ fn drawTextEllipsized(c: *Canvas, text: []const u8, x: i32, y: i32, max_w: i32, 
 }
 
 fn blitFit(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
-    var fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
-    fit.y = y + @min(14, @max(0, max_h - fit.h));
+    blitSourcePage(c, src, sw, sh, x, y, max_w, max_h);
+}
+
+/// Fit a source-rasterized page into the well without shifting it off the
+/// top-left origin. The 14px vertical bias used to invent extra mat.
+fn blitSourcePage(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
+    const fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
+    const stride = strip.panel_height + strip.device_interstice;
+    const rows: u32 = if (sh == 0 or stride == 0) 0 else (sh + strip.device_interstice) / stride;
+    const max_rows: u32 = 3;
+    const show_rows = if (rows == 0) 0 else @min(rows, max_rows);
+    const first_row = rows - show_rows;
+    const src_y = first_row * stride;
+    const src_h = if (sh > src_y) sh - src_y else sh;
+    if (src_h == 0) return;
+    const crop = fitRect(sw, src_h, x, y, max_w, max_h) orelse fit;
     var oy: i32 = 0;
-    while (oy < fit.h) : (oy += 1) {
-        const sy: u32 = @intCast(@divTrunc(@as(i64, oy) * sh, fit.h));
+    while (oy < crop.h) : (oy += 1) {
+        const sy: u32 = src_y + @as(u32, @intCast(@divTrunc(@as(i64, oy) * src_h, crop.h)));
         var ox: i32 = 0;
-        while (ox < fit.w) : (ox += 1) {
-            const sx: u32 = @intCast(@divTrunc(@as(i64, ox) * sw, fit.w));
-            c.set(fit.x + ox, fit.y + oy, src[@as(usize, sy) * sw + sx]);
+        while (ox < crop.w) : (ox += 1) {
+            const sx: u32 = @intCast(@divTrunc(@as(i64, ox) * sw, crop.w));
+            c.set(crop.x + ox, crop.y + oy, src[@as(usize, sy) * sw + sx]);
         }
     }
 }
@@ -2580,35 +3503,311 @@ fn dialogLayout(width: u32, height: u32, spec: dialogs.Spec) ui.DialogLayout {
     return ui.DialogLayout.init(width, height, spec.source_w, spec.source_h, dialogs.fields(spec.id).len, dialogPrimaryButtonWidth(spec.id), dialogs.showsCancel(spec.id));
 }
 
+/// CAST chips are Sunday letters. Wire prefixes stay in `MemberRole.badge`.
+fn memberRoleChip(role: session.MemberRole) []const u8 {
+    return switch (role) {
+        .member => "",
+        .voice => "V",
+        .halfop => "H",
+        .operator => "OP",
+        .owner => "OWN",
+    };
+}
+
+fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
+    return switch (id) {
+        .settings => switch (index) {
+            0 => "STUDIO",
+            1 => "INK",
+            2 => "TYPE",
+            3 => "PAGE",
+            4 => "PAGE",
+            5 => "CAST",
+            6 => "CAST",
+            7 => "LIST",
+            else => "",
+        },
+        .setup, .servers => switch (index) {
+            0 => "WIRE",
+            1 => "PORT",
+            2 => "TLS",
+            else => "",
+        },
+        .connection_features => switch (index) {
+            0 => "WIRE",
+            1 => "SIGN",
+            2 => "ROOM",
+            3 => "LIST",
+            else => "",
+        },
+        .password => switch (index) {
+            0 => "SIGN",
+            1 => "KEY",
+            else => "",
+        },
+        .room_list => switch (index) {
+            0 => "LIST",
+            1 => "JOIN",
+            2 => "LIST",
+            else => "",
+        },
+        .user_list => if (index == 0) "CAST" else if (index == 1) "NAME" else "",
+        .channel => if (index == 0) "JOIN" else if (index == 1) "KEY" else "",
+        .channel_create => switch (index) {
+            0 => "JOIN",
+            1, 2 => "ROOM",
+            3 => "CAST",
+            4 => "KEY",
+            else => "",
+        },
+        .whisper, .invite => if (index == 0) "SAY" else "",
+        .away => if (index == 0) "NOTE" else "",
+        .nickname => if (index == 0) "NAME" else "",
+        .personal => switch (index) {
+            0 => "CARD",
+            1 => "NAME",
+            2 => "WEB",
+            3 => "MAIL",
+            else => "",
+        },
+        .ircx_properties => switch (index) {
+            0 => "ROOM",
+            1 => "LIST",
+            2 => "VALUE",
+            3 => "SET",
+            else => "",
+        },
+        .room_access => switch (index) {
+            0 => "ROLE",
+            1 => "ROLE",
+            2 => "NAME",
+            3 => "TIME",
+            4 => "NOTE",
+            else => "",
+        },
+        .file_transfer => switch (index) {
+            0 => "FILE",
+            1 => "CAST",
+            2 => "FILE",
+            3 => "FILE",
+            4 => "FILE",
+            else => "",
+        },
+        .ban => if (index == 0) "NAME" else "",
+        .kick => switch (index) {
+            0 => "CAST",
+            1 => "NOTE",
+            2 => "NAME",
+            else => "",
+        },
+        .call_link => if (index == 0) "CALL" else if (index == 1 or index == 2) "CALL" else "",
+        .member_profile => if (index == 0 or index == 1) "CARD" else "",
+        .sound => if (index == 0) "PLAY" else if (index == 1) "SAY" else "",
+        .invitation => if (index == 0) "JOIN" else if (index == 1) "NOTE" else "",
+        .comics_view => if (index == 0 or index == 1) "PAGE" else "",
+        .character => if (index == 0) "PAGE" else if (index == 1) "FACE" else if (index == 2) "PAGE" else "",
+        .motd => if (index == 0) "LIST" else "",
+        .choose_color => if (index == 0 or index == 1) "INK" else "",
+        .export_image, .print_preview => if (index == 0) "PAGE" else if (index == 1) "PAGE" else "",
+        .open_conversation, .save_conversation, .open_locator => if (index == 0) "FILE" else "",
+        .automation, .rules, .edit_rule => switch (index) {
+            0 => "AUTO",
+            1 => "WATCH",
+            2 => "MATCH",
+            3 => "AUTO",
+            4 => "AUTO",
+            else => "",
+        },
+        .channel_password => if (index == 0) "KEY" else "",
+        .background => if (index == 0 or index == 1) "PAGE" else "",
+        .text_font, .set_text_font => if (index == 0 or index == 1) "TYPE" else "",
+        .notifications => switch (index) {
+            0 => "WATCH",
+            1 => "NAME",
+            2 => "ADDR",
+            3 => "WIRE",
+            4 => "WATCH",
+            else => "",
+        },
+        .notification_users => switch (index) {
+            0, 1, 2 => "CAST",
+            3 => "JOIN",
+            else => "",
+        },
+        .rule_sets, .add_to_sets => if (index == 0) "SET" else if (index == 1) "NAME" else if (index == 2) "FILE" else "",
+        .favorite_rooms => if (index == 0 or index == 1) "ROOM" else "",
+        .recent_files => if (index == 0 or index == 1) "FILE" else "",
+        .channel_properties => switch (index) {
+            0, 1 => "ROOM",
+            2 => "CAST",
+            3 => "KEY",
+            4 => "NOTE",
+            else => "",
+        },
+        .ircx_events => if (index == 0 or index == 1) "WATCH" else if (index == 2) "FILTER" else "",
+        .rename_loaded_set, .rename_set, .create_set => if (index == 0 or index == 1) "NAME" else "",
+        .advanced_event_params => if (index == 0) "RULE" else if (index == 1) "CAP" else if (index == 2) "TIME" else "",
+        .advanced_rule_settings => if (index == 0) "RULE" else if (index == 1) "RULE" else if (index == 2) "MATCH" else "",
+        .about => if (index == 0 or index == 1) "INK" else "",
+    };
+}
+
+fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
+    if (first_value.len == 0) {
+        const empty = switch (id) {
+            .recent_files => "No recent conversations yet",
+            .favorite_rooms => "No favorite rooms yet",
+            .connection_features => "Features appear after the wire is live",
+            .motd => "The bulletin arrives after the wire is live",
+            else => "",
+        };
+        if (empty.len != 0) return empty;
+    }
+    return switch (id) {
+        .setup => "Verified TLS on 6697 is the Sunday default",
+        .servers => "Live Onyx nodes use implicit TLS 6697",
+        .connection_features => if (isOfflineFeatureStatus(first_value)) "Features appear after the wire is live" else "What this wire is offering",
+        .room_list => "Search by name or size, then join",
+        .user_list => "Choose a CAST member from the list",
+        .channel, .channel_create => "Enter a room beginning with # or &",
+        .whisper => "Send a quiet balloon to one CAST member",
+        .invite => "Invite CAST to this room",
+        .kick => "Remove CAST from this room",
+        .ban => "Keep a name pattern off this room",
+        .room_access => "Grant, deny, or show room access",
+        .ircx_properties => "Read or write named room properties",
+        .ircx_events => "Watch room, CAST, server, or wire events",
+        .invitation => "Accept an invitation to a room",
+        .channel_properties => "Topic, options, and CAST cap for this room",
+        .file_transfer => "Offer or accept a file with CAST",
+        .call_link => "Send a meeting link to CAST",
+        .member_profile => "Request a CAST profile",
+        .notifications, .notification_users => "Watch who comes onto the wire",
+        .sound => "Play a sound with the next balloon",
+        .personal => "Shown on your CAST card",
+        .nickname => "Used on the wire and the Sunday page",
+        .away => "Posted while you are away",
+        .settings => "Ink Sunday chrome, page density, and CAST",
+        .comics_view => "Sunday page or conversation",
+        .character => "Who stands on the page",
+        .background => "The paper behind every panel",
+        .password => "Wire account and password for this wire",
+        .automation => "Greeting and repeat cap",
+        .rules, .edit_rule => "When something happens on the page",
+        .rule_sets => "Create, import, or export a rule set",
+        .add_to_sets => "Add a rule to an open set",
+        .rename_loaded_set, .rename_set => "Rename the open rule set",
+        .create_set => "Name a new rule set",
+        .advanced_event_params => "How often this rule may fire",
+        .advanced_rule_settings => "Turn the rule on and keep case",
+        .recent_files => "Open a recent conversation",
+        .favorite_rooms => "Join or save a favorite room",
+        .open_conversation => "Open a saved conversation",
+        .save_conversation => "Save this conversation",
+        .export_image => "Export the Sunday page as an image",
+        .open_locator => "Open a saved locator",
+        .print_preview => "Save a printable Sunday page",
+        .channel_password => "Needed if the room is locked",
+        .choose_color => "Ink for typed text",
+        .text_font, .set_text_font => "Type on the Sunday page",
+        .about => "Portable Ink Sunday client",
+        .motd => "From the wire",
+    };
+}
+
 fn dialogFieldFocusable(field: dialogs.Field) bool {
     return field.kind != .readonly and field.kind != .preview;
+}
+
+fn dialogJumpsFieldExtreme(id: dialogs.Id, index: usize) bool {
+    const all = dialogs.fields(id);
+    if (index >= all.len) return true;
+    return switch (all[index].kind) {
+        .text, .password, .choice => false,
+        .list, .preview, .readonly => true,
+    };
+}
+
+fn isOfflineFeatureStatus(value: []const u8) bool {
+    return isOfflineStatus(value) or std.mem.eql(u8, value, "Offline") or std.mem.eql(u8, value, "Off the wire");
+}
+
+fn dialogGroupText(id: dialogs.Id) []const u8 {
+    return switch (id) {
+        .settings => "Ink, Sunday page density, and the CAST",
+        .character => "Choose who stands on the page",
+        .background => "The paper behind every panel",
+        .setup => "Host, port, and verified TLS",
+        .servers => "Live Onyx wires on implicit TLS 6697",
+        .connection_features => "What this wire is offering",
+        .password => "Wire account sign-in",
+        .nickname => "Used on the wire and the Sunday page",
+        .personal => "Shown on your CAST card",
+        .sound => "Choose a sound and message",
+        .comics_view => "Sunday page or conversation",
+        .about => "Portable Ink Sunday client",
+        .room_list => "Search rooms, then join",
+        .user_list => "Choose a CAST member from the list",
+        .channel, .channel_create => "Enter a room beginning with # or &",
+        .channel_password => "Needed if the room is locked",
+        .whisper => "A quiet balloon for one CAST member",
+        .kick => "Remove CAST from this room",
+        .ban => "Keep a name pattern off this room",
+        .invite => "Invite CAST to this room",
+        .invitation => "Accept an invitation to a room",
+        .call_link => "Send a meeting link to CAST",
+        .member_profile => "Request a CAST profile",
+        .channel_properties => "Topic, options, and CAST cap for this room",
+        .file_transfer => "Offer or accept a file with CAST",
+        .favorite_rooms => "Join or save a favorite room",
+        .away => "Posted while you are away",
+        .choose_color => "Ink for typed text",
+        .notifications, .notification_users => "Watch who comes onto the wire",
+        .rules, .edit_rule => "When something happens on the page",
+        .rule_sets => "Create, import, or export a rule set",
+        .add_to_sets => "Add a rule to an open set",
+        .rename_loaded_set, .rename_set => "Rename the open rule set",
+        .create_set => "Name a new rule set",
+        .advanced_event_params => "How often this rule may fire",
+        .advanced_rule_settings => "Turn the rule on and keep case",
+        .automation => "Greeting and repeat cap",
+        .room_access => "Grant, deny, or show room access",
+        .ircx_properties => "Read or write named room properties",
+        .ircx_events => "Watch room, CAST, server, or wire events",
+        .motd => "From the wire",
+        .text_font, .set_text_font => "Type on the Sunday page",
+        .open_conversation => "Open a saved conversation",
+        .save_conversation => "Save this conversation",
+        .export_image => "Export the Sunday page as an image",
+        .open_locator => "Open a saved locator",
+        .print_preview => "Save a printable Sunday page",
+        .recent_files => "Open a recent conversation",
+    };
 }
 
 fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Editor, active_field: usize, first_field: usize, action_focus: ?ui.DialogButton, hovered_field: ?usize, hovered_browse: ?usize, notice: []const u8, hovered_button: ?ui.DialogButton) void {
     ui.drawModalBackdrop(c);
     const dialog_layout = dialogLayout(c.width, c.height, spec);
     const rect = dialog_layout.rect;
-    const group_text = switch (spec.id) {
-        .settings => "Theme, layout, members, and status",
-        .character => "Browse the cast and preview an expression",
-        .setup, .servers => "Server and transport security",
-        .password => "Secure account sign-in",
-        .sound => "Choose a sound and message",
-        else => switch (spec.group) {
-            .application => "Application preferences",
-            .connection => "Connection, identity, and appearance",
-            .rooms => "Rooms and member workflow",
-            .automation => "Automation and notifications",
-            .files => "Application and file workflow",
-        },
-    };
-    ui.drawDialogSurface(c, rect, spec.title, group_text);
+    ui.drawDialogSurface(c, rect, spec.title, dialogGroupText(spec.id));
+    if (spec.id == .settings or spec.id == .setup or spec.id == .servers or spec.id == .connection_features or spec.id == .password) {
+        const well_top = dialog_layout.body_y - 8;
+        const well_h = @max(0, dialog_layout.primary.y - well_top - 12);
+        ui.drawInkPlate(c, rect.x + 12, well_top, rect.w - 24, well_h, 2, ui.current.layer);
+        c.fillRect(rect.x + 14, well_top + 2, @max(0, rect.w - 28), 2, ui.current.accent);
+    }
     const fields = dialogs.fields(spec.id);
     for (fields, 0..) |field, index| {
         if (index < first_field) continue;
         const row_y = dialog_layout.fieldLabelYScrolled(index, first_field);
         if (row_y + 40 > rect.bottom() - 43) break;
-        ui.drawDialogFieldLabel(c, .{ .x = rect.x + 20, .y = row_y, .w = rect.w - 40, .h = 17 }, field.label, index == active_field);
+        const kicker = settingsKicker(spec.id, index);
+        const kicker_w: i32 = if (kicker.len == 0) 0 else Canvas.uiTextWidth(kicker) + 18;
+        ui.drawDialogFieldLabel(c, .{ .x = rect.x + 20, .y = row_y, .w = rect.w - 40 - kicker_w, .h = 17 }, field.label, index == active_field);
+        if (kicker_w > 0) {
+            if (index != 0) ui.drawSectionRule(c, rect.x + 20, row_y - 6, rect.w - 40);
+            ui.drawInkChip(c, .{ .x = rect.right() - kicker_w - 22, .y = row_y - 1, .w = kicker_w, .h = 18 }, kicker, true);
+        }
         var field_rect = dialog_layout.fieldRectScrolled(index, first_field);
         if (spec.id == .character and field.kind == .preview) field_rect = characterGalleryRect(dialog_layout, first_field);
         const field_y = field_rect.y;
@@ -2677,18 +3876,39 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
     }
 
     const visible_rows = dialog_layout.visibleRows();
-    if (fields.len > visible_rows) ui.drawVerticalScrollbar(c, .{
-        .x = rect.right() - 13,
-        .y = dialog_layout.body_y,
-        .w = 8,
-        .h = @max(1, dialog_layout.primary.y - dialog_layout.body_y - 8),
-    }, fields.len, visible_rows, first_field);
+    if (fields.len > visible_rows) {
+        const hidden = fields.len - @min(fields.len, first_field + visible_rows);
+        if (hidden > 0) {
+            var more_buf: [24]u8 = undefined;
+            const more = std.fmt.bufPrint(&more_buf, "{d} more", .{hidden}) catch "more";
+            ui.drawEllipsized(c, more, rect.x + 18, dialog_layout.primary.y + 8, 72, ui.current.secondary);
+        }
+        ui.drawVerticalScrollbar(c, .{
+            .x = rect.right() - 13,
+            .y = dialog_layout.body_y,
+            .w = 8,
+            .h = @max(1, dialog_layout.primary.y - dialog_layout.body_y - 8),
+        }, fields.len, visible_rows, first_field);
+    }
 
     ui.drawDialogActionBar(c, rect, dialog_layout.primary.y - 8);
-    if (notice.len != 0) ui.drawNotice(c, rect.x + 14, dialog_layout.primary.y - 22, rect.w - 28, notice, .warning);
+    const first_value = if (editors.len != 0) editors[0].text() else "";
+    const helper = if (notice.len != 0) notice else dialogHelper(spec.id, first_value);
+    if (helper.len != 0) {
+        const tone: ui.NoticeTone = if (std.mem.indexOf(u8, helper, "failed") != null or std.mem.indexOf(u8, helper, "Connect first") != null or std.mem.indexOf(u8, helper, "Connect before") != null or std.mem.indexOf(u8, helper, "needs a live") != null or std.mem.indexOf(u8, helper, "must") != null)
+            .failure
+        else if (notice.len != 0)
+            .warning
+        else
+            .info;
+        ui.drawNotice(c, rect.x + 14, dialog_layout.primary.y - 22, rect.w - 28, helper, tone);
+    }
     drawDialogButton(c, dialog_layout.primary.x, dialog_layout.primary.y, dialog_layout.primary.w, dialogs.primaryLabel(spec.id), .primary, hovered_button == .primary or action_focus == .primary);
-    if (dialogs.showsCancel(spec.id))
+    if (action_focus == .primary) ui.drawFocusRing(c, dialog_layout.primary);
+    if (dialogs.showsCancel(spec.id)) {
         drawDialogButton(c, dialog_layout.cancel.x, dialog_layout.cancel.y, dialog_layout.cancel.w, "Cancel", .secondary, hovered_button == .cancel or action_focus == .cancel);
+        if (action_focus == .cancel) ui.drawFocusRing(c, dialog_layout.cancel);
+    }
 }
 
 fn dialogBrowseField(id: dialogs.Id) ?usize {
@@ -2828,8 +4048,8 @@ test "view renders modern empty buffer and ui.current.chrome" {
     try view.render("Comic Chat | #root | anna", "connected", &transcript, "hello", 3);
     const layout = geometry.Layout.compute(960, 720, true, true);
     try std.testing.expectEqual(ui.current.navigation, view.pixels()[0]);
-    try std.testing.expectEqual(ui.current.divider, view.pixels()[@as(usize, @intCast(layout.tabs.bottom() - 1)) * 960]);
-    try std.testing.expectEqual(ui.current.chrome, view.pixels()[@as(usize, @intCast(layout.say.y + 2)) * 960 + 2]);
+    try std.testing.expectEqual(ui.current.ink, view.pixels()[@as(usize, @intCast(layout.tabs.bottom() - 1)) * 960]);
+    try std.testing.expectEqual(ui.current.ink, view.pixels()[@as(usize, @intCast(layout.say.y + 1)) * 960 + 2]);
 
     const wheel = emotionWheelRect(layout);
     const dial = ui.moodDialInterior(wheel);
@@ -2899,8 +4119,59 @@ test "context menu keyboard skips disabled moderation controls" {
     try std.testing.expectEqual(@as(?u8, 0), view.focused_context_item);
     _ = view.handleContextMenuKey(.end);
     try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
+    _ = view.handleContextMenuKey(.left);
+    try std.testing.expectEqual(@as(?u8, 1), view.focused_context_item);
+    _ = view.handleContextMenuKey(.right);
+    try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
+    _ = view.handleContextMenuKey(.page_up);
+    try std.testing.expectEqual(@as(?u8, 0), view.focused_context_item);
+    _ = view.handleContextMenuKey(.page_down);
+    try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
     _ = view.handleContextMenuKey(.escape);
     try std.testing.expect(view.context_menu == null);
+}
+
+test "focused chrome leftover keys do not leak into the composer" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .toolbar;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'a' }).?);
+    try std.testing.expectEqual(shell_mod.Focus.toolbar, view.shell.focus);
+    view.shell.focus = .say_actions;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 's' }).?);
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'w' }).?);
+    view.shell.focus = .members;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'c' }).?);
+    view.shell.focus = .emotion;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = 'e' }).?);
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.{ .char = 'x' }).?);
+    try std.testing.expect(view.active_menu == null);
+    view.shell.focus = .toolbar;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.backspace).?);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.delete).?);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(firstEnabledToolbar(view.wire_live), view.focused_toolbar);
+    try std.testing.expect(view.handleFocusedActionKey(.tab) == null);
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.backspace).?);
+    try std.testing.expect(view.handleMenuKey(.tab) == null);
+    view.shell.focus = .members;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.backspace).?);
+    try std.testing.expect(view.handleFocusedActionKey(.up) == null);
+}
+
+test "open context menu consumes leftover keys and blocks Alt accelerators" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openContextMenu(.member, 200, 200);
+    try std.testing.expectEqual(Action.none, view.handleContextMenuKey(.{ .char = 'f' }).?);
+    try std.testing.expectEqual(ContextKind.member, view.context_menu.?);
+    try std.testing.expectEqual(Action.none, view.handleContextMenuKey(.tab).?);
+    try std.testing.expect(view.handleMenuAccelerator(.{ .char = 'f' }, true) == null);
+    try std.testing.expectEqual(ContextKind.member, view.context_menu.?);
+    try std.testing.expect(view.active_menu == null);
 }
 
 test "menu clicks select navigation without opening a modal dialog" {
@@ -2931,7 +4202,8 @@ test "every menu popup and command row stays reachable at minimum width" {
     defer view.deinit();
     view.active_menu = 6;
     const more = menuPopupRect(width, 6);
-    _ = view.handlePointer(.{ .kind = .down, .x = more.x + 12, .y = more.y + 8 + 7 * 29, .button = .primary }, 0, 0);
+    const about_item = menuItemCount(6) - 1;
+    _ = view.handlePointer(.{ .kind = .down, .x = more.x + 12, .y = more.y + 8 + @as(i32, about_item) * 29, .button = .primary }, 0, 0);
     try std.testing.expectEqual(dialogs.Id.about, view.active_dialog.?);
 }
 
@@ -2983,6 +4255,7 @@ test "status and connect toolbar expose a prefilled connection workflow" {
     try std.testing.expect(view.hovered_status);
     try std.testing.expectEqual(Action.none, view.handlePointer(.{ .kind = .down, .x = layout.status.x + 24, .y = layout.status.y + 10, .button = .primary }, 0, 0));
     try std.testing.expect(view.status_panel_open);
+    try std.testing.expectEqual(shell_mod.Focus.status, view.shell.focus);
     const status_layout = ui.StatusPanelLayout.init(view.width(), view.height(), true);
     const connection = status_layout.connection;
     try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = connection.x + 5, .y = connection.y + 5 }, 0));
@@ -3008,6 +4281,31 @@ test "status and connect toolbar expose a prefilled connection workflow" {
     try std.testing.expectEqualStrings("Verified TLS", view.dialogValueAt(2));
 }
 
+test "status tab hover is independent of the bottom status bar" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = layout.tabs.x + 20, .y = layout.tabs.y + 10 }, 0));
+    try std.testing.expect(view.hovered_status_tab);
+    try std.testing.expect(!view.hovered_status);
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = layout.status.x + 24, .y = layout.status.y + 10 }, 0));
+    try std.testing.expect(view.hovered_status);
+    try std.testing.expect(!view.hovered_status_tab);
+}
+
+test "room tabs expose hover independently of the status stamp" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.room_tab_count = 2;
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = layout.tabs.x + 130, .y = layout.tabs.y + 10 }, 2));
+    try std.testing.expectEqual(@as(?usize, 0), view.hovered_room_tab);
+    try std.testing.expect(!view.hovered_status_tab);
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = layout.tabs.x + 20, .y = layout.tabs.y + 10 }, 2));
+    try std.testing.expect(view.hovered_status_tab);
+    try std.testing.expect(view.hovered_room_tab == null);
+}
+
 test "settings menu opens application preferences instead of connection setup" {
     var view = try View.init(std.testing.allocator, 960, 720);
     defer view.deinit();
@@ -3024,8 +4322,8 @@ test "settings menu opens application preferences instead of connection setup" {
         try std.testing.expectEqual(Action{ .menu = route.menu }, action);
         try std.testing.expectEqual(dialogs.Id.settings, view.active_dialog.?);
         try std.testing.expectEqualStrings("Light studio", view.dialogValueAt(0));
-        try std.testing.expectEqualStrings("Cobalt", view.dialogValueAt(1));
-        try std.testing.expectEqualStrings("Standard", view.dialogValueAt(2));
+        try std.testing.expectEqualStrings("Vermillion", view.dialogValueAt(1));
+        try std.testing.expectEqualStrings("Usual", view.dialogValueAt(2));
         try std.testing.expectEqualStrings("Comic", view.dialogValueAt(3));
         try std.testing.expectEqualStrings("4 panels", view.dialogValueAt(4));
         _ = view.closeDialog();
@@ -3043,7 +4341,11 @@ test "menu keyboard navigation wraps skips disabled commands and activates setti
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.left).?);
     try std.testing.expectEqual(@as(?u8, 6), view.active_menu);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.end).?);
-    try std.testing.expectEqual(@as(?u8, 7), view.hovered_menu_item);
+    try std.testing.expectEqual(@as(?u8, 10), view.hovered_menu_item);
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_up).?);
+    try std.testing.expectEqual(@as(?u8, 0), view.hovered_menu_item);
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.page_down).?);
+    try std.testing.expectEqual(@as(?u8, 10), view.hovered_menu_item);
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.escape).?);
     try std.testing.expect(view.active_menu == null);
 
@@ -3067,8 +4369,8 @@ test "menu information architecture has one settings connection and transfer ent
         var item: u8 = 0;
         while (item < menuItemCount(menu)) : (item += 1) {
             const label = menuItemLabel(menu, item);
-            if (std.mem.eql(u8, label, "Settings")) settings_count += 1;
-            if (std.mem.eql(u8, label, "Connection setup")) connection_count += 1;
+            if (std.mem.eql(u8, label, "Studio")) settings_count += 1;
+            if (std.mem.eql(u8, label, "Wire setup")) connection_count += 1;
             if (std.ascii.eqlIgnoreCase(label, "File transfer")) transfer_count += 1;
         }
     }
@@ -3081,6 +4383,8 @@ test "extensive settings reveal focused controls in the compact dialog viewport"
     var view = try View.init(std.testing.allocator, min_width, min_height);
     defer view.deinit();
     view.openDialog(.settings);
+    try std.testing.expectEqualStrings("Portraits", view.dialogValueAt(6));
+    try std.testing.expectEqualStrings("Full", view.dialogValueAt(7));
     const layout = dialogLayout(view.width(), view.height(), dialogs.get(.settings));
     try std.testing.expect(layout.visibleRows() < dialogs.fields(.settings).len);
     var tabs: usize = 0;
@@ -3112,6 +4416,24 @@ test "character gallery browses adjacent cast members and previews expression" {
     _ = try view.handleDialogKey(.right, .{});
     try std.testing.expectEqualStrings("Happy", view.dialogValueAt(1));
     try std.testing.expectEqualStrings("Happy", view.currentEmotionLabel());
+}
+
+test "character gallery Home and End jump first and last card" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.character);
+    view.dialog_field = 0;
+    view.dialog_gallery_focus = .selected;
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.family, view.dialog_gallery_focus.?);
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.next, view.dialog_gallery_focus.?);
+    view.dialog_gallery_focus = .previous;
+    _ = try view.handleDialogKey(.page_up, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.family, view.dialog_gallery_focus.?);
+    _ = try view.handleDialogKey(.page_down, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.next, view.dialog_gallery_focus.?);
+    try std.testing.expectEqualStrings("Anna HD", view.dialogValueAt(0));
 }
 
 test "dialog keyboard focus includes actions and protects typed choices" {
@@ -3169,7 +4491,7 @@ test "room tabs reserve the comic density control and keep the active room reach
     try std.testing.expectEqual(Action{ .room_tab = 1 }, first_visible);
     const increase = geometry.comicColumnIncrease(layout);
     const stepper = view.handlePointer(.{ .kind = .down, .x = increase.x + 4, .y = increase.y + 4, .button = .primary }, 0, 0);
-    try std.testing.expectEqual(Action.none, stepper);
+    try std.testing.expectEqual(Action.persist_layout, stepper);
     try std.testing.expectEqual(@as(u8, 5), view.shell.comic_columns);
 }
 
@@ -3495,4 +4817,715 @@ test "moderation menu actions are disabled until the local role permits them" {
     view.active_menu = 5;
     _ = view.handlePointer(.{ .kind = .down, .x = popup.x + 10, .y = popup.y + 8 + 4 * 29, .button = .primary }, 0, 1);
     try std.testing.expectEqual(dialogs.Id.kick, view.active_dialog.?);
+}
+
+test "room and member menus stay closed until the wire is live" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = false;
+    view.active_menu = 4;
+    const room = menuPopupRect(view.width(), 4);
+    _ = view.handlePointer(.{ .kind = .down, .x = room.x + 10, .y = room.y + 8, .button = .primary }, 0, 0);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.wire_live = true;
+    view.active_menu = 4;
+    _ = view.handlePointer(.{ .kind = .down, .x = room.x + 10, .y = room.y + 8, .button = .primary }, 0, 0);
+    try std.testing.expectEqual(dialogs.Id.room_list, view.active_dialog.?);
+}
+
+test "alt accelerators open the menu bar from any focus" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .composer;
+    try std.testing.expectEqual(Action.none, view.handleMenuAccelerator(.{ .char = 't' }, true).?);
+    try std.testing.expectEqual(@as(?u8, 6), view.active_menu);
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
+    try std.testing.expect(view.handleMenuAccelerator(.{ .char = 't' }, false) == null);
+}
+
+test "view menu layout commands ask the host to persist settings" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.active_menu = 2;
+    view.hovered_menu_item = 1;
+    try std.testing.expectEqual(Action.persist_layout, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(shell_mod.ContentMode.text, view.shell.content_mode);
+    try std.testing.expectEqualStrings("Join", menuItemHint(4, 1, true));
+    try std.testing.expectEqualStrings("Connect first", menuItemHint(4, 1, false));
+}
+
+test "empty page, CAST, composer, and status copy follow the wire" {
+    const failed = emptyPageCopy("Connection failed - click for settings");
+    try std.testing.expectEqualStrings("Sunday page could not connect", failed.title);
+    try std.testing.expectEqualStrings("Wire failed - open Wire setup", failed.detail);
+    try std.testing.expect(failed.waiting);
+    try std.testing.expectEqualStrings("Wire failed", emptyCastCopy("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed - Connect, then ink...", composerPlaceholder("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed", statusPanelHeading("Connection failed - click for settings"));
+
+    const offline = emptyPageCopy("offline");
+    try std.testing.expectEqualStrings("Sunday page is off the wire", offline.title);
+    try std.testing.expectEqualStrings("Connect to ink the first balloon", offline.detail);
+    try std.testing.expectEqualStrings("Connect first", emptyCastCopy("offline"));
+    try std.testing.expectEqualStrings("Connect, then ink the next balloon...", composerPlaceholder("offline"));
+    try std.testing.expectEqualStrings("Sunday page is off the wire", statusPanelHeading("offline"));
+
+    const waiting = emptyPageCopy("reconnecting");
+    try std.testing.expectEqualStrings("Sunday page is on hold", waiting.title);
+    try std.testing.expectEqualStrings("Hold for the wire", waiting.detail);
+    try std.testing.expectEqualStrings("Hold on the wire...", composerPlaceholder("reconnecting"));
+    try std.testing.expectEqualStrings("Hold on the wire", statusPanelHeading("reconnecting"));
+    try std.testing.expectEqualStrings("Hold for the wire", statusPanelDetail("reconnecting"));
+
+    const live = emptyPageCopy("connected");
+    try std.testing.expectEqualStrings("Sunday page is open", live.title);
+    try std.testing.expectEqualStrings("Join a room", emptyCastCopy("connected"));
+    try std.testing.expectEqualStrings("Ink the next balloon...", composerPlaceholder("connected"));
+    try std.testing.expectEqualStrings("On the wire", statusPanelHeading("connected"));
+    try std.testing.expectEqualStrings("On the wire", statusBarLabel("connected"));
+    try std.testing.expectEqualStrings("Sunday page is off the wire - open Wire setup", statusBarLabel("offline"));
+    try std.testing.expectEqualStrings("Sunday page is off the wire - open Wire setup", statusBarLabel("Disconnected"));
+    try std.testing.expectEqualStrings("Off", statusTabLabel("Disconnected"));
+    try std.testing.expectEqualStrings("Hold on the wire", statusBarLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - open Wire setup", statusBarLabel("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - open Wire setup", statusPanelDetail("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
+    try std.testing.expectEqualStrings("Live", statusTabLabel("connected"));
+    try std.testing.expectEqualStrings("Off", statusTabLabel("offline"));
+    try std.testing.expectEqualStrings("Hold", statusTabLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Hold", statusTabLabel("connecting"));
+    try std.testing.expectEqualStrings("Fail", statusTabLabel("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed - open Wire setup", statusBarLabel("Wire failed - open Wire setup"));
+    try std.testing.expectEqualStrings("Fail", statusTabLabel("Wire failed (refused) - open Wire setup"));
+    try std.testing.expectEqualStrings("Copy ink", menuItemLabel(1, 0));
+    try std.testing.expectEqualStrings("Insert page fold", menuItemLabel(1, 1));
+    try std.testing.expectEqualStrings("Clear ink", menuItemLabel(1, 2));
+    try std.testing.expectEqualStrings("Studio", menuItemLabel(1, 3));
+    try std.testing.expectEqualStrings("Greeting", menuItemLabel(6, 5));
+    try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
+    try std.testing.expectEqualStrings("Name", statusTabLabel("nickname in use"));
+    try std.testing.expectEqualStrings("Sign-in name is taken", statusPanelHeading("nickname in use"));
+    try std.testing.expectEqualStrings("Sign-in name is taken - open Sign-in name", statusBarLabel("nickname in use"));
+    try std.testing.expectEqualStrings("Signing in on the wire", statusBarLabel("registering"));
+    try std.testing.expectEqualStrings("Joining the Sunday page", statusBarLabel("joining"));
+    try std.testing.expectEqualStrings("Opening a verified wire", statusBarLabel("upgrading to TLS"));
+    try std.testing.expectEqualStrings("Connecting to the wire", statusBarLabel("connecting"));
+    try std.testing.expectEqualStrings("Show or hide CAST", toolbarLabel(8));
+    try std.testing.expectEqualStrings("Search by name or size, then join", dialogHelper(.room_list, ""));
+    try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
+    try std.testing.expectEqualStrings("Bulletin", menuItemLabel(4, 5));
+    try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
+    try std.testing.expectEqualStrings("Room events", menuItemLabel(4, 8));
+    try std.testing.expectEqualStrings("Show CAST", menuItemLabel(2, 2));
+    try std.testing.expectEqualStrings("CAST portraits", menuItemLabel(2, 3));
+    try std.testing.expectEqualStrings("CAST list", menuItemLabel(2, 4));
+    try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
+    try std.testing.expectEqualStrings("CAST card", menuItemLabel(3, 4));
+    try std.testing.expectEqualStrings("Open locator", menuItemLabel(0, 1));
+    try std.testing.expectEqualStrings("CAST card", toolbarLabel(11));
+    try std.testing.expectEqualStrings("Leave the wire", toolbarLabel(1));
+    try std.testing.expectEqualStrings("Send call link", toolbarLabel(16));
+    try std.testing.expectEqualStrings("Export Sunday page", menuItemLabel(0, 4));
+    try std.testing.expectEqualStrings("Sunday PDF", menuItemLabel(0, 5));
+    try std.testing.expectEqualStrings("CAST", contextItemHint(.body_camera, 1, true));
+    try std.testing.expectEqualStrings("Page layout", menuItemLabel(2, 5));
+    try std.testing.expectEqualStrings("Backdrop", menuItemLabel(3, 2));
+    try std.testing.expectEqualStrings("Open a saved locator", dialogHelper(.open_locator, ""));
+    try std.testing.expectEqualStrings("CAST profile", menuItemLabel(5, 1));
+    try std.testing.expectEqualStrings("Watch room, CAST, server, or wire events", dialogHelper(.ircx_events, ""));
+    try std.testing.expectEqualStrings("Sunday page", menuItemLabel(2, 0));
+    try std.testing.expectEqualStrings("Conversation", menuItemLabel(2, 1));
+    try std.testing.expectEqualStrings("Sunday page", toolbarLabel(5));
+    try std.testing.expectEqualStrings("Conversation", toolbarLabel(6));
+    try std.testing.expectEqualStrings("Browse rooms", menuItemLabel(4, 0));
+    try std.testing.expectEqualStrings("Ban or free", menuItemLabel(5, 5));
+    try std.testing.expectEqualStrings("Invite CAST", contextItemLabel(.member, 2, false));
+    try std.testing.expectEqualStrings("Kick CAST", contextItemLabel(.member, 3, false));
+    try std.testing.expectEqualStrings("Ban or free", contextItemLabel(.member, 4, false));
+    try std.testing.expectEqualStrings("Send a quiet balloon to one CAST member", dialogHelper(.whisper, ""));
+    try std.testing.expectEqualStrings("Keep a name pattern off this room", dialogHelper(.ban, ""));
+    try std.testing.expectEqualStrings("Send a meeting link to CAST", dialogHelper(.call_link, ""));
+    try std.testing.expectEqualStrings("CALL", settingsKicker(.call_link, 0));
+    try std.testing.expectEqualStrings("Wire setup", menuItemLabel(6, 0));
+    try std.testing.expectEqualStrings("Wire list", menuItemLabel(6, 1));
+    try std.testing.expectEqualStrings("Sign in", menuItemLabel(6, 2));
+    try std.testing.expectEqualStrings("Sign-in name", menuItemLabel(6, 3));
+    try std.testing.expectEqualStrings("Wire features", menuItemLabel(6, 4));
+    try std.testing.expectEqualStrings("Wire setup", toolbarLabel(0));
+    try std.testing.expectEqualStrings("Away message", menuItemLabel(4, 4));
+    try std.testing.expectEqualStrings("Away message", toolbarLabel(10));
+    try std.testing.expectEqualStrings("Room details", menuItemLabel(4, 3));
+    try std.testing.expectEqualStrings("Open room aside", menuItemLabel(4, 10));
+    try std.testing.expectEqualStrings("Page", menu_labels[0]);
+    try std.testing.expectEqualStrings("Ink", menu_labels[1]);
+    try std.testing.expectEqualStrings("Show", menu_labels[2]);
+    try std.testing.expectEqualStrings("Look", menu_labels[3]);
+    try std.testing.expectEqualStrings("Rule book", menuItemLabel(6, 6));
+    try std.testing.expectEqualStrings("Ink", menuItemHint(1, 0, true));
+    try std.testing.expectEqualStrings("Ink color", menuItemLabel(3, 1));
+    try std.testing.expectEqualStrings("Choose ink", toolbarLabel(18));
+    try std.testing.expectEqualStrings("Room", menuItemHint(4, 10, true));
+    try std.testing.expectEqualStrings("Insert symbol", toolbarLabel(23));
+    try std.testing.expectEqualStrings("Sunday tool", toolbarLabel(24));
+    try std.testing.expectEqualStrings("Sunday", toolbarHint(24));
+    try std.testing.expectEqualStrings("Close Comic Chat", menuItemLabel(0, 6));
+    try std.testing.expectEqualStrings("Close", menuItemHint(0, 6, true));
+    try std.testing.expectEqualStrings("Bold ink", menuItemLabel(3, 5));
+    try std.testing.expectEqualStrings("Italic ink", menuItemLabel(3, 6));
+    try std.testing.expectEqualStrings("Underline ink", menuItemLabel(3, 7));
+    try std.testing.expectEqualStrings("Rule", menuItemHint(6, 5, true));
+    try std.testing.expectEqualStrings("Hold expression", contextItemLabel(.body_camera, 0, false));
+    try std.testing.expectEqualStrings("Release expression", contextItemLabel(.body_camera, 0, true));
+    try std.testing.expectEqualStrings("Choose character", contextItemLabel(.body_camera, 1, false));
+    try std.testing.expectEqualStrings("Neutral expression", contextItemLabel(.body_camera, 2, false));
+    try std.testing.expectEqualStrings("FACE", settingsKicker(.character, 1));
+    try std.testing.expectEqualStrings("SAY", settingsKicker(.sound, 1));
+    try std.testing.expectEqualStrings("WATCH", settingsKicker(.notifications, 4));
+    try std.testing.expectEqualStrings("WEB", settingsKicker(.personal, 2));
+    try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
+    try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
+    try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
+    try std.testing.expectEqualStrings("Watch CAST", menuItemLabel(6, 8));
+    try std.testing.expectEqualStrings("Live CAST", menuItemLabel(6, 9));
+    try std.testing.expectEqualStrings("Room invitation", menuItemLabel(4, 11));
+    try std.testing.expectEqualStrings("Room password", menuItemLabel(4, 12));
+    try std.testing.expectEqualStrings("Live Onyx nodes use implicit TLS 6697", dialogHelper(.servers, ""));
+    try std.testing.expectEqualStrings("Ignore CAST", toolbarLabel(12));
+    try std.testing.expectEqualStrings("Email CAST", toolbarLabel(14));
+    try std.testing.expectEqualStrings("CAST", menu_labels[5]);
+    try std.testing.expectEqualStrings("Used on the wire and the Sunday page", dialogHelper(.nickname, ""));
+    try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
+    try std.testing.expectEqualStrings("Room", menuItemHint(4, 6, true));
+    try std.testing.expectEqualStrings("Wire", toolbarHint(0));
+    try std.testing.expectEqualStrings("Join", toolbarHint(2));
+    try std.testing.expectEqualStrings("CAST", toolbarHint(8));
+    try std.testing.expectEqualStrings("KEY", settingsKicker(.password, 1));
+    try std.testing.expectEqualStrings("SIGN", settingsKicker(.password, 0));
+    try std.testing.expectEqualStrings("", memberRoleChip(.member));
+    try std.testing.expectEqualStrings("V", memberRoleChip(.voice));
+    try std.testing.expectEqualStrings("H", memberRoleChip(.halfop));
+    try std.testing.expectEqualStrings("OP", memberRoleChip(.operator));
+    try std.testing.expectEqualStrings("OWN", memberRoleChip(.owner));
+    try std.testing.expectEqualStrings("Wire account and password for this wire", dialogHelper(.password, ""));
+    try std.testing.expectEqualStrings("How often this rule may fire", dialogHelper(.advanced_event_params, ""));
+    try std.testing.expectEqualStrings("Turn the rule on and keep case", dialogHelper(.advanced_rule_settings, ""));
+    try std.testing.expectEqualStrings("Room", menuItemHint(4, 12, true));
+    try std.testing.expectEqualStrings("Moderate", contextItemHint(.member, 3, true));
+    try std.testing.expectEqualStrings("KEY", settingsKicker(.channel_password, 0));
+    try std.testing.expectEqualStrings("PAGE", settingsKicker(.background, 0));
+    try std.testing.expectEqualStrings("TYPE", settingsKicker(.text_font, 0));
+    try std.testing.expectEqualStrings("WATCH", settingsKicker(.notifications, 0));
+    try std.testing.expectEqualStrings("CAST", settingsKicker(.notification_users, 1));
+    try std.testing.expectEqualStrings("AUTO", settingsKicker(.rules, 0));
+    try std.testing.expectEqualStrings("SET", settingsKicker(.rule_sets, 0));
+    try std.testing.expectEqualStrings("ROOM", settingsKicker(.favorite_rooms, 0));
+    try std.testing.expectEqualStrings("FILE", settingsKicker(.recent_files, 0));
+    try std.testing.expectEqualStrings("WATCH", settingsKicker(.ircx_events, 1));
+    try std.testing.expectEqualStrings("INK", settingsKicker(.about, 0));
+    try std.testing.expectEqualStrings("INK", settingsKicker(.settings, 1));
+    try std.testing.expectEqualStrings("NOTE", settingsKicker(.channel_properties, 4));
+    try std.testing.expectEqualStrings("LIST", settingsKicker(.settings, 7));
+    try std.testing.expectEqualStrings("LIST", settingsKicker(.connection_features, 3));
+    try std.testing.expectEqualStrings("NAME", settingsKicker(.user_list, 1));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Offline"));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Disconnected"));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Off the wire"));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "offline"));
+    try std.testing.expectEqualStrings("From the wire", dialogHelper(.motd, "Welcome"));
+    try std.testing.expectEqualStrings("What this wire is offering", dialogHelper(.connection_features, "Verified TLS"));
+    try std.testing.expectEqualStrings("Used on the wire and the Sunday page", dialogGroupText(.nickname));
+    try std.testing.expectEqualStrings("Greeting and repeat cap", dialogGroupText(.automation));
+}
+
+test "invitation password and wire list route from existing menus" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .navigation;
+    view.wire_live = true;
+
+    view.active_menu = 4;
+    view.hovered_menu_item = 11;
+    try std.testing.expectEqual(Action{ .menu = 4 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.invitation, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 4;
+    view.hovered_menu_item = 12;
+    try std.testing.expectEqual(Action{ .menu = 4 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.channel_password, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 6;
+    view.hovered_menu_item = 1;
+    try std.testing.expectEqual(Action{ .menu = 6 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.servers, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 6;
+    view.hovered_menu_item = 2;
+    try std.testing.expectEqual(Action{ .menu = 6 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.password, view.active_dialog.?);
+    _ = view.closeDialog();
+
+    view.active_menu = 6;
+    view.hovered_menu_item = 3;
+    try std.testing.expectEqual(Action{ .menu = 6 }, view.handleMenuKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.nickname, view.active_dialog.?);
+}
+
+test "composer Page Up and Page Down page the transcript" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    var transcript = session.Transcript.init(std.testing.allocator);
+    defer transcript.deinit();
+    try transcript.setSelf("anna");
+    var index: usize = 0;
+    while (index < 14) : (index += 1) try transcript.add(if (index % 2 == 0) "anna" else "kevin", "A live chat buffer line");
+
+    view.shell.focus = .composer;
+    try std.testing.expect(view.handleTranscriptKey(.page_up, transcript.lines.items.len, false));
+    try std.testing.expect(view.shell.history_offset > 0);
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    try std.testing.expect(view.handleTranscriptKey(.page_down, transcript.lines.items.len, false));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    try std.testing.expect(!view.handleTranscriptKey(.up, transcript.lines.items.len, false));
+
+    view.shell.history_offset = 0;
+    view.shell.focus = .toolbar;
+    try std.testing.expect(view.handleTranscriptKey(.page_up, transcript.lines.items.len, false));
+    try std.testing.expect(view.shell.history_offset > 0);
+    try std.testing.expectEqual(shell_mod.Focus.toolbar, view.shell.focus);
+    view.shell.focus = .say_actions;
+    try std.testing.expect(view.handleTranscriptKey(.page_down, transcript.lines.items.len, false));
+    try std.testing.expectEqual(shell_mod.Focus.say_actions, view.shell.focus);
+
+    view.shell.focus = .status;
+    view.status_panel_open = false;
+    try std.testing.expect(view.handleTranscriptKey(.home, transcript.lines.items.len, false));
+    try std.testing.expect(view.shell.history_offset > 0);
+    try std.testing.expectEqual(shell_mod.Focus.status, view.shell.focus);
+    try std.testing.expect(view.handleTranscriptKey(.end, transcript.lines.items.len, false));
+    try std.testing.expectEqual(@as(usize, 0), view.shell.history_offset);
+    try std.testing.expectEqual(shell_mod.Focus.status, view.shell.focus);
+}
+
+test "member context stays closed until the wire is live" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = false;
+    view.openContextMenu(.member, 200, 200);
+    const popup = contextPopupRect(view.width(), view.height(), .member, 200, 200);
+    _ = view.handlePointer(.{ .kind = .down, .x = popup.x + 10, .y = popup.y + 8, .button = .primary }, 0, 1);
+    try std.testing.expect(view.active_dialog == null);
+}
+
+test "overflow rooms expose hover tooltip keyboard and jump to the next hidden room" {
+    var view = try View.init(std.testing.allocator, min_width, min_height);
+    defer view.deinit();
+    var transcript = session.Transcript.init(std.testing.allocator);
+    defer transcript.deinit();
+    const tabs = [_]View.Tab{ .{ .label = "#one" }, .{ .label = "#two" }, .{ .label = "#three" } };
+    try view.renderTabs("connected", &transcript, "", 0, null, &tabs, 0);
+    const layout = geometry.Layout.compute(min_width, min_height, true, true);
+    const overflow = roomOverflowRect(layout, true, tabs.len, view.room_tab_first).?;
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = overflow.x + 4, .y = overflow.y + 4 }, 0));
+    try std.testing.expect(view.hovered_room_overflow);
+    try std.testing.expect(view.hovered_room_tab == null);
+    const jumped = view.handlePointer(.{ .kind = .down, .x = overflow.x + 4, .y = overflow.y + 4, .button = .primary }, 0, 0);
+    try std.testing.expectEqual(Action{ .room_tab = 2 }, jumped);
+
+    view.room_tab_count = 3;
+    view.room_tab_first = 0;
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action{ .room_tab = tabViewport(layout, true).capacity }, view.handleMenuKey(.right).?);
+    try std.testing.expectEqual(Action{ .room_tab = 0 }, view.handleMenuKey(.home).?);
+    try std.testing.expectEqual(Action{ .room_tab = 2 }, view.handleMenuKey(.end).?);
+    view.room_tab_first = 0;
+    try std.testing.expectEqual(Action{ .room_tab = tabViewport(layout, true).capacity }, view.handleMenuKey(.page_down).?);
+    view.room_tab_first = 1;
+    try std.testing.expectEqual(Action{ .room_tab = 0 }, view.handleMenuKey(.page_up).?);
+
+    const snapshot = view.semanticSnapshot("connected", &tabs, 0);
+    var found_overflow = false;
+    for (snapshot.items()) |item| {
+        if (std.mem.eql(u8, item.id, "room-overflow")) found_overflow = true;
+    }
+    try std.testing.expect(found_overflow);
+}
+
+test "wire-dead toolbar commands look disabled and are skipped" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = false;
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const toolbar = ui.ToolbarLayout.init(layout.toolbar);
+    const enter = toolbar.buttonRect(1).?;
+    _ = view.handlePointer(.{ .kind = .down, .x = enter.x + 4, .y = enter.y + 4, .button = .primary }, 0, 0);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.shell.focus = .toolbar;
+    view.focused_toolbar = 0;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_toolbar);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(firstEnabledToolbar(false), view.focused_toolbar);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_down).?);
+    try std.testing.expectEqual(lastEnabledToolbar(false), view.focused_toolbar);
+
+    view.wire_live = true;
+    _ = view.handlePointer(.{ .kind = .down, .x = enter.x + 4, .y = enter.y + 4, .button = .primary }, 0, 0);
+    try std.testing.expectEqual(dialogs.Id.channel, view.active_dialog.?);
+    try std.testing.expect(!toolbarCommandEnabled(2, false));
+    try std.testing.expect(toolbarCommandEnabled(0, false));
+    try std.testing.expect(toolbarCommandEnabled(5, false));
+}
+
+test "say actions set mode only and skip whisper and sound while offline" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const think_x = layout.say_actions.x + layout.say_action_size + 4;
+    try std.testing.expectEqual(Action.none, view.handlePointer(.{
+        .kind = .down,
+        .x = think_x,
+        .y = layout.say_actions.y + 8,
+        .button = .primary,
+    }, 0, 0));
+    try std.testing.expectEqual(shell_mod.SayMode.think, view.shell.say_mode);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.wire_live = false;
+    const whisper_x = layout.say_actions.x + 2 * layout.say_action_size + 4;
+    try std.testing.expectEqual(Action.none, view.handlePointer(.{
+        .kind = .down,
+        .x = whisper_x,
+        .y = layout.say_actions.y + 8,
+        .button = .primary,
+    }, 0, 0));
+    try std.testing.expectEqual(shell_mod.SayMode.think, view.shell.say_mode);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.shell.focus = .say_actions;
+    view.focused_say_action = 0;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(u8, 1), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.end).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(@as(u8, 0), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_down).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
+    try std.testing.expect(!sayActionEnabled(2, false));
+    try std.testing.expect(!sayActionEnabled(4, false));
+    try std.testing.expect(sayActionEnabled(1, false));
+}
+
+test "status keyboard opens the panel and activates its actions" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expect(view.status_panel_open);
+    try std.testing.expectEqual(@as(?StatusActionHover, .connection), view.focused_status_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(?StatusActionHover, .settings), view.focused_status_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(@as(?StatusActionHover, .connection), view.focused_status_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_down).?);
+    try std.testing.expectEqual(@as(?StatusActionHover, .settings), view.focused_status_action);
+    view.status_panel_open = false;
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.page_up));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.home));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.end));
+    view.status_panel_open = true;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.settings, view.active_dialog.?);
+    try std.testing.expect(!view.status_panel_open);
+
+    view.active_dialog = null;
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(Action.connection, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expect(!view.status_panel_open);
+
+    view.name_taken = true;
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(dialogs.Id.nickname, view.active_dialog.?);
+}
+
+test "composer send chip sends and space activates focused chrome" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const send = composerSendRect(layout.say_editor).?;
+    try std.testing.expectEqual(Action.send, view.handlePointer(.{
+        .kind = .down,
+        .x = send.x + 4,
+        .y = send.y + 4,
+        .button = .primary,
+    }, 0, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+
+    view.shell.focus = .say_actions;
+    view.focused_say_action = 1;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(shell_mod.SayMode.think, view.shell.say_mode);
+
+    view.openDialog(.about);
+    view.dialog_action_focus = .primary;
+    try std.testing.expectEqual(Action{ .dialog_accept = .about }, (try view.handleDialogKey(.{ .char = ' ' }, .{})).?);
+}
+
+test "member keyboard opens whisper after the wire is live" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .members;
+    view.shell.selected_member = 0;
+    view.wire_live = false;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expect(view.active_dialog == null);
+    view.wire_live = true;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(dialogs.Id.whisper, view.active_dialog.?);
+}
+
+test "emotion keyboard sends the current expression" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .emotion;
+    try std.testing.expectEqual(Action.send_expression, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(Action.send_expression, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.right));
+}
+
+test "emotion Home and End jump to first and last intensity" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .emotion;
+    view.shell.emotion_radius = 48;
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.home));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.end));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.page_up));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.page_down));
+    try std.testing.expect(view.handleFocusedKey(.end, 0));
+    try std.testing.expect(view.shell.emotion_x != 0 or view.shell.emotion_y != 0);
+    try std.testing.expect(view.handleFocusedKey(.home, 0));
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_x);
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_y);
+    try std.testing.expect(view.handleFocusedKey(.page_down, 0));
+    try std.testing.expect(view.shell.emotion_x != 0 or view.shell.emotion_y != 0);
+    try std.testing.expect(view.handleFocusedKey(.page_up, 0));
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_x);
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_y);
+}
+
+test "dialog Home and End jump to the first and last choice" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.room_access);
+    view.dialog_field = 1;
+    try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqualStrings("Deny", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.{ .char = ' ' }, .{});
+    try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expectEqualStrings("Owner", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.up, .{});
+    try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
+}
+
+test "dialog Home and End jump first field and last button from leftover chrome" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+
+    view.openDialog(.file_transfer);
+    view.dialog_field = 2;
+    view.dialog_browse_focus = true;
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    view.dialog_browse_focus = true;
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+
+    view.openDialog(.motd);
+    view.dialog_action_focus = null;
+    view.dialog_field = 0;
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "dialog leftover Page Up and Page Down jump first field and last button" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.page_up, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.page_down, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+
+    view.openDialog(.file_transfer);
+    view.dialog_field = 2;
+    view.dialog_browse_focus = true;
+    _ = try view.handleDialogKey(.page_up, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+}
+
+test "dialog leftover browse Up returns to the field and Down jumps primary" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.file_transfer);
+    view.dialog_field = 2;
+    view.dialog_browse_focus = true;
+    view.dialog_action_focus = null;
+    _ = try view.handleDialogKey(.up, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 2), view.dialog_field);
+    view.dialog_browse_focus = true;
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "dialog leftover buttons move with Left and Right" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.right, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+    _ = try view.handleDialogKey(.left, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+    _ = try view.handleDialogKey(.left, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "dialog Down from leftover last text jumps to the primary button" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.ban);
+    view.dialog_field = 0;
+    view.dialog_action_focus = null;
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+    view.openDialog(.room_access);
+    view.dialog_field = 1;
+    view.dialog_action_focus = null;
+    try std.testing.expectEqualStrings("Voice", view.dialogValueAt(1));
+    _ = try view.handleDialogKey(.down, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
+}
+
+test "dialog Up from leftover buttons jumps to the last field" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.up, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 7), view.dialog_field);
+    view.dialog_action_focus = .cancel;
+    _ = try view.handleDialogKey(.up, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 7), view.dialog_field);
+}
+
+test "Ignore CAST toolbar opens the CAST list" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = true;
+    try std.testing.expectEqualStrings("Ignore CAST", toolbarLabel(12));
+    try std.testing.expectEqual(Action{ .toolbar = 12 }, view.activateToolbar(12));
+    try std.testing.expectEqual(dialogs.Id.user_list, view.active_dialog.?);
+}
+
+test "composer Escape returns to the menu bar and transcript Escape clears selection" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .composer;
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
+
+    view.shell.focus = .transcript;
+    view.shell.selectTranscriptLine(4, 2, false);
+    try std.testing.expect(view.handleTranscriptKey(.escape, 4, false));
+    try std.testing.expect(view.shell.transcript_cursor == null);
+    try std.testing.expect(view.shell.transcript_anchor == null);
+    try std.testing.expectEqual(shell_mod.Focus.transcript, view.shell.focus);
+    try std.testing.expect(!view.handleTranscriptKey(.escape, 4, false));
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+
+    view.shell.focus = .members;
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .emotion;
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .toolbar;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
+    view.shell.focus = .say_actions;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    view.shell.focus = .status;
+    view.status_panel_open = false;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.escape).?);
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
+}
+
+test "member keyboard pages through the CAST" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .members;
+    view.shell.member_view = .icons;
+    view.shell.selected_member = 1;
+    try std.testing.expect(view.handleFocusedKey(.left, 12));
+    try std.testing.expectEqual(@as(?usize, 0), view.shell.selected_member);
+    try std.testing.expect(view.handleFocusedKey(.right, 12));
+    try std.testing.expectEqual(@as(?usize, 1), view.shell.selected_member);
+
+    const layout = geometry.Layout.compute(view.width(), view.height(), true, true);
+    const viewport = memberViewport(layout.members, true);
+    view.shell.selected_member = 0;
+    try std.testing.expect(view.handleFocusedKey(.page_down, 12));
+    try std.testing.expectEqual(@as(?usize, @min(11, viewport.visible)), view.shell.selected_member);
+    try std.testing.expect(view.handleFocusedKey(.page_up, 12));
+    try std.testing.expectEqual(@as(?usize, 0), view.shell.selected_member);
+
+    view.shell.member_view = .list;
+    try std.testing.expect(!view.handleFocusedKey(.left, 12));
+    try std.testing.expect(!view.handleFocusedKey(.right, 12));
+    view.shell.selected_member = 0;
+    try std.testing.expect(view.handleFocusedKey(.down, 12));
+    try std.testing.expectEqual(@as(?usize, 1), view.shell.selected_member);
 }

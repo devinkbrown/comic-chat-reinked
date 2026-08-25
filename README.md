@@ -3,11 +3,15 @@
 A portable, source-faithful continuation of **Comic Chat: Reinked**, built in Zig with
 a software renderer, native X11/Wayland/Win32 presentation, and verified TLS.
 
-![Dark Comic Chat character picker](ui-dark-preview.png)
+![Dark studio around a 1:1 comic page](ui-dark-preview.png)
 
-![Compact menu layout](ui-compact-menu-preview.png)
+![Compact Tools menu](ui-compact-menu-preview.png)
 
 ![Expression context menu](ui-context-preview.png)
+
+![Conversation page](ui-conversation-preview.png)
+
+![Settings masthead](ui-settings-preview.png)
 
 Comic Chat turns IRC conversations into auto-generated comic strips. Each
 participant has an avatar, and the client composes panels with speech balloons,

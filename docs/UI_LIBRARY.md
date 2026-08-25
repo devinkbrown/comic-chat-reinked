@@ -9,12 +9,12 @@ visual contract.
 
 - Application chrome uses the embedded neutral sans-serif atlas in
   `src/render/font_ui.zig`. Comic Neue is reserved for authored comic content.
-- The shell supports persistent Light studio and Dark studio appearances with
-  cobalt, violet, or forest interaction accents and an optional high-contrast
-  text/border treatment. Palette roles are selected before controls and text
-  are rasterized, preserving anti-aliased edges. Dark mode is a midnight studio
-  around deliberately stable light comic and character-art paper; authored
-  raster pixels are never inverted or post-processed.
+- The desktop product is **Ink Sunday**: warm newsprint, vermillion speech
+  accents, ink frames, and a speech-balloon brand. Fluent cobalt chrome is
+  retired. Accents remain cobalt/vermillion, violet, or forest, with optional
+  high-contrast text/border treatment. Dark mode is an ink studio around
+  deliberately stable light comic and character-art paper; authored raster
+  pixels are never inverted or post-processed.
 - The established 80/20 conversation/inspector and 30/70 member/character
   proportions remain recognizable, while control heights and spacing are
   sized for a modern desktop.
@@ -23,9 +23,18 @@ visual contract.
   intensity puck, and a right-click Freeze/Character/Neutral menu.
 - Mood expressions use a newly drawn, high-contrast face set with consistent
   geometry rather than the original tiny pixel marks.
-- An empty conversation renders as a responsive blank comic page with real
-  panel gutters. At minimum window sizes it collapses to a compact instruction
-  instead of overflowing the available buffer.
+- The conversation well is a printed 1:1 comic page: newsprint matte, a double
+  ink frame with vermillion corner ticks, and source-faithful strip pixels
+  inside. Chrome never redraws balloons or figures. An empty conversation still
+  routes through `strip.render` and only overlays a caption balloon. At minimum
+  window sizes the caption collapses to a compact instruction instead of
+  overflowing the available buffer. Structural chrome strokes stay at least
+  two framebuffer pixels (`ui.stroke`) so nearest-neighbour 2x/3x HiDPI scale
+  keeps masthead rules, page ticks, and plate frames readable. CAST portraits
+  keep the same bottom-aligned blit; only the playbill plate around them is
+  chrome.
+- Shell chrome is an ink masthead, paper tool rack, playbill inspector headers,
+  and a caption-box composer. Dialogs use the same masthead as the application.
 - Comic pages default to four panels across. The room strip exposes an
   accessible minus/plus stepper for live one-to-six-column density changes;
   rendered pages remain top-aligned as conversation history grows. Desktop
@@ -116,8 +125,8 @@ and disabled behavior. New screens should compose the existing primitives:
   `DialogLayout`
 - `drawTextSelection`, `drawTextCaret`, `drawTextOverflowMark`, and
   `drawBrowseButton` for editable field adornments
-- `drawBrandMark`, `drawMemberRailSurface`, `drawStatusIdentity`, and
-  `drawPreviewChoiceCard` for shell identity and compact client surfaces
+- `drawBrandMark`, `drawPageWell`, `drawInkChip`, `drawInkPlate`, `drawInkRule`, `drawMemberRailSurface`, `drawStatusIdentity`, and
+  `drawPreviewChoiceCard` for shell identity, the printed page well, playbill chips, and compact client surfaces
 - `drawAppBrand`, `drawPaneCountHeader`, and `drawDismissHint` for stable
   shell identity, inspector headers, and temporary-popover keyboard guidance
 - `drawSegmentedChoice` for direct gallery-family selection without a long

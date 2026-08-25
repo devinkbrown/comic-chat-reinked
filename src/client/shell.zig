@@ -18,6 +18,7 @@ pub const Focus = enum {
     say_actions,
     members,
     emotion,
+    status,
 };
 
 pub const State = struct {
@@ -44,21 +45,23 @@ pub const State = struct {
             .toolbar => .transcript,
             .transcript => .composer,
             .composer => .say_actions,
-            .say_actions => if (self.show_members) .members else if (self.show_navigation) .navigation else .toolbar,
-            .members => if (self.content_mode == .comic) .emotion else if (self.show_navigation) .navigation else .toolbar,
-            .emotion => if (self.show_navigation) .navigation else .transcript,
+            .say_actions => if (self.show_members) .members else .status,
+            .members => if (self.content_mode == .comic) .emotion else .status,
+            .emotion => .status,
+            .status => if (self.show_navigation) .navigation else .toolbar,
         };
     }
 
     pub fn cycleFocusBackward(self: *State) void {
         self.focus = switch (self.focus) {
-            .navigation => if (self.show_members and self.content_mode == .comic) .emotion else if (self.show_members) .members else .say_actions,
-            .toolbar => if (self.show_navigation) .navigation else if (self.show_members and self.content_mode == .comic) .emotion else if (self.show_members) .members else .say_actions,
+            .navigation => .status,
+            .toolbar => if (self.show_navigation) .navigation else .status,
             .transcript => .toolbar,
             .composer => .transcript,
             .say_actions => .composer,
             .members => .say_actions,
             .emotion => .members,
+            .status => if (self.show_members and self.content_mode == .comic) .emotion else if (self.show_members) .members else .say_actions,
         };
     }
 
@@ -187,6 +190,24 @@ pub const State = struct {
         self.focus = .emotion;
     }
 
+    pub fn outerEmotion(self: *State) void {
+        if (self.emotion_frozen) return;
+        const radius: i32 = @max(1, @as(i32, self.emotion_radius));
+        var x: i32 = self.emotion_x;
+        var y: i32 = self.emotion_y;
+        if (x == 0 and y == 0) {
+            x = radius;
+        } else {
+            const scale_den: i32 = @intCast(@max(@abs(x), @abs(y)));
+            x = @divTrunc(x * radius, scale_den);
+            y = @divTrunc(y * radius, scale_den);
+            if (@as(i64, x) * x + @as(i64, y) * y > @as(i64, radius) * radius) {
+                if (@abs(x) >= @abs(y)) y = 0 else x = 0;
+            }
+        }
+        self.setEmotionPoint(x, y, radius);
+    }
+
     pub fn toggleEmotionFreeze(self: *State) void {
         self.emotion_frozen = !self.emotion_frozen;
         self.focus = .emotion;
@@ -273,6 +294,8 @@ test "focus follows visible Microsoft shell regions" {
     state.cycleFocus();
     try std.testing.expectEqual(Focus.emotion, state.focus);
     state.cycleFocus();
+    try std.testing.expectEqual(Focus.status, state.focus);
+    state.cycleFocus();
     try std.testing.expectEqual(Focus.navigation, state.focus);
     state.cycleFocus();
     try std.testing.expectEqual(Focus.toolbar, state.focus);
@@ -284,6 +307,8 @@ test "focus follows visible Microsoft shell regions" {
     try std.testing.expectEqual(Focus.say_actions, state.focus);
     state.toggleMembers();
     state.cycleFocus();
+    try std.testing.expectEqual(Focus.status, state.focus);
+    state.cycleFocus();
     try std.testing.expectEqual(Focus.navigation, state.focus);
     state.toggleNavigation();
     try std.testing.expectEqual(Focus.transcript, state.focus);
@@ -294,11 +319,13 @@ test "focus follows visible Microsoft shell regions" {
 test "text mode skips the comic-only emotion control" {
     var state: State = .{ .content_mode = .text, .focus = .members };
     state.cycleFocus();
-    try std.testing.expectEqual(Focus.navigation, state.focus);
+    try std.testing.expectEqual(Focus.status, state.focus);
 }
 
 test "reverse focus follows the same shell order" {
     var state: State = .{ .focus = .navigation };
+    state.cycleFocusBackward();
+    try std.testing.expectEqual(Focus.status, state.focus);
     state.cycleFocusBackward();
     try std.testing.expectEqual(Focus.emotion, state.focus);
     state.cycleFocusBackward();
@@ -352,6 +379,12 @@ test "member roving and body camera keyboard controls stay bounded" {
     state.neutralEmotion();
     try std.testing.expectEqual(@as(i16, 0), state.emotion_x);
     try std.testing.expectEqual(@as(i16, 0), state.emotion_y);
+    state.outerEmotion();
+    try std.testing.expectEqual(@as(i16, 48), state.emotion_x);
+    try std.testing.expectEqual(@as(i16, 0), state.emotion_y);
+    state.emotion_frozen = true;
+    state.outerEmotion();
+    try std.testing.expectEqual(@as(i16, 48), state.emotion_x);
 }
 
 test "explicit member visibility keeps focus on a visible region" {

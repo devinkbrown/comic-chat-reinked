@@ -1,8 +1,8 @@
 //! Reusable visual primitives for the Comic Chat desktop shell.
 //!
-//! `geometry.zig` preserves the established workspace proportions; this
-//! module owns a fully modern presentation for menus, dialogs, buffer states,
-//! and status feedback.
+//! Geometry stays in `geometry.zig`. This module owns the Ink Sunday
+//! presentation: warm newsprint, vermillion speech accents, and ink chrome
+//! around a source-faithful comic page. Comic Neue is never used here.
 
 const std = @import("std");
 const canvas_mod = @import("../render/canvas.zig");
@@ -12,27 +12,27 @@ const Canvas = canvas_mod.Canvas;
 const Rect = geometry.Rect;
 
 pub const Theme = struct {
-    pub const ink: u32 = 0xff20283a;
-    pub const secondary: u32 = 0xff647084;
-    pub const chrome: u32 = 0xfff6f8fb;
-    pub const layer: u32 = 0xffffffff;
-    pub const subtle: u32 = 0xffedf1f6;
-    pub const divider: u32 = 0xffd5dce7;
-    pub const accent: u32 = 0xff2864dc;
-    pub const accent_soft: u32 = 0xffe4edff;
-    pub const accent_hover: u32 = 0xffd5e3ff;
-    pub const focus: u32 = 0xff164da8;
-    pub const success: u32 = 0xff11845b;
-    pub const warning: u32 = 0xffb05f00;
-    pub const comic_paper: u32 = 0xffe7ebf1;
-    pub const workspace: u32 = 0xfff0f3f7;
-    pub const rail: u32 = 0xfff8f9fc;
-    pub const navigation: u32 = 0xff202739;
-    pub const navigation_hover: u32 = 0xff343d54;
-    pub const navigation_muted: u32 = 0xffaeb8ca;
-    pub const shadow: u32 = 0xffc9d0dc;
-    pub const paper_ink: u32 = 0xff232a37;
-    pub const paper: u32 = 0xfffdfdfe;
+    pub const ink: u32 = 0xff1b1410;
+    pub const secondary: u32 = 0xff6d5c50;
+    pub const chrome: u32 = 0xfff3ead8;
+    pub const layer: u32 = 0xfffff8ee;
+    pub const subtle: u32 = 0xffeadfcb;
+    pub const divider: u32 = 0xffcbbba4;
+    pub const accent: u32 = 0xffd4482a;
+    pub const accent_soft: u32 = 0xffffe8df;
+    pub const accent_hover: u32 = 0xffffd4c4;
+    pub const focus: u32 = 0xff9c2d18;
+    pub const success: u32 = 0xff2a7a4d;
+    pub const warning: u32 = 0xffc47a12;
+    pub const comic_paper: u32 = 0xffe8dcc6;
+    pub const workspace: u32 = 0xffefe4cf;
+    pub const rail: u32 = 0xfff7efe0;
+    pub const navigation: u32 = 0xff1b1410;
+    pub const navigation_hover: u32 = 0xff3a2d26;
+    pub const navigation_muted: u32 = 0xffd4c4ae;
+    pub const shadow: u32 = 0xffc4b49a;
+    pub const paper_ink: u32 = 0xff1b1410;
+    pub const paper: u32 = 0xfffffdf8;
 };
 
 pub const ThemeMode = enum { light, dark };
@@ -77,33 +77,33 @@ pub const Palette = struct {
 
 pub fn paletteFor(appearance: Appearance) Palette {
     const accent_color: u32 = switch (appearance.accent) {
-        .cobalt => if (appearance.mode == .dark) 0xff78a5ff else Theme.accent,
-        .violet => if (appearance.mode == .dark) 0xffb39aff else 0xff7157c8,
-        .forest => if (appearance.mode == .dark) 0xff65d6ae else 0xff16765a,
+        .cobalt => if (appearance.mode == .dark) 0xffff7048 else Theme.accent,
+        .violet => if (appearance.mode == .dark) 0xffc9a0ff else 0xff7a4aa8,
+        .forest => if (appearance.mode == .dark) 0xff65d6ae else 0xff2d6b4a,
     };
     const accent_soft: u32 = switch (appearance.accent) {
-        .cobalt => if (appearance.mode == .dark) 0xff263b63 else Theme.accent_soft,
-        .violet => if (appearance.mode == .dark) 0xff40345d else 0xffeee8ff,
-        .forest => if (appearance.mode == .dark) 0xff21483f else 0xffdcf3eb,
+        .cobalt => if (appearance.mode == .dark) 0xff4a261c else Theme.accent_soft,
+        .violet => if (appearance.mode == .dark) 0xff3a2a4d else 0xfff0e6ff,
+        .forest => if (appearance.mode == .dark) 0xff1d3d32 else 0xffd7efe4,
     };
     const accent_hover: u32 = switch (appearance.accent) {
-        .cobalt => if (appearance.mode == .dark) 0xff314d7f else Theme.accent_hover,
-        .violet => if (appearance.mode == .dark) 0xff514273 else 0xffdfd5ff,
-        .forest => if (appearance.mode == .dark) 0xff2a5b4e else 0xffcaeadf,
+        .cobalt => if (appearance.mode == .dark) 0xff5c3024 else Theme.accent_hover,
+        .violet => if (appearance.mode == .dark) 0xff4d3864 else 0xffe2d2ff,
+        .forest => if (appearance.mode == .dark) 0xff275246 else 0xffc4e6d6,
     };
     if (appearance.mode == .light) return .{
-        .ink = if (appearance.high_contrast) 0xff101624 else Theme.ink,
-        .secondary = if (appearance.high_contrast) 0xff465166 else Theme.secondary,
+        .ink = if (appearance.high_contrast) 0xff110c09 else Theme.ink,
+        .secondary = if (appearance.high_contrast) 0xff4a3b32 else Theme.secondary,
         .chrome = Theme.chrome,
         .layer = Theme.layer,
         .subtle = Theme.subtle,
-        .divider = if (appearance.high_contrast) 0xff98a3b6 else Theme.divider,
+        .divider = if (appearance.high_contrast) 0xff8d7a66 else Theme.divider,
         .accent = accent_color,
         .accent_soft = accent_soft,
         .accent_hover = accent_hover,
         .focus = if (appearance.accent == .cobalt) Theme.focus else accent_color,
         .success = Theme.success,
-        .success_soft = 0xffdff6dd,
+        .success_soft = 0xffdcefe3,
         .warning = Theme.warning,
         .comic_paper = Theme.comic_paper,
         .workspace = Theme.workspace,
@@ -111,51 +111,56 @@ pub fn paletteFor(appearance: Appearance) Palette {
         .navigation = Theme.navigation,
         .navigation_hover = Theme.navigation_hover,
         .navigation_muted = Theme.navigation_muted,
-        .navigation_ink = Theme.layer,
+        .navigation_ink = Theme.paper,
         .shadow = Theme.shadow,
         .paper_ink = Theme.paper_ink,
         .paper = Theme.paper,
         .artwork_paper = Theme.paper,
-        .notice_warning = 0xfffff4ce,
-        .notice_failure = 0xffffe5e5,
-        .notice_success = 0xffdff6dd,
-        .failure = 0xffc42b1c,
-        .hover_border = 0xffaeb9ca,
+        .notice_warning = 0xfffff0cc,
+        .notice_failure = 0xffffe4dc,
+        .notice_success = 0xffdcefe3,
+        .failure = 0xffb42318,
+        .hover_border = 0xffb59f86,
     };
     return .{
-        .ink = if (appearance.high_contrast) 0xffffffff else 0xffe9eef8,
-        .secondary = if (appearance.high_contrast) 0xffd3dbea else 0xffaab5c8,
-        .chrome = 0xff171c28,
-        .layer = 0xff202634,
-        .subtle = 0xff2a3242,
-        .divider = if (appearance.high_contrast) 0xff68758c else 0xff3c465a,
+        .ink = if (appearance.high_contrast) 0xffffffff else 0xfff6eee4,
+        .secondary = if (appearance.high_contrast) 0xffe6d8c8 else 0xffc4b3a2,
+        .chrome = 0xff1c1814,
+        .layer = 0xff241e18,
+        .subtle = 0xff2d261f,
+        .divider = if (appearance.high_contrast) 0xff8a7a68 else 0xff4a4036,
         .accent = accent_color,
         .accent_soft = accent_soft,
         .accent_hover = accent_hover,
         .focus = accent_color,
-        .success = 0xff4ed3a5,
+        .success = 0xff6ee0a6,
         .success_soft = 0xff1d4438,
-        .warning = 0xffffb454,
-        .comic_paper = 0xff171d28,
-        .workspace = 0xff111621,
-        .rail = 0xff181e2a,
-        .navigation = 0xff0b1020,
-        .navigation_hover = 0xff283149,
-        .navigation_muted = 0xffaebbd0,
-        .navigation_ink = 0xffe9eef8,
-        .shadow = 0xff080b12,
-        .paper_ink = 0xffe9eef8,
-        .paper = 0xff242b38,
+        .warning = 0xffffc56a,
+        .comic_paper = 0xff16120f,
+        .workspace = 0xff12100d,
+        .rail = 0xff1a1612,
+        .navigation = 0xff0e0b09,
+        .navigation_hover = 0xff2a231c,
+        .navigation_muted = 0xffcbbba6,
+        .navigation_ink = 0xfff6eee4,
+        .shadow = 0xff080705,
+        .paper_ink = 0xfff6eee4,
+        .paper = 0xff2a241e,
         .artwork_paper = Theme.paper,
         .notice_warning = 0xff4a3517,
         .notice_failure = 0xff4a2428,
         .notice_success = 0xff1d4438,
-        .failure = 0xffff7b72,
-        .hover_border = 0xff63708a,
+        .failure = 0xffff8a72,
+        .hover_border = 0xff6b5c4c,
     };
 }
 
 pub var current: Palette = paletteFor(.{});
+
+/// Structural chrome strokes stay at least two device pixels. Wayland and X11
+/// present this framebuffer with nearest-neighbour integer scale, so 1px
+/// hairlines vanish or shimmer at 2x/3x.
+pub const stroke: i32 = 2;
 
 pub fn activateAppearance(appearance: Appearance) void {
     current = paletteFor(appearance);
@@ -322,11 +327,27 @@ pub fn dialogButtonAt(layout: DialogLayout, x: i32, y: i32) ?DialogButton {
 }
 
 pub fn drawOutline(c: *Canvas, x: i32, y: i32, w: i32, h: i32, color: u32) void {
+    drawInkRule(c, x, y, w, 1, color);
+    drawInkRule(c, x, y + h - 1, w, 1, color);
+    drawInkRule(c, x, y, 1, h, color);
+    drawInkRule(c, x + w - 1, y, 1, h, color);
+}
+
+pub fn drawInkRule(c: *Canvas, x: i32, y: i32, w: i32, h: i32, color: u32) void {
     if (w <= 0 or h <= 0) return;
-    c.drawLine(x, y, x + w - 1, y, color);
-    c.drawLine(x, y + h - 1, x + w - 1, y + h - 1, color);
-    c.drawLine(x, y, x, y + h - 1, color);
-    c.drawLine(x + w - 1, y, x + w - 1, y + h - 1, color);
+    const rw = if (w <= 1) stroke else w;
+    const rh = if (h <= 1) stroke else h;
+    c.fillRect(x, y, rw, rh, color);
+}
+
+/// Printed plate: a 2px ink frame around a paper fill so nearest-neighbour
+/// integer scale keeps the Sunday outline readable at 2x and 3x.
+pub fn drawInkPlate(c: *Canvas, x: i32, y: i32, w: i32, h: i32, radius: i32, fill: u32) void {
+    if (w <= 0 or h <= 0) return;
+    fillRoundedRect(c, x, y, w, h, radius, current.ink);
+    const inset = stroke;
+    if (w > inset * 2 and h > inset * 2)
+        fillRoundedRect(c, x + inset, y + inset, w - inset * 2, h - inset * 2, @max(0, radius - 1), fill);
 }
 
 pub fn fillRoundedRect(c: *Canvas, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) void {
@@ -432,21 +453,20 @@ fn pointSegmentDistanceSquared(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: 
 pub fn drawSurface(c: *Canvas, rect: Rect, kind: SurfaceKind) void {
     const fill = switch (kind) {
         .canvas => current.workspace,
-        .panel => current.layer,
-        .raised => current.chrome,
+        .panel => current.paper,
+        .raised => current.layer,
         .accent => current.accent_soft,
     };
     if (kind == .raised) {
-        fillRoundedRect(c, rect.x + 3, rect.y + 5, rect.w, rect.h, 8, current.shadow);
-        fillRoundedRect(c, rect.x + 1, rect.y + 2, rect.w, rect.h, 8, current.subtle);
+        fillRoundedRect(c, rect.x + 4, rect.y + 6, rect.w, rect.h, 4, current.shadow);
     }
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 8, fill, current.divider);
+    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 4, fill, current.ink);
 }
 
 pub fn drawPill(c: *Canvas, rect: Rect, label: []const u8, active: bool) void {
     const fill = if (active) current.accent_soft else current.chrome;
     const color = if (active) current.accent else current.secondary;
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, @divTrunc(rect.h, 2), fill, if (active) current.accent_soft else current.divider);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, @divTrunc(rect.h, 2), fill);
     drawEllipsized(c, label, rect.x + 8, rect.y + @max(1, @divTrunc(rect.h - 17, 2)), rect.w - 16, color);
 }
 
@@ -457,10 +477,10 @@ pub fn drawTooltip(c: *Canvas, rect: Rect, label: []const u8) void {
 /// Tooltip with a compact contextual badge. The badge is optional so existing
 /// one-line tooltips keep their stable geometry.
 pub fn drawTooltipWithHint(c: *Canvas, rect: Rect, label: []const u8, hint: []const u8) void {
-    fillRoundedRect(c, rect.x + 3, rect.y + 5, rect.w, rect.h, 7, current.shadow);
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 7, current.navigation, current.navigation_hover);
+    fillRoundedRect(c, rect.x + 3, rect.y + 5, rect.w, rect.h, 3, current.shadow);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, current.navigation);
     const hint_w = if (hint.len == 0) 0 else Canvas.uiTextWidth(hint) + 14;
-    if (hint_w > 0) drawRoundedBorder(c, rect.right() - hint_w - 7, rect.y + 5, hint_w, rect.h - 10, 5, current.navigation_hover, current.navigation_hover);
+    if (hint_w > 0) drawRoundedBorder(c, rect.right() - hint_w - 7, rect.y + 5, hint_w, rect.h - 10, 3, current.navigation_hover, current.navigation_hover);
     drawEllipsized(c, label, rect.x + 9, rect.y + 5, rect.w - 18 - hint_w, current.layer);
     if (hint_w > 0) drawEllipsized(c, hint, rect.right() - hint_w + 1, rect.y + 6, hint_w - 8, current.navigation_ink);
 }
@@ -471,12 +491,9 @@ pub fn drawButton(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, kin
         .secondary => if (hovered) current.accent_soft else current.layer,
         .quiet => if (hovered) current.subtle else current.layer,
     };
-    const border = switch (kind) {
-        .primary => fill,
-        .secondary, .quiet => if (hovered) current.focus else current.divider,
-    };
-    if (kind == .primary) fillRoundedRect(c, x + 2, y + 3, width, 32, 7, current.shadow);
-    drawRoundedBorder(c, x, y, width, 32, 7, fill, border);
+    if (kind == .primary) fillRoundedRect(c, x + 2, y + 3, width, 32, 3, current.shadow);
+    drawInkPlate(c, x, y, width, 32, 3, fill);
+    if (kind != .primary) c.fillRect(x + stroke, y + stroke, @max(0, width - stroke * 2), 2, if (hovered) current.accent else current.ink);
     const text_color = if (kind == .primary) current.layer else current.ink;
     const available = @max(0, width - 16);
     const text_w = Canvas.uiTextWidth(label);
@@ -490,20 +507,22 @@ pub fn drawModalBackdrop(c: *Canvas) void {
     var y: i32 = 0;
     while (y < @as(i32, @intCast(c.height))) : (y += 1) {
         var x: i32 = 0;
-        while (x < @as(i32, @intCast(c.width))) : (x += 1) c.blendPixel(x, y, 0xff000000, 0x66);
+        while (x < @as(i32, @intCast(c.width))) : (x += 1) c.blendPixel(x, y, 0xff000000, 0x88);
     }
 }
 
 pub fn drawDialogSurface(c: *Canvas, rect: Rect, title: []const u8, subtitle: []const u8) void {
-    fillRoundedRect(c, rect.x + 8, rect.y + 11, rect.w, rect.h, 14, current.shadow);
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 14, current.layer, current.divider);
-    fillRoundedRect(c, rect.x, rect.y, 8, rect.h, 4, current.accent);
-    fillRoundedRect(c, rect.x + 24, rect.y + 18, 32, 32, 9, current.navigation);
-    fillRoundedRect(c, rect.x + 31, rect.y + 25, 18, 18, 5, current.accent);
-    _ = c.drawUiText("C", rect.x + 36, rect.y + 25, current.layer);
-    drawEllipsized(c, title, rect.x + 70, rect.y + 16, rect.w - 94, current.ink);
-    drawEllipsized(c, subtitle, rect.x + 70, rect.y + 34, rect.w - 94, current.secondary);
-    c.fillRect(rect.x + 24, rect.y + 66, rect.w - 48, 1, current.divider);
+    fillRoundedRect(c, rect.x + 7, rect.y + 9, rect.w, rect.h, 2, current.shadow);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 2, current.paper);
+    c.fillRect(rect.x + stroke, rect.y + stroke, rect.w - stroke * 2, 60, current.navigation);
+    c.fillRect(rect.x, rect.y, rect.w, 4, current.accent);
+    drawBrandMark(c, .{ .x = rect.x + 16, .y = rect.y + 16, .w = 28, .h = 28 });
+    const edition = if (rect.w >= 340) mastheadEdition(rect.w) else "";
+    const edition_w = if (edition.len == 0) 0 else Canvas.uiTextWidth(edition) + 28;
+    drawEllipsized(c, title, rect.x + 54, rect.y + 18, rect.w - 72 - edition_w, current.navigation_ink);
+    drawEllipsized(c, subtitle, rect.x + 54, rect.y + 36, rect.w - 72 - edition_w, current.navigation_muted);
+    if (edition_w > 0) drawInkChip(c, .{ .x = rect.right() - edition_w - 12, .y = rect.y + 20, .w = edition_w, .h = 22 }, edition, true);
+    c.fillRect(rect.x, rect.y + 62, rect.w, 3, current.accent);
 }
 
 pub fn drawNotice(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, tone: NoticeTone) void {
@@ -515,6 +534,7 @@ pub fn drawNotice(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, ton
     };
     c.fillRect(x, y, width, 20, colors[0]);
     c.fillRect(x, y, 3, 20, colors[1]);
+    drawInkRule(c, x + 3, y, 1, 20, current.ink);
     drawEllipsized(c, label, x + 10, y + 2, width - 16, colors[1]);
 }
 
@@ -523,8 +543,9 @@ pub fn drawNotice(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, ton
 pub fn drawDialogActionBar(c: *Canvas, rect: Rect, y: i32) void {
     const top = @max(rect.y + 68, y);
     if (top >= rect.bottom() - 10) return;
-    c.fillRect(rect.x + 9, top, rect.w - 18, rect.bottom() - top - 9, current.subtle);
-    c.fillRect(rect.x + 18, top, rect.w - 36, 1, current.divider);
+    c.fillRect(rect.x + 1, top, rect.w - 2, rect.bottom() - top - 1, current.chrome);
+    c.fillRect(rect.x + 1, top, rect.w - 2, 3, current.ink);
+    c.fillRect(rect.x + 1, top + 3, rect.w - 2, 2, current.accent);
 }
 
 /// Shared label treatment for typed dialog rows. The small active marker keeps
@@ -537,7 +558,8 @@ pub fn drawDialogFieldLabel(c: *Canvas, rect: Rect, label: []const u8, active: b
 
 /// A popup separator that always respects the menu's visual inset.
 pub fn drawMenuGroupDivider(c: *Canvas, rect: Rect, y: i32) void {
-    c.fillRect(rect.x + 14, y, @max(0, rect.w - 28), 1, current.divider);
+    drawInkRule(c, rect.x + 14, y, @max(0, rect.w - 28), 1, current.divider);
+    c.fillRect(rect.x + 14, y, 12, stroke, current.accent);
 }
 
 /// Two-level compact heading for popovers and information panes.
@@ -574,17 +596,20 @@ pub fn drawInputControl(c: *Canvas, rect: Rect, kind: InputKind, state: InputSta
     const readonly = kind == .readonly or kind == .preview;
     const fill = if (readonly) current.subtle else if (state.focused) current.layer else if (state.hovered) current.paper else current.chrome;
     const border = if (state.invalid) current.failure else if (state.focused) current.accent else if (state.hovered) current.hover_border else current.divider;
-    const radius = if (kind == .composer) @min(12, @divTrunc(rect.h, 2)) else 8;
+    const radius: i32 = if (kind == .composer) 4 else 3;
 
     if (state.focused) {
-        fillRoundedRect(c, rect.x - 2, rect.y - 2, rect.w + 4, rect.h + 4, radius + 2, current.accent_soft);
+        fillRoundedRect(c, rect.x - 3, rect.y - 3, rect.w + 6, rect.h + 6, radius + 2, current.accent_soft);
         fillRoundedRect(c, rect.x + 2, rect.y + 4, rect.w, rect.h, radius, current.shadow);
     }
     drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, radius, fill, border);
     if (state.focused or state.invalid) {
-        fillRoundedRect(c, rect.x + 8, rect.bottom() - 3, @max(0, rect.w - 16), 2, 1, if (state.invalid) current.failure else current.accent);
+        c.fillRect(rect.x + 1, rect.y + 1, 3, @max(0, rect.h - 2), if (state.invalid) current.failure else current.accent);
+        fillRoundedRect(c, rect.x + 8, rect.bottom() - 3, @max(0, rect.w - 16), stroke, 1, if (state.invalid) current.failure else current.accent);
+    } else if (state.hovered) {
+        c.fillRect(rect.x + 1, rect.y + 1, 3, @max(0, rect.h - 2), current.accent);
     } else {
-        c.fillRect(rect.x + 8, rect.y + 1, @max(0, rect.w - 16), 1, current.layer);
+        c.fillRect(rect.x + 8, rect.y + 1, @max(0, rect.w - 16), stroke, current.layer);
     }
 
     switch (kind) {
@@ -595,7 +620,7 @@ pub fn drawInputControl(c: *Canvas, rect: Rect, kind: InputKind, state: InputSta
             c.fillRect(cx, rect.y + 15, 1, 4, if (state.focused) current.accent else current.secondary);
         },
         .choice => {
-            fillRoundedRect(c, rect.right() - 31, rect.y + 4, 27, rect.h - 8, 6, if (state.focused or state.hovered) current.accent_soft else current.subtle);
+            fillRoundedRect(c, rect.right() - 31, rect.y + 4, 27, rect.h - 8, 3, if (state.focused or state.hovered) current.accent_soft else current.subtle);
             const cx = rect.right() - 17;
             c.drawLine(cx - 4, rect.y + 12, cx, rect.y + 16, if (state.focused) current.accent else current.secondary);
             c.drawLine(cx, rect.y + 16, cx + 4, rect.y + 12, if (state.focused) current.accent else current.secondary);
@@ -605,10 +630,10 @@ pub fn drawInputControl(c: *Canvas, rect: Rect, kind: InputKind, state: InputSta
             c.fillRect(rect.x + 11, rect.y + 11, 9, 2, if (state.focused) current.accent else current.secondary);
             c.fillRect(rect.x + 11, rect.y + 16, 9, 2, if (state.focused) current.accent else current.secondary);
         },
-        .preview => c.fillRect(rect.x + 48, rect.y + 5, 1, rect.h - 10, current.divider),
+        .preview => drawInkRule(c, rect.x + 48, rect.y + 5, 1, rect.h - 10, current.divider),
         .readonly => {
             fillRoundedRect(c, rect.x + 9, rect.y + 11, 8, 8, 4, current.success);
-            c.fillRect(rect.x + 27, rect.y + 8, 1, rect.h - 16, current.divider);
+            drawInkRule(c, rect.x + 27, rect.y + 8, 1, rect.h - 16, current.divider);
         },
         .text, .composer => {},
     }
@@ -618,22 +643,26 @@ pub fn drawInputControl(c: *Canvas, rect: Rect, kind: InputKind, state: InputSta
 /// Comic Chat signature: selected modes read at a glance without a bulky
 /// native-toolbar bevel.
 pub fn drawCommandTile(c: *Canvas, x: i32, y: i32, selected: bool, hovered: bool) u32 {
-    const state: ControlState = .{ .selected = selected, .hovered = hovered };
-    const colors = resolveControlColors(state);
+    return drawCommandTileState(c, x, y, selected, hovered, false);
+}
+
+pub fn drawCommandTileState(c: *Canvas, x: i32, y: i32, selected: bool, hovered: bool, disabled: bool) u32 {
+    if (disabled) {
+        drawInkPlate(c, x, y, 32, 32, 2, current.chrome);
+        c.fillRect(x + stroke, y + stroke, 32 - stroke * 2, 2, current.divider);
+        return current.divider;
+    }
     if (selected) {
-        fillRoundedRect(c, x + 1, y + 3, 32, 32, 9, current.shadow);
-        drawRoundedBorder(c, x, y, 32, 32, 8, current.accent, current.accent);
-        fillRoundedRect(c, x + 7, y + 4, 18, 2, 1, current.layer);
+        drawInkPlate(c, x, y, 32, 32, 2, current.accent);
         return current.layer;
     }
     if (hovered) {
-        drawRoundedBorder(c, x, y, 32, 32, 8, colors.fill, colors.border);
-        fillRoundedRect(c, x + 7, y + 4, 18, 2, 1, current.accent);
-        return colors.content;
+        drawInkPlate(c, x, y, 32, 32, 2, current.accent_soft);
+        c.fillRect(x + stroke, y + stroke, 32 - stroke * 2, 3, current.accent);
+        return current.accent;
     }
-    drawRoundedBorder(c, x, y, 32, 32, 8, current.layer, current.divider);
-    fillRoundedRect(c, x + 7, y + 4, 18, 1, 1, current.subtle);
-    return colors.content;
+    drawInkPlate(c, x, y, 32, 32, 2, current.paper);
+    return current.ink;
 }
 
 pub const ToolGlyph = enum {
@@ -893,51 +922,90 @@ fn drawStarGlyph(c: *Canvas, cx: i32, cy: i32, color: u32) void {
     }
 }
 
-pub fn drawMenuItem(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, hovered: bool, checked: bool, enabled: bool) void {
+pub fn drawMenuItem(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, hint: []const u8, hovered: bool, checked: bool, enabled: bool) void {
     if (hovered and enabled) {
-        fillRoundedRect(c, x, y, width, 27, 7, current.accent_soft);
-        fillRoundedRect(c, x + 5, y + 7, 3, 13, 2, current.accent);
+        c.fillRect(x, y, width, 27, current.accent_soft);
+        c.fillRect(x, y, 4, 27, current.accent);
+        drawInkRule(c, x + 4, y, 1, 27, current.ink);
+        c.fillRect(x + width - 3, y + 4, 3, 19, current.accent);
+    } else if (!enabled) {
+        c.fillRect(x, y, width, 27, current.subtle);
+        c.fillRect(x, y, 2, 27, current.divider);
+    } else {
+        c.fillRect(x, y, 2, 27, current.subtle);
     }
     if (checked) {
-        drawAaDisc(c, x + 15, y + 14, 5.0, current.accent);
-        drawGlyphLine(c, x + 12, y + 14, x + 14, y + 16, current.layer);
-        drawGlyphLine(c, x + 14, y + 16, x + 18, y + 11, current.layer);
+        drawAaDisc(c, x + 15, y + 14, 4.0, current.accent);
+        drawGlyphLine(c, x + 13, y + 14, x + 15, y + 16, current.paper);
+        drawGlyphLine(c, x + 15, y + 16, x + 19, y + 11, current.paper);
     }
-    drawEllipsized(c, label, x + 27, y + 5, width - 36, if (enabled) current.ink else current.secondary);
+    const hint_w: i32 = if (hint.len == 0) 0 else Canvas.uiTextWidth(hint) + 8;
+    drawEllipsized(c, label, x + 27, y + 5, width - 40 - hint_w, if (enabled) current.ink else current.secondary);
+    if (hint_w > 0) drawEllipsized(c, hint, x + width - hint_w - 12, y + 5, hint_w, if (hovered and enabled) current.accent else current.secondary);
 }
 
 pub fn drawMenuLabel(c: *Canvas, x: i32, y: i32, width: i32, label: []const u8, selected: bool) void {
     if (selected) {
-        fillRoundedRect(c, x - 8, y + 4, width, 26, 7, current.navigation_hover);
-        fillRoundedRect(c, x + 1, y + 28, @max(8, width - 18), 2, 1, current.accent);
+        c.fillRect(x - 6, y + 5, width + 6, 24, current.navigation_hover);
+        c.fillRect(x - 4, y + 26, @max(10, width), 3, current.accent);
     }
-    _ = c.drawUiText(label, x, y + 6, current.navigation_ink);
+    _ = c.drawUiText(label, x, y + 6, if (selected) current.accent else current.navigation_ink);
 }
 
 pub fn drawMenuBarSurface(c: *Canvas, rect: Rect) void {
     c.fillRect(rect.x, rect.y, rect.w, rect.h, current.navigation);
-    c.fillRect(rect.x, rect.bottom() - 1, rect.w, 1, current.navigation_hover);
+    c.fillRect(rect.x, rect.bottom() - 4, rect.w, 4, current.accent);
+    c.fillRect(rect.x, rect.bottom() - 6, rect.w, 2, current.navigation_hover);
+    if (rect.w >= 760) {
+        const edition = mastheadEdition(rect.w);
+        const mark_w = Canvas.uiTextWidth(edition) + 24;
+        drawInkChip(c, .{ .x = rect.right() - mark_w - 10, .y = rect.y + 5, .w = mark_w, .h = 20 }, edition, true);
+    }
+}
+
+pub fn mastheadEdition(width: i32) []const u8 {
+    return if (width >= 860) "Sunday / Ink" else "Sunday";
 }
 
 pub fn drawBrandMark(c: *Canvas, rect: Rect) void {
     if (rect.w < 16 or rect.h < 16) return;
-    fillRoundedRect(c, rect.x, rect.y, rect.w, rect.h, @min(7, @divTrunc(rect.h, 3)), current.accent);
-    _ = c.drawUiText("R", rect.x + @divTrunc(rect.w - Canvas.uiTextWidth("R"), 2), rect.y + @divTrunc(rect.h - 14, 2), current.navigation_ink);
+    const body_h = @max(10, rect.h - 6);
+    fillRoundedRect(c, rect.x, rect.y, rect.w, body_h, 5, current.accent);
+    fillRoundedRect(c, rect.x + 3, rect.y + 3, @max(0, rect.w - 6), @max(0, body_h - 6), 4, current.paper);
+    fillRoundedRect(c, rect.x + 5, rect.y + 5, 4, 4, 2, current.accent);
+    c.fillTriangle(
+        rect.x + 5,
+        rect.y + body_h - 1,
+        rect.x + 2,
+        rect.bottom() - 1,
+        rect.x + 12,
+        rect.y + body_h - 1,
+        current.accent,
+    );
 }
 
 /// Shared application identity for the desktop menu bar.
 pub fn drawAppBrand(c: *Canvas, rect: Rect, name: []const u8) void {
-    drawBrandMark(c, .{ .x = rect.x + 10, .y = rect.y + 6, .w = 22, .h = 22 });
-    drawEllipsized(c, name, rect.x + 42, rect.y + 8, rect.w - 50, current.navigation_ink);
+    drawBrandMark(c, .{ .x = rect.x + 10, .y = rect.y + 4, .w = 26, .h = 26 });
+    drawEllipsized(c, name, rect.x + 44, rect.y + 7, rect.w - 52, current.navigation_ink);
+    const rule_w = @min(Canvas.uiTextWidth(name), @max(0, rect.w - 52));
+    c.fillRect(rect.x + 44, rect.y + 24, rule_w, 2, current.accent);
 }
 
 pub fn drawToolbarSurface(c: *Canvas, rect: Rect) void {
-    c.fillRect(rect.x, rect.y, rect.w, rect.h, current.layer);
-    c.fillRect(rect.x, rect.bottom() - 1, rect.w, 1, current.divider);
+    c.fillRect(rect.x, rect.y, rect.w, rect.h, current.paper);
+    c.fillRect(rect.x, rect.y, rect.w, 2, current.accent);
+    c.fillRect(rect.x, rect.bottom() - 2, rect.w, 2, current.ink);
+    if (rect.w >= 760) {
+        const mark_w = Canvas.uiTextWidth("INK") + 20;
+        drawInkPlate(c, rect.right() - mark_w - 10, rect.y + 12, mark_w, 22, 2, current.accent);
+        drawEllipsized(c, "INK", rect.right() - mark_w - 2, rect.y + 14, mark_w - 16, current.layer);
+    }
 }
 
 pub fn drawToolbarGroup(c: *Canvas, rect: Rect) void {
-    fillRoundedRect(c, rect.x, rect.y, rect.w, rect.h, 9, current.chrome);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, current.layer);
+    c.fillRect(rect.x + stroke, rect.y + stroke, @max(0, rect.w - stroke * 2), 2, current.accent);
 }
 
 /// Shared geometry for the compact primary toolbar.  Button rectangles, group
@@ -1023,9 +1091,13 @@ pub const PopupLayout = struct {
 };
 
 pub fn drawPopupSurface(c: *Canvas, rect: Rect) void {
-    fillRoundedRect(c, rect.x + 6, rect.y + 8, rect.w, rect.h, 11, current.shadow);
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 11, current.layer, current.divider);
-    fillRoundedRect(c, rect.x + 1, rect.y + 7, 3, rect.h - 14, 2, current.accent);
+    fillRoundedRect(c, rect.x + 6, rect.y + 8, rect.w, rect.h, 2, current.shadow);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 2, current.paper);
+    c.fillRect(rect.x + stroke, rect.y + stroke, @max(0, rect.w - stroke * 2), stroke, current.layer);
+    c.fillRect(rect.x + 8, rect.y + stroke, 12, stroke, current.accent);
+    c.fillRect(rect.x, rect.y, 5, rect.h, current.accent);
+    drawInkRule(c, rect.x + 5, rect.y, 1, rect.h, current.ink);
+    c.fillRect(rect.x, rect.bottom() - 3, rect.w, 3, current.ink);
 }
 
 pub fn drawPopupListSurface(c: *Canvas, layout: PopupLayout) void {
@@ -1042,14 +1114,14 @@ pub fn drawAnchoredPopoverSurface(c: *Canvas, rect: Rect, anchor_x: i32) void {
 }
 
 pub fn drawToolbarSeparator(c: *Canvas, x: i32, rect: Rect) i32 {
-    c.fillRect(x + 5, rect.y + 9, 1, rect.h - 18, current.divider);
+    drawInkRule(c, x + 5, rect.y + 9, 1, rect.h - 18, current.divider);
     return x + 12;
 }
 
 pub fn drawSplitter(c: *Canvas, rect: Rect) void {
     c.fillRect(rect.x, rect.y, rect.w, rect.h, current.workspace);
-    if (rect.w > rect.h) fillRoundedRect(c, rect.x + @divTrunc(rect.w - 40, 2), rect.y + @divTrunc(rect.h - 2, 2), @min(40, rect.w), 2, 1, current.divider);
-    if (rect.h > rect.w) fillRoundedRect(c, rect.x + @divTrunc(rect.w - 2, 2), rect.y + @divTrunc(rect.h - 40, 2), 2, @min(40, rect.h), 1, current.divider);
+    if (rect.w > rect.h) c.fillRect(rect.x + @divTrunc(rect.w - 48, 2), rect.y + @divTrunc(rect.h - 3, 2), @min(48, rect.w), 3, current.ink);
+    if (rect.h > rect.w) c.fillRect(rect.x + @divTrunc(rect.w - 3, 2), rect.y + @divTrunc(rect.h - 48, 2), 3, @min(48, rect.h), current.ink);
 }
 
 pub fn drawVerticalScrollbar(c: *Canvas, rect: Rect, total: usize, visible: usize, first: usize) void {
@@ -1064,38 +1136,78 @@ pub fn drawVerticalScrollbar(c: *Canvas, rect: Rect, total: usize, visible: usiz
 }
 
 pub fn drawContentSurface(c: *Canvas, rect: Rect, comic: bool) void {
-    c.fillRect(rect.x, rect.y, rect.w, rect.h, if (comic) current.comic_paper else current.workspace);
+    if (comic) {
+        drawPageWell(c, rect);
+    } else {
+        c.fillRect(rect.x, rect.y, rect.w, rect.h, current.workspace);
+    }
+}
+
+/// Newsprint matte and ink frame around the 1:1 source page. The inner
+/// paper starts at the same +8 inset the view uses for `blitSourcePage`.
+pub fn drawPageWell(c: *Canvas, rect: Rect) void {
+    c.fillRect(rect.x, rect.y, rect.w, rect.h, current.comic_paper);
+    if (rect.w < 28 or rect.h < 28) return;
+    const page = Rect{ .x = rect.x + 6, .y = rect.y + 6, .w = rect.w - 12, .h = rect.h - 12 };
+    fillRoundedRect(c, page.x + 4, page.y + 5, page.w, page.h, 2, current.shadow);
+    drawInkPlate(c, page.x, page.y, page.w, page.h, 2, current.artwork_paper);
+    drawOutline(c, page.x + 4, page.y + 4, page.w - 8, page.h - 8, current.divider);
+    drawPageCorner(c, page.x, page.y, 1, 1);
+    drawPageCorner(c, page.right() - 1, page.y, -1, 1);
+    drawPageCorner(c, page.x, page.bottom() - 1, 1, -1);
+    drawPageCorner(c, page.right() - 1, page.bottom() - 1, -1, -1);
+}
+
+fn drawPageCorner(c: *Canvas, x: i32, y: i32, dx: i32, dy: i32) void {
+    const tick: i32 = 10;
+    const hx = if (dx < 0) x - tick + 1 else x;
+    const vy = if (dy < 0) y - tick + 1 else y;
+    c.fillRect(hx, y, tick, stroke, current.accent);
+    c.fillRect(x, vy, stroke, tick, current.accent);
 }
 
 pub fn drawTabStrip(c: *Canvas, rect: Rect) void {
-    c.fillRect(rect.x, rect.y, rect.w, rect.h, current.chrome);
-    c.fillRect(rect.x, rect.bottom() - 1, rect.w, 1, current.divider);
+    c.fillRect(rect.x, rect.y, rect.w, rect.h, current.comic_paper);
+    c.fillRect(rect.x, rect.y, rect.w, 2, current.layer);
+    c.fillRect(rect.x, rect.bottom() - 2, rect.w, 2, current.ink);
 }
 
-pub fn drawStatusTab(c: *Canvas, rect: Rect) void {
-    fillRoundedRect(c, rect.x + 8, rect.y + 6, 96, rect.h - 12, 8, current.subtle);
-    c.fillRect(rect.x + 20, rect.bottom() - 5, 72, 2, current.divider);
+pub fn drawStatusTab(c: *Canvas, rect: Rect, selected: bool, hovered: bool) void {
+    const fill = if (selected) current.accent else if (hovered) current.accent_soft else current.paper;
+    drawInkPlate(c, rect.x + 8, rect.y + 6, 96, rect.h - 12, 2, fill);
+    if (!selected) c.fillRect(rect.x + 10, rect.y + 8, 92, 2, current.accent);
 }
 
-pub fn drawStatusTabContent(c: *Canvas, rect: Rect) void {
-    drawRoundedBorder(c, rect.x + 16, rect.y + 11, 14, 10, 3, current.subtle, current.accent);
-    c.drawLine(rect.x + 21, rect.y + 20, rect.x + 19, rect.y + 24, current.accent);
-    _ = c.drawUiText("Status", rect.x + 39, rect.y + 9, current.ink);
+pub fn drawStatusTabContent(c: *Canvas, rect: Rect, selected: bool, tone: NoticeTone, label: []const u8) void {
+    const mark = switch (tone) {
+        .success => current.success,
+        .warning => current.warning,
+        .failure => current.failure,
+        .info => if (selected) current.layer else current.accent,
+    };
+    const text = if (selected) current.layer else current.ink;
+    fillRoundedRect(c, rect.x + 16, rect.y + 12, 12, 9, 2, mark);
+    _ = c.drawUiText(label, rect.x + 36, rect.y + 9, text);
 }
 
 pub fn drawMemberCard(c: *Canvas, rect: Rect, selected: bool, departed: bool, away: bool, hovered: bool) void {
     const card = Rect{ .x = rect.x + 4, .y = rect.y + 4, .w = rect.w - 8, .h = rect.h - 8 };
-    const fill = if (selected) current.accent_soft else if (hovered) current.layer else current.rail;
-    const border = if (selected) current.accent else if (hovered) current.divider else current.rail;
-    drawRoundedBorder(c, card.x, card.y, card.w, card.h, 9, fill, border);
-    if (selected) fillRoundedRect(c, card.x + 8, card.bottom() - 4, card.w - 16, 3, 2, current.accent);
-    fillRoundedRect(c, rect.x + 9, rect.y + 9, 8, 8, 4, if (departed) current.divider else if (away) current.warning else current.success);
+    const fill = if (selected) current.accent_soft else if (hovered) current.paper else current.layer;
+    drawInkPlate(c, card.x, card.y, card.w, card.h, 2, fill);
+    c.fillRect(card.x, card.y, 4, card.h, if (selected) current.accent else current.ink);
+    fillRoundedRect(c, rect.x + 12, rect.y + 9, 8, 8, 4, if (departed) current.divider else if (away) current.warning else current.success);
+    const plate_h: i32 = 20;
+    if (card.h > plate_h + 8) {
+        c.fillRect(card.x + 4, card.bottom() - plate_h, card.w - 4, plate_h, current.paper);
+        drawInkRule(c, card.x + 4, card.bottom() - plate_h, card.w - 4, 1, current.ink);
+    }
 }
 
 pub fn drawInspectorRail(c: *Canvas, rect: Rect) void {
     if (rect.w <= 0 or rect.h <= 0) return;
     c.fillRect(rect.x, rect.y, rect.w, rect.h, current.rail);
-    c.fillRect(rect.x, rect.y, 1, rect.h, current.divider);
+    c.fillRect(rect.x, rect.y, 3, rect.h, current.ink);
+    c.fillRect(rect.x + 3, rect.y, 2, rect.h, current.accent);
 }
 
 pub fn drawMemberRailSurface(c: *Canvas, rect: Rect) void {
@@ -1104,9 +1216,11 @@ pub fn drawMemberRailSurface(c: *Canvas, rect: Rect) void {
 
 pub fn drawCharacterPane(c: *Canvas, rect: Rect) void {
     c.fillRect(rect.x, rect.y, rect.w, rect.h, current.rail);
-    c.fillRect(rect.x + 12, rect.y + 30, @max(0, rect.w - 24), @max(0, rect.h - 30), current.artwork_paper);
-    c.fillRect(rect.x + 12, rect.y + 30, 1, @max(0, rect.h - 30), current.divider);
-    c.fillRect(rect.right() - 13, rect.y + 30, 1, @max(0, rect.h - 30), current.divider);
+    const frame = Rect{ .x = rect.x + 10, .y = rect.y + 30, .w = @max(0, rect.w - 20), .h = @max(0, rect.h - 38) };
+    if (frame.w > 0 and frame.h > 0) {
+        fillRoundedRect(c, frame.x + 3, frame.y + 4, frame.w, frame.h, 2, current.shadow);
+        drawInkPlate(c, frame.x, frame.y, frame.w, frame.h, 2, current.artwork_paper);
+    }
 }
 
 /// The expression picker is an intentional control surface, rather than a
@@ -1114,15 +1228,15 @@ pub fn drawCharacterPane(c: *Canvas, rect: Rect) void {
 /// and authored expression marks inside the returned interior.
 pub fn drawExpressionPanel(c: *Canvas, rect: Rect, selection: []const u8) void {
     c.fillRect(rect.x, rect.y, rect.w, rect.h, current.rail);
-    c.fillRect(rect.x + 12, rect.y, @max(0, rect.w - 24), @max(0, rect.h - 8), current.layer);
-    c.fillRect(rect.x + 12, rect.y, @max(0, rect.w - 24), 1, current.divider);
+    const plate = Rect{ .x = rect.x + 8, .y = rect.y + 2, .w = @max(0, rect.w - 16), .h = @max(0, rect.h - 8) };
+    if (plate.w > 0 and plate.h > 0) drawInkPlate(c, plate.x, plate.y, plate.w, plate.h, 2, current.paper);
     fillRoundedRect(c, rect.x + 18, rect.y + 11, 5, 5, 3, current.accent);
     const label_w = @min(@max(40, rect.w - 44), Canvas.uiTextWidth(selection) + 20);
     const label_x = rect.right() - label_w - 12;
     const mood_w = label_x - (rect.x + 31) - 6;
-    if (mood_w >= Canvas.uiTextWidth("MOOD")) _ = c.drawUiText("MOOD", rect.x + 31, rect.y + 6, current.ink);
+    if (mood_w >= Canvas.uiTextWidth("Mood")) _ = c.drawUiText("Mood", rect.x + 31, rect.y + 6, current.ink);
     drawPill(c, .{ .x = label_x, .y = rect.y + 5, .w = label_w, .h = 20 }, selection, true);
-    c.fillRect(rect.x + 18, rect.y + 31, rect.w - 36, 1, current.divider);
+    c.fillRect(rect.x + 18, rect.y + 31, rect.w - 36, 2, current.ink);
 }
 
 /// The interactive portion of a radial mood dial.  Input code uses this same
@@ -1141,8 +1255,8 @@ pub fn drawMoodDial(c: *Canvas, rect: Rect, label: []const u8, selector_x: i16, 
     const cy = dial.y + @divTrunc(dial.h, 2);
     const radius = @max(1, @min(@divTrunc(dial.w, 2), @divTrunc(dial.h, 2)) - 9);
     drawAaDisc(c, cx + 2, cy + 3, @floatFromInt(radius), current.shadow);
-    drawAaRing(c, cx, cy, @floatFromInt(radius), 1.4, current.paper, current.divider);
-    drawAaRing(c, cx, cy, @floatFromInt(@max(1, radius - 7)), 1.0, current.paper, current.accent_soft);
+    drawAaRing(c, cx, cy, @floatFromInt(radius), 2.0, current.paper, current.ink);
+    drawAaRing(c, cx, cy, @floatFromInt(@max(1, radius - 7)), 1.2, current.paper, current.accent);
 
     const directions = [_][2]i32{
         .{ -707, -707 }, .{ 0, -1000 }, .{ 707, -707 },
@@ -1177,21 +1291,32 @@ fn moodGridCoordinate(value: i16) i32 {
 }
 
 pub fn drawComposerSurface(c: *Canvas, rect: Rect) void {
-    c.fillRect(rect.x, rect.y, rect.w, rect.h, current.chrome);
-    c.fillRect(rect.x, rect.y, rect.w, 1, current.divider);
+    c.fillRect(rect.x, rect.y, rect.w, rect.h, current.paper);
+    c.fillRect(rect.x, rect.y, rect.w, 3, current.ink);
+    c.fillRect(rect.x, rect.bottom() - 2, rect.w, 2, current.ink);
+    c.fillRect(rect.x, rect.y + 3, 5, @max(0, rect.h - 5), current.accent);
+    drawInkRule(c, rect.x + 5, rect.y + 3, 1, @max(0, rect.h - 5), current.ink);
+    if (rect.w > 16 and rect.h > 14)
+        c.fillRect(rect.x + 8, rect.y + 6, @max(0, rect.w - 10), @max(0, rect.h - 10), current.layer);
 }
 
 pub fn drawHistoryBanner(c: *Canvas, rect: Rect, label: []const u8) void {
-    const width = @min(rect.w - 12, Canvas.uiTextWidth(label) + 16);
-    drawRoundedBorder(c, rect.x + 6, rect.y + 6, width, 25, 5, current.layer, current.divider);
-    _ = c.drawUiText(label, rect.x + 12, rect.y + 8, current.secondary);
+    const width = @min(rect.w - 12, Canvas.uiTextWidth(label) + 22);
+    drawInkPlate(c, rect.x + 6, rect.y + 6, width, 25, 3, current.paper);
+    c.fillRect(rect.x + 8, rect.y + 8, 3, 21, current.accent);
+    _ = c.drawUiText(label, rect.x + 16, rect.y + 8, current.ink);
 }
 
-pub fn drawTab(c: *Canvas, x: i32, y: i32, width: i32, height: i32, selected: bool) void {
-    fillRoundedRect(c, x, y, width, height - 2, 8, if (selected) current.layer else current.chrome);
+pub fn drawTab(c: *Canvas, x: i32, y: i32, width: i32, height: i32, selected: bool, hovered: bool) void {
     if (selected) {
-        drawRoundedBorder(c, x, y, width, height - 2, 8, current.layer, current.divider);
-        fillRoundedRect(c, x + 12, y + height - 6, width - 24, 3, 2, current.accent);
+        drawInkPlate(c, x, y + 4, width, height - 4, 2, current.paper);
+        c.fillRect(x + stroke, y + 6, width - stroke * 2, 3, current.accent);
+        c.fillRect(x + stroke, y + height - 2, width - stroke * 2, 2, current.paper);
+    } else if (hovered) {
+        drawInkPlate(c, x + 1, y + 6, width - 2, height - 10, 2, current.paper);
+        c.fillRect(x + 3, y + 8, width - 6, 2, current.accent);
+    } else {
+        drawInkPlate(c, x + 2, y + 8, width - 4, height - 12, 2, current.layer);
     }
 }
 
@@ -1203,37 +1328,47 @@ const ConversationTabLayout = struct {
 fn conversationTabLayout(rect: Rect, unread: usize) ConversationTabLayout {
     var unread_buf: [24]u8 = undefined;
     const unread_label = if (unread > 0) std.fmt.bufPrint(&unread_buf, "{d}", .{unread}) catch "!" else "";
-    const badge_w: i32 = if (unread == 0) 0 else Canvas.uiTextWidth(unread_label) + 14;
+    const badge_w: i32 = if (unread == 0) 0 else Canvas.uiTextWidth(unread_label) + 16;
     return .{
         .badge_w = badge_w,
         .label_right = if (unread == 0) rect.right() - 14 else rect.right() - badge_w - 14,
     };
 }
 
-pub fn drawConversationTab(c: *Canvas, rect: Rect, label: []const u8, unread: usize, selected: bool, focused: bool) void {
-    drawTab(c, rect.x, rect.y, rect.w, rect.h, selected);
+pub fn drawConversationTab(c: *Canvas, rect: Rect, label: []const u8, unread: usize, selected: bool, focused: bool, hovered: bool) void {
+    drawTab(c, rect.x, rect.y, rect.w, rect.h, selected, hovered);
     const text_color = if (selected) current.ink else if (unread > 0) current.accent else current.secondary;
     const tab_layout = conversationTabLayout(rect, unread);
     var unread_buf: [24]u8 = undefined;
     const unread_label = if (unread > 0) std.fmt.bufPrint(&unread_buf, "{d}", .{unread}) catch "!" else "";
     drawEllipsized(c, label, rect.x + 14, rect.y + 4, tab_layout.label_right - rect.x - 14, text_color);
     if (unread > 0) {
-        fillRoundedRect(c, rect.right() - tab_layout.badge_w - 8, rect.y + 7, tab_layout.badge_w, 16, 6, current.accent_soft);
-        _ = c.drawUiText(unread_label, rect.right() - tab_layout.badge_w, rect.y + 8, current.accent);
+        const badge = Rect{ .x = rect.right() - tab_layout.badge_w - 8, .y = rect.y + 7, .w = tab_layout.badge_w, .h = 16 };
+        drawInkPlate(c, badge.x, badge.y, badge.w, badge.h, 6, current.accent);
+        const unread_x = badge.x + @divTrunc(badge.w - Canvas.uiTextWidth(unread_label), 2);
+        _ = c.drawUiText(unread_label, unread_x, rect.y + 8, current.layer);
     }
     if (focused) drawFocusRing(c, .{ .x = rect.x, .y = rect.y - 3, .w = rect.w, .h = rect.h + 3 });
 }
 
 pub fn drawActionTile(c: *Canvas, x: i32, y: i32, width: i32, height: i32, selected: bool, hovered: bool) u32 {
+    return drawActionTileState(c, x, y, width, height, selected, hovered, false);
+}
+
+pub fn drawActionTileState(c: *Canvas, x: i32, y: i32, width: i32, height: i32, selected: bool, hovered: bool, disabled: bool) u32 {
     const inset = Rect{ .x = x + 5, .y = y + 7, .w = width - 10, .h = height - 14 };
+    if (disabled) {
+        drawInkPlate(c, inset.x, inset.y, inset.w, inset.h, 2, current.chrome);
+        c.fillRect(inset.x + stroke, inset.y + stroke, @max(0, inset.w - stroke * 2), 2, current.divider);
+        return current.divider;
+    }
     if (selected) {
-        drawRoundedBorder(c, inset.x, inset.y, inset.w, inset.h, 9, current.accent, current.accent);
-        fillRoundedRect(c, inset.x + 7, inset.y + 4, @max(0, inset.w - 14), 2, 1, current.layer);
+        drawInkPlate(c, inset.x, inset.y, inset.w, inset.h, 2, current.accent);
         return current.layer;
     }
-    drawRoundedBorder(c, inset.x, inset.y, inset.w, inset.h, 9, if (hovered) current.accent_soft else current.layer, if (hovered) current.accent else current.divider);
-    if (hovered) fillRoundedRect(c, inset.x + 7, inset.y + 4, @max(0, inset.w - 14), 2, 1, current.accent);
-    return if (hovered) current.accent else current.secondary;
+    drawInkPlate(c, inset.x, inset.y, inset.w, inset.h, 2, if (hovered) current.accent_soft else current.paper);
+    if (hovered) c.fillRect(inset.x + stroke, inset.y + stroke, @max(0, inset.w - stroke * 2), 3, current.accent);
+    return if (hovered) current.accent else current.ink;
 }
 
 pub fn drawFocusRing(c: *Canvas, rect: Rect) void {
@@ -1281,6 +1416,11 @@ pub fn drawComposerEditor(c: *Canvas, layout: ComposerEditorLayout, focused: boo
     drawComposerField(c, layout.edit, focused, hovered, populated);
 }
 
+pub fn drawComposerModeChip(c: *Canvas, rect: Rect, label: []const u8, hot: bool) void {
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 2, if (hot) current.accent else current.subtle);
+    drawEllipsized(c, label, rect.x + 6, rect.y + @max(0, @divTrunc(rect.h - 17, 2)), rect.w - 12, if (hot) current.layer else current.ink);
+}
+
 pub fn drawComposerOverflowMarks(c: *Canvas, layout: ComposerEditorLayout, left_hidden: bool, right_hidden: bool) void {
     drawInputOverflowMarks(c, layout.edit, left_hidden, right_hidden);
 }
@@ -1292,12 +1432,14 @@ pub fn drawInputOverflowMarks(c: *Canvas, rect: Rect, left_hidden: bool, right_h
 }
 
 pub fn drawBrowseButton(c: *Canvas, rect: Rect, hovered: bool) void {
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 7, if (hovered) current.accent_soft else current.chrome, if (hovered) current.accent else current.divider);
-    _ = c.drawUiText("Browse", rect.x + @max(7, @divTrunc(rect.w - Canvas.uiTextWidth("Browse"), 2)), rect.y + @divTrunc(rect.h - 14, 2), current.accent);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, if (hovered) current.accent_soft else current.chrome);
+    if (hovered) c.fillRect(rect.x + stroke, rect.y + stroke, @max(0, rect.w - stroke * 2), 2, current.accent);
+    _ = c.drawUiText("Choose", rect.x + @max(7, @divTrunc(rect.w - Canvas.uiTextWidth("Choose"), 2)), rect.y + @divTrunc(rect.h - 14, 2), current.accent);
 }
 
 pub fn drawPreviewChoiceCard(c: *Canvas, rect: Rect, active: bool) void {
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 8, if (active) current.accent_soft else current.chrome, if (active) current.accent else current.divider);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, if (active) current.accent_soft else current.chrome);
+    if (active) c.fillRect(rect.x + stroke, rect.y + stroke, @max(0, rect.w - stroke * 2), 2, current.accent);
 }
 
 /// Stable frame and content bounds for a decoded character or backdrop asset.
@@ -1329,20 +1471,20 @@ pub const AssetPreviewLayout = struct {
 pub fn drawAssetPreviewFrame(c: *Canvas, layout: AssetPreviewLayout, active: bool) void {
     drawPreviewChoiceCard(c, layout.frame, active);
     if (layout.artwork.w > 0 and layout.artwork.h > 0)
-        fillRoundedRect(c, layout.artwork.x, layout.artwork.y, layout.artwork.w, layout.artwork.h, 5, current.artwork_paper);
+        fillRoundedRect(c, layout.artwork.x, layout.artwork.y, layout.artwork.w, layout.artwork.h, 3, current.artwork_paper);
 }
 
 /// Compact family selector used where a gallery has multiple complete visual
 /// treatments. Every segment is a real target, not a decorative label.
 pub fn drawSegmentedChoice(c: *Canvas, rect: Rect, labels: []const []const u8, selected: usize) void {
     if (labels.len == 0 or rect.w <= 0 or rect.h <= 0) return;
-    fillRoundedRect(c, rect.x, rect.y, rect.w, rect.h, 7, current.subtle);
+    fillRoundedRect(c, rect.x, rect.y, rect.w, rect.h, 3, current.subtle);
     const segment_w = @divTrunc(rect.w, @as(i32, @intCast(labels.len)));
     for (labels, 0..) |label, index| {
         const x = rect.x + @as(i32, @intCast(index)) * segment_w;
         const w = if (index + 1 == labels.len) rect.right() - x else segment_w;
         const active = index == selected;
-        if (active) fillRoundedRect(c, x + 2, rect.y + 2, w - 4, rect.h - 4, 5, current.layer);
+        if (active) fillRoundedRect(c, x + 2, rect.y + 2, w - 4, rect.h - 4, 3, current.layer);
         const color = if (active) current.accent else current.secondary;
         const available = @max(0, w - 10);
         const text_w = Canvas.uiTextWidth(label);
@@ -1373,13 +1515,14 @@ pub fn drawStatusIdentity(c: *Canvas, rect: Rect, tone: NoticeTone) void {
         .failure => current.failure,
         .info => current.accent,
     };
-    fillRoundedRect(c, rect.x, rect.y, rect.w, rect.h, 10, current.accent_soft);
+    fillRoundedRect(c, rect.x, rect.y, rect.w, rect.h, 3, current.accent_soft);
     const disc = @max(6, @divTrunc(@min(rect.w, rect.h), 3));
     fillRoundedRect(c, rect.x + @divTrunc(rect.w - disc, 2), rect.y + @divTrunc(rect.h - disc, 2), disc, disc, @divTrunc(disc, 2), color);
 }
 
 pub fn drawSectionRule(c: *Canvas, x: i32, y: i32, width: i32) void {
-    c.fillRect(x, y, @max(0, width), 1, current.divider);
+    drawInkRule(c, x, y, @max(0, width), 1, current.divider);
+    c.fillRect(x, y, @min(12, @max(0, width)), stroke, current.accent);
 }
 
 pub fn drawStatusMetric(c: *Canvas, x: i32, y: i32, label: []const u8, value: []const u8, max_width: i32) void {
@@ -1388,17 +1531,17 @@ pub fn drawStatusMetric(c: *Canvas, x: i32, y: i32, label: []const u8, value: []
 }
 
 pub fn drawStatusMetricCard(c: *Canvas, rect: Rect, label: []const u8, value: []const u8) void {
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 7, current.chrome, current.divider);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, current.paper);
     _ = c.drawUiText(label, rect.x + 9, rect.y + 5, current.secondary);
     drawEllipsized(c, value, rect.x + 9, rect.y + 20, rect.w - 18, current.ink);
 }
 
 pub fn drawStepper(c: *Canvas, rect: Rect, decrease_hovered: bool, increase_hovered: bool) void {
-    drawRoundedBorder(c, rect.x, rect.y, rect.w, rect.h, 8, current.layer, current.divider);
-    if (decrease_hovered) fillRoundedRect(c, rect.x + 1, rect.y + 1, 29, rect.h - 2, 7, current.accent_soft);
-    if (increase_hovered) fillRoundedRect(c, rect.right() - 30, rect.y + 1, 29, rect.h - 2, 7, current.accent_soft);
-    c.fillRect(rect.x + 30, rect.y + 5, 1, rect.h - 10, current.divider);
-    c.fillRect(rect.right() - 31, rect.y + 5, 1, rect.h - 10, current.divider);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, current.paper);
+    if (decrease_hovered) c.fillRect(rect.x + stroke, rect.y + stroke, 29, rect.h - stroke * 2, current.accent_soft);
+    if (increase_hovered) c.fillRect(rect.right() - 30, rect.y + stroke, 29, rect.h - stroke * 2, current.accent_soft);
+    drawInkRule(c, rect.x + 30, rect.y + 5, 1, rect.h - 10, current.ink);
+    drawInkRule(c, rect.right() - 31, rect.y + 5, 1, rect.h - 10, current.ink);
 }
 
 pub fn drawLabeledStepper(c: *Canvas, rect: Rect, label: []const u8, decrease_hovered: bool, increase_hovered: bool) void {
@@ -1434,14 +1577,14 @@ pub fn drawMessageRow(c: *Canvas, rect: Rect, nick: []const u8, text: []const u8
     const layout = messageRowLayout(rect, continued);
     const speaker_color = if (own) current.success else current.accent;
     const speaker_soft = if (own) current.success_soft else current.accent_soft;
-    const background = if (selected) current.accent_soft else if (own) speaker_soft else if (alternate) current.chrome else current.layer;
-    drawRoundedBorder(c, layout.left, rect.y - 1, rect.right() - layout.left - 7, rect.h - 4, 7, background, if (selected) current.focus else current.divider);
+    const background = if (selected) current.accent_soft else if (own) speaker_soft else if (alternate) current.chrome else current.paper;
+    drawInkPlate(c, layout.left, rect.y - 1, rect.right() - layout.left - 7, rect.h - 4, 3, background);
     if (continued) {
-        c.fillRect(rect.x + 16, rect.y + 9, 3, rect.h - 23, speaker_soft);
-        fillRoundedRect(c, rect.x + 14, rect.y + 5, 7, 7, 4, speaker_color);
+        c.fillRect(rect.x + 16, rect.y + 9, 3, rect.h - 23, speaker_color);
+        c.fillRect(rect.x + 14, rect.y + 5, 7, 7, speaker_color);
     } else {
         c.fillRect(rect.x + 7, rect.y + 5, 3, rect.h - 15, speaker_color);
-        fillRoundedRect(c, rect.x + 16, rect.y + 2, layout.speaker_w - 8, 18, 4, speaker_soft);
+        c.fillRect(rect.x + 16, rect.y + 2, layout.speaker_w - 8, 18, speaker_soft);
         drawEllipsized(c, nick, rect.x + 20, rect.y + 3, layout.speaker_w - 16, speaker_color);
     }
     const split = messageWrapPoint(text, layout.text_w);
@@ -1457,33 +1600,34 @@ pub fn drawConversationPresenceDot(c: *Canvas, x: i32, y: i32, live: bool) void 
 }
 
 pub fn drawConversationTitle(c: *Canvas, x: i32, y: i32) void {
-    _ = c.drawUiText("ROOM CHAT", x, y, current.ink);
+    _ = c.drawUiText("Conversation", x, y, current.ink);
 }
 
 pub fn drawConversationSummary(c: *Canvas, x: i32, y: i32, width: i32, count: usize, members: usize) void {
     var summary_buf: [32]u8 = undefined;
-    const summary = std.fmt.bufPrint(&summary_buf, "{d} messages / {d} here", .{ count, members }) catch "";
-    drawEllipsized(c, summary, x, y, width, current.secondary);
+    const summary = std.fmt.bufPrint(&summary_buf, "{d} lines / {d} here", .{ count, members }) catch "";
+    drawEllipsized(c, summary, x, y, width, current.navigation_muted);
 }
 
 pub fn drawConversationStateBadge(c: *Canvas, x: i32, y: i32, live: bool) void {
-    const mode = if (live) "LIVE" else "PGDN TO LIVE";
-    const width = Canvas.uiTextWidth(mode) + 16;
-    fillRoundedRect(c, x - width, y, width, 16, 6, if (live) current.accent_soft else current.notice_warning);
-    _ = c.drawUiText(mode, x - width + 8, y + 1, if (live) current.accent else current.warning);
+    const mode = if (live) "Live" else "Earlier";
+    const width = Canvas.uiTextWidth(mode) + 18;
+    drawInkPlate(c, x - width, y, width, 16, 2, if (live) current.accent else current.notice_warning);
+    _ = c.drawUiText(mode, x - width + 9, y + 1, if (live) current.layer else current.ink);
 }
 
 pub fn drawConversationRule(c: *Canvas, rect: Rect) void {
-    c.fillRect(rect.x + 12, rect.bottom() - 1, @max(0, rect.w - 24), 1, current.divider);
+    c.fillRect(rect.x + 12, rect.bottom() - 2, @max(0, rect.w - 24), 2, current.ink);
 }
 
 pub fn drawConversationHeader(c: *Canvas, rect: Rect, count: usize, members: usize, live: bool) void {
-    c.fillRect(rect.x, rect.y, rect.w, 30, current.rail);
+    c.fillRect(rect.x, rect.y, rect.w, 30, current.navigation);
+    c.fillRect(rect.x, rect.y + 25, rect.w, 2, current.ink);
+    c.fillRect(rect.x, rect.y + 27, rect.w, 3, current.accent);
     drawConversationPresenceDot(c, rect.x + 12, rect.y + 10, live);
-    drawConversationTitle(c, rect.x + 28, rect.y + 7);
+    _ = c.drawUiText("Conversation", rect.x + 28, rect.y + 7, current.navigation_ink);
     drawConversationSummary(c, rect.x + 136, rect.y + 7, @max(0, rect.w - 242), count, members);
     drawConversationStateBadge(c, rect.right() - 12, rect.y + 7, live);
-    drawConversationRule(c, .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = 30 });
 }
 
 fn messageWrapPoint(text: []const u8, width: i32) usize {
@@ -1498,14 +1642,26 @@ fn messageWrapPoint(text: []const u8, width: i32) usize {
 }
 
 pub fn drawMemberRow(c: *Canvas, rect: Rect, label: []const u8, role_badge: []const u8, selected: bool, departed: bool, away: bool, hovered: bool) void {
-    if (selected or hovered) fillRoundedRect(c, rect.x + 3, rect.y - 1, rect.w - 6, 23, 6, if (selected) current.accent_soft else current.chrome);
+    if (selected or hovered) {
+        drawInkPlate(c, rect.x + 3, rect.y - 1, rect.w - 6, 23, 2, if (selected) current.accent_soft else current.paper);
+        c.fillRect(rect.x + 3, rect.y - 1, 4, 23, current.accent);
+    } else {
+        c.fillRect(rect.x + 3, rect.y + 2, 2, 18, current.subtle);
+    }
     fillRoundedRect(c, rect.x + 8, rect.y + 5, 8, 8, 4, if (departed) current.divider else if (away) current.warning else current.success);
-    const badge_w: i32 = if (role_badge.len == 0) 0 else 21;
+    const badge_w: i32 = if (role_badge.len == 0) 0 else Canvas.uiTextWidth(role_badge) + 10;
     drawEllipsized(c, label, rect.x + 24, rect.y, rect.w - 30 - badge_w, if (departed) current.secondary else current.ink);
     if (role_badge.len != 0) {
-        fillRoundedRect(c, rect.right() - 24, rect.y + 2, 18, 18, 6, current.accent_soft);
-        _ = c.drawUiText(role_badge, rect.right() - 19, rect.y + 2, current.accent);
+        fillRoundedRect(c, rect.right() - badge_w - 6, rect.y + 2, badge_w, 18, 6, current.accent_soft);
+        _ = c.drawUiText(role_badge, rect.right() - badge_w - 2, rect.y + 2, current.accent);
     }
+}
+
+pub fn drawInkChip(c: *Canvas, rect: Rect, label: []const u8, hot: bool) void {
+    const fill = if (hot) current.accent else current.navigation_hover;
+    const color = if (hot) current.layer else current.navigation_ink;
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 2, fill);
+    drawEllipsized(c, label, rect.x + 8, rect.y + @max(1, @divTrunc(rect.h - 17, 2)), rect.w - 16, color);
 }
 
 pub fn drawPaneHeader(c: *Canvas, rect: Rect, title: []const u8) void {
@@ -1513,10 +1669,11 @@ pub fn drawPaneHeader(c: *Canvas, rect: Rect, title: []const u8) void {
 }
 
 pub fn drawPaneHeaderReserved(c: *Canvas, rect: Rect, title: []const u8, trailing_width: i32) void {
-    c.fillRect(rect.x, rect.y, rect.w, 30, current.rail);
-    fillRoundedRect(c, rect.x + 12, rect.y + 12, 5, 5, 3, current.accent);
-    drawEllipsized(c, title, rect.x + 25, rect.y + 7, rect.w - 37 - @max(0, trailing_width), current.ink);
-    c.fillRect(rect.x + 12, rect.y + 29, @max(0, rect.w - 24), 1, current.divider);
+    c.fillRect(rect.x, rect.y, rect.w, 30, current.navigation);
+    c.fillRect(rect.x + 10, rect.y + 8, 4, 14, current.accent);
+    drawEllipsized(c, title, rect.x + 28, rect.y + 7, rect.w - 40 - @max(0, trailing_width), current.navigation_ink);
+    c.fillRect(rect.x, rect.y + 25, rect.w, 2, current.ink);
+    c.fillRect(rect.x, rect.y + 27, rect.w, 3, current.accent);
 }
 
 /// Inspector header with a right-aligned live count that cannot collide with
@@ -1524,7 +1681,7 @@ pub fn drawPaneHeaderReserved(c: *Canvas, rect: Rect, title: []const u8, trailin
 pub fn drawPaneCountHeader(c: *Canvas, rect: Rect, title: []const u8, count: []const u8) void {
     const count_w = @max(32, Canvas.uiTextWidth(count) + 20);
     drawPaneHeaderReserved(c, rect, title, count_w + 8);
-    drawPill(c, .{ .x = rect.right() - count_w - 12, .y = rect.y + 5, .w = count_w, .h = 20 }, count, false);
+    drawInkChip(c, .{ .x = rect.right() - count_w - 12, .y = rect.y + 5, .w = count_w, .h = 20 }, count, !std.mem.eql(u8, count, "0"));
 }
 
 /// Quiet, right-aligned keyboard-dismissal affordance for temporary popovers.
@@ -1543,98 +1700,85 @@ pub fn drawIdentityPaneHeader(c: *Canvas, rect: Rect, title: []const u8, identit
         return;
     }
     drawPaneHeaderReserved(c, rect, title, identity_w + 10);
-    drawPill(c, .{ .x = rect.right() - identity_w - 12, .y = rect.y + 5, .w = identity_w, .h = 20 }, identity, true);
+    drawInkChip(c, .{ .x = rect.right() - identity_w - 12, .y = rect.y + 5, .w = identity_w, .h = 20 }, identity, true);
 }
 
 pub fn drawStatusBar(c: *Canvas, x: i32, y: i32, width: i32, height: i32, status: []const u8, member_count: usize, hovered: bool) void {
     c.fillRect(x, y, width, height, current.navigation);
-    c.fillRect(x, y, width, 1, current.navigation_hover);
+    c.fillRect(x, y, width, 3, current.accent);
+    c.fillRect(x, y + height - 2, width, 2, current.ink);
     const status_color = switch (statusTone(status)) {
         .success => current.success,
         .warning => current.warning,
         .failure => current.failure,
         .info => current.accent,
     };
-    fillRoundedRect(c, x + 10, y + 9, 7, 7, 4, status_color);
+    c.fillRect(x + 10, y + 9, 8, 8, status_color);
     var buf: [32]u8 = undefined;
     const members = if (member_count == 1)
-        "1 member"
+        "CAST 1"
     else
-        std.fmt.bufPrint(&buf, "{d} members", .{member_count}) catch "members";
-    const badge_w = Canvas.uiTextWidth(members) + 16;
+        std.fmt.bufPrint(&buf, "CAST {d}", .{member_count}) catch "CAST";
+    const badge_w = Canvas.uiTextWidth(members) + 24;
     const badge_x = x + @max(108, width - badge_w - 8);
-    if (hovered) fillRoundedRect(c, x + 5, y + 3, @max(1, badge_x - x - 10), @max(1, height - 6), 7, current.navigation_hover);
-    fillRoundedRect(c, badge_x, y + 4, badge_w, @max(1, height - 8), 7, current.navigation_hover);
-    const action = "Connection";
-    const action_w = if (hovered and badge_x - x >= 250) Canvas.uiTextWidth(action) + 18 else 0;
-    drawEllipsized(c, status, x + 25, y + 4, badge_x - x - 33 - action_w, if (hovered) current.navigation_ink else current.navigation_muted);
-    if (action_w > 0) {
-        _ = c.drawUiText(action, badge_x - action_w + 2, y + 4, current.navigation_ink);
-        _ = c.drawUiText(">", badge_x - 12, y + 4, current.navigation_muted);
-    }
-    _ = c.drawUiText(members, badge_x + 8, y + 4, current.navigation_ink);
+    if (hovered) c.fillRect(x + 4, y + 4, @max(1, badge_x - x - 10), @max(1, height - 8), current.navigation_hover);
+    drawInkChip(c, .{ .x = badge_x, .y = y + 3, .w = badge_w, .h = @max(1, height - 6) }, members, false);
+    const needs_connect = statusTone(status) != .success;
+    const action = if (needs_connect) "Wire" else "Live";
+    const action_w = if (needs_connect or hovered or badge_x - x >= 220) Canvas.uiTextWidth(action) + 28 else 0;
+    drawEllipsized(c, status, x + 24, y + 5, badge_x - x - 34 - action_w, current.navigation_ink);
+    if (action_w > 0) drawInkChip(c, .{ .x = badge_x - action_w - 6, .y = y + 3, .w = action_w, .h = @max(1, height - 6) }, action, needs_connect or hovered);
 }
 
 pub fn statusTone(status: []const u8) NoticeTone {
-    if (std.mem.indexOf(u8, status, "connected") != null and std.mem.indexOf(u8, status, "reconnecting") == null) return .success;
+    if (std.mem.eql(u8, status, "On the wire")) return .success;
     if (std.mem.indexOf(u8, status, "error") != null or std.mem.indexOf(u8, status, "failed") != null) return .failure;
-    if (std.mem.indexOf(u8, status, "reconnect") != null or std.mem.indexOf(u8, status, "offline") != null) return .warning;
+    if (std.mem.indexOf(u8, status, "nickname in use") != null) return .warning;
+    if (std.mem.indexOf(u8, status, "reconnect") != null or std.mem.indexOf(u8, status, "offline") != null or std.mem.indexOf(u8, status, "Disconnected") != null or std.mem.indexOf(u8, status, "disconnected") != null) return .warning;
+    if (std.mem.indexOf(u8, status, "connected") != null) return .success;
     return .info;
 }
 
-pub fn drawEmptyState(c: *Canvas, x: i32, y: i32, width: i32, height: i32, detail: []const u8, requested_columns: u8) void {
-    c.fillRect(x, y, width, height, current.workspace);
-    if (width < 360 or height < 170) {
-        const label = "Type a message to start the scene";
-        drawEllipsized(c, label, x + 16, y + @max(8, @divTrunc(height - 17, 2)), width - 32, current.secondary);
+pub fn drawEmptyState(c: *Canvas, x: i32, y: i32, width: i32, height: i32, title: []const u8, detail: []const u8, requested_columns: u8) void {
+    c.fillRect(x, y, width, height, current.comic_paper);
+    if (width < 360 or height < 140) {
+        drawEllipsized(c, detail, x + 16, y + @max(8, @divTrunc(height - 17, 2)), width - 32, current.secondary);
         return;
     }
-    const page_w = @min(620, @max(280, width - 56));
-    const page_h = @min(390, @max(170, height - 32));
-    const page_x = x + @divTrunc(width - page_w, 2);
-    const page_y = y + @divTrunc(height - page_h, 2);
-    drawSurface(c, .{ .x = page_x, .y = page_y, .w = page_w, .h = page_h }, .raised);
+    const card_w = @min(420, @max(260, width - 72));
+    const card_h: i32 = 108;
+    const card_x = x + @divTrunc(width - card_w, 2);
+    const card_y = y + @max(16, height - card_h - 20);
+    _ = requested_columns;
+    drawEmptyCaption(c, .{ .x = card_x, .y = card_y, .w = card_w, .h = card_h }, title, detail);
+}
 
-    c.fillRect(page_x + 1, page_y + 1, page_w - 2, 42, current.paper);
-    c.fillRect(page_x + 1, page_y + 42, page_w - 2, 1, current.divider);
-    fillRoundedRect(c, page_x + 16, page_y + 13, 16, 16, 5, current.accent);
-    _ = c.drawUiText("New scene", page_x + 44, page_y + 11, current.ink);
-    const columns: i32 = std.math.clamp(@as(i32, requested_columns), 1, 6);
-    var layout_buf: [20]u8 = undefined;
-    const layout_label = std.fmt.bufPrint(&layout_buf, "{d} panels across", .{columns}) catch "4 panels across";
-    const layout_w = Canvas.uiTextWidth(layout_label) + 20;
-    drawPill(c, .{ .x = page_x + page_w - layout_w - 12, .y = page_y + 10, .w = layout_w, .h = 23 }, layout_label, true);
-
-    const gutter: i32 = 10;
-    const inner_x = page_x + 16;
-    const inner_y = page_y + 58;
-    const inner_w = page_w - 32;
-    const available_panel_h = page_h - 132;
-    const panel_w = @divTrunc(inner_w - (columns - 1) * gutter, columns);
-    const panel_h = @min(available_panel_h, panel_w);
-    const panels_y = inner_y + @divTrunc(available_panel_h - panel_h, 2);
-    var column: i32 = 0;
-    while (column < columns) : (column += 1) {
-        const panel_x = inner_x + column * (panel_w + gutter);
-        const actual_w = if (column == columns - 1) inner_x + inner_w - panel_x else panel_w;
-        drawRoundedBorder(c, panel_x, panels_y, actual_w, panel_h, 3, if (column == 0) current.layer else current.chrome, current.paper_ink);
-        fillRoundedRect(c, panel_x + 10, panels_y + 10, 20, 4, 2, if (column == 0) current.accent else current.divider);
-        var number_buf: [8]u8 = undefined;
-        const number = std.fmt.bufPrint(&number_buf, "{d}", .{column + 1}) catch "1";
-        _ = c.drawUiText(number, panel_x + actual_w - Canvas.uiTextWidth(number) - 9, panels_y + 6, current.secondary);
-    }
-
-    drawEmptyStateCallout(c, .{ .x = inner_x, .y = page_y + page_h - 57, .w = inner_w, .h = 40 }, "Start the scene", detail);
+/// Caption overlay used when the source title panel already occupies the well.
+pub fn drawEmptyCaption(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8) void {
+    fillRoundedRect(c, rect.x + 3, rect.y + 4, rect.w, rect.h, 2, current.shadow);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 2, current.paper);
+    c.fillRect(rect.x, rect.y, 6, rect.h, current.accent);
+    drawInkRule(c, rect.x + 6, rect.y, 1, rect.h, current.ink);
+    const tip_x = rect.x + @divTrunc(rect.w, 2);
+    c.fillTriangle(tip_x - 8, rect.y, tip_x, rect.y - 8, tip_x + 8, rect.y, current.ink);
+    c.fillTriangle(tip_x - 6, rect.y, tip_x, rect.y - 6, tip_x + 6, rect.y, current.paper);
+    drawBrandMark(c, .{ .x = rect.x + 16, .y = rect.y + 12, .w = 20, .h = 20 });
+    drawEllipsized(c, "SUNDAY EDITION", rect.x + 44, rect.y + 8, rect.w - 60, current.accent);
+    drawEllipsized(c, title, rect.x + 44, rect.y + 26, rect.w - 60, current.ink);
+    drawEllipsized(c, detail, rect.x + 44, rect.y + 46, rect.w - 60, current.secondary);
+    c.fillRect(rect.x + 7, rect.bottom() - 3, @max(0, rect.w - 7), 3, current.ink);
 }
 
 /// Shared call-to-action for an otherwise empty workspace or list.
 pub fn drawEmptyStateCallout(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8) void {
-    fillRoundedRect(c, rect.x, rect.y, rect.w, rect.h, 8, current.accent_soft);
-    fillRoundedRect(c, rect.x + 10, rect.y + @divTrunc(rect.h - 18, 2), 18, 18, 6, current.accent);
+    drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, current.accent_soft);
+    c.fillRect(rect.x, rect.y, 4, rect.h, current.accent);
+    c.fillRect(rect.x + 4, rect.y, @max(0, rect.w - 4), 2, current.ink);
+    fillRoundedRect(c, rect.x + 10, rect.y + @divTrunc(rect.h - 18, 2), 18, 18, 3, current.accent);
     _ = c.drawUiText("+", rect.x + 15, rect.y + @divTrunc(rect.h - 18, 2), current.layer);
     const content_w = rect.w - 52;
-    if (rect.w < 230 or rect.h < 38) {
-        drawEllipsized(c, title, rect.x + 40, rect.y + @divTrunc(rect.h - 17, 2), content_w, current.ink);
+    if (rect.h < 38) {
+        drawEllipsized(c, if (detail.len != 0) detail else title, rect.x + 40, rect.y + @divTrunc(rect.h - 17, 2), content_w, current.ink);
         return;
     }
     drawEllipsized(c, title, rect.x + 40, rect.y + 4, content_w, current.ink);
@@ -1664,6 +1808,29 @@ pub fn drawEllipsized(c: *Canvas, text: []const u8, x: i32, y: i32, max_width: i
     _ = c.drawUiText(dots, x + Canvas.uiTextWidth(text[0..end]), y, color);
 }
 
+test "page well frames the comic paper with ink" {
+    const testing = std.testing;
+    var canvas = try Canvas.init(testing.allocator, 120, 80);
+    defer canvas.deinit(testing.allocator);
+    canvas.clear(current.workspace);
+    drawPageWell(&canvas, .{ .x = 4, .y = 4, .w = 112, .h = 72 });
+    try testing.expectEqual(current.comic_paper, canvas.px[6 + 6 * 120]);
+    try testing.expectEqual(current.ink, canvas.px[30 + 10 * 120]);
+    try testing.expectEqual(current.artwork_paper, canvas.px[16 + 16 * 120]);
+}
+
+test "structural ink rules stay two framebuffer pixels" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(i32, 2), stroke);
+    var canvas = try Canvas.init(testing.allocator, 32, 16);
+    defer canvas.deinit(testing.allocator);
+    canvas.clear(current.paper);
+    drawInkRule(&canvas, 4, 6, 12, 1, current.ink);
+    try testing.expectEqual(current.ink, canvas.px[4 + 6 * 32]);
+    try testing.expectEqual(current.ink, canvas.px[4 + 7 * 32]);
+    try testing.expectEqual(current.paper, canvas.px[4 + 8 * 32]);
+}
+
 test "primary buttons and focused fields use the shared accent" {
     const testing = std.testing;
     var canvas = try Canvas.init(testing.allocator, 160, 80);
@@ -1689,7 +1856,10 @@ test "dialog layout keeps fields and actions inside the modal" {
 test "semantic feedback primitives classify status and button targets" {
     const layout = DialogLayout.init(640, 430, 252, 218, 2, 96, true);
     try std.testing.expectEqual(NoticeTone.success, statusTone("connected"));
+    try std.testing.expectEqual(NoticeTone.success, statusTone("On the wire"));
     try std.testing.expectEqual(NoticeTone.warning, statusTone("reconnecting"));
+    try std.testing.expectEqual(NoticeTone.warning, statusTone("nickname in use"));
+    try std.testing.expectEqual(NoticeTone.warning, statusTone("Disconnected"));
     try std.testing.expectEqual(NoticeTone.failure, statusTone("connection failed"));
     try std.testing.expectEqual(DialogButton.primary, dialogButtonAt(layout, layout.primary.x + 1, layout.primary.y + 1).?);
     try std.testing.expectEqual(DialogButton.cancel, dialogButtonAt(layout, layout.cancel.x + 1, layout.cancel.y + 1).?);
@@ -1709,7 +1879,7 @@ test "ellipsized labels preserve complete words when possible" {
     var canvas = try Canvas.init(std.testing.allocator, 160, 32);
     defer canvas.deinit(std.testing.allocator);
     canvas.clear(current.layer);
-    drawEllipsized(&canvas, "Connection setup options", 2, 4, Canvas.uiTextWidth("Connection setup..."), current.ink);
+    drawEllipsized(&canvas, "Wire setup options", 2, 4, Canvas.uiTextWidth("Wire setup..."), current.ink);
     var marked = false;
     for (canvas.px) |pixel| {
         if (pixel != current.layer) {
@@ -1797,8 +1967,8 @@ test "control states resolve selected pressed and disabled colors consistently" 
 test "dark and accent appearances resolve complete draw-time palettes" {
     const dark_violet = Appearance{ .mode = .dark, .accent = .violet, .high_contrast = true };
     const palette = paletteFor(dark_violet);
-    try std.testing.expectEqual(@as(u32, 0xff171c28), palette.chrome);
-    try std.testing.expectEqual(@as(u32, 0xffb39aff), palette.accent);
+    try std.testing.expectEqual(@as(u32, 0xff1c1814), palette.chrome);
+    try std.testing.expectEqual(@as(u32, 0xffc9a0ff), palette.accent);
     try std.testing.expectEqual(@as(u32, 0xffffffff), palette.ink);
     try std.testing.expectEqual(@as(u32, 0xff4a2428), palette.notice_failure);
 }

@@ -1133,6 +1133,16 @@ const PendingDcc = struct {
 
 const TransferStatus = enum(u8) { waiting, running, completed, cancelled, failed };
 
+fn transferStatusLabel(status: TransferStatus) []const u8 {
+    return switch (status) {
+        .waiting => "Waiting",
+        .running => "Transferring",
+        .completed => "Completed",
+        .cancelled => "Cancelled",
+        .failed => "Failed",
+    };
+}
+
 const DccWorkerContext = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -1310,9 +1320,9 @@ const ChatState = struct {
     fn setConnectionFailure(self: *ChatState, err: anyerror) void {
         self.status = std.fmt.bufPrint(
             &self.status_storage,
-            "Connection failed ({s}) - click for settings",
-            .{@errorName(err)},
-        ) catch "Connection failed - click for settings";
+            "Wire failed ({s}) - open Wire setup",
+            .{connectionFailureDetail(err)},
+        ) catch "Wire failed - open Wire setup";
     }
 
     fn rememberDccOffer(self: *ChatState, gpa: std.mem.Allocator, sender: []const u8, offer: cc.proto.dcc.SendOffer) !void {
@@ -1566,6 +1576,34 @@ fn applyNetworkEvent(event: NetworkEvent, state: *ChatState) bool {
     };
 }
 
+fn connectionFailureDetail(err: anyerror) []const u8 {
+    const name = @errorName(err);
+    if (std.mem.indexOf(u8, name, "Tls") != null or std.mem.indexOf(u8, name, "Certificate") != null) return "TLS";
+    if (std.mem.indexOf(u8, name, "Refused") != null) return "refused";
+    if (std.mem.indexOf(u8, name, "TimedOut") != null or std.mem.indexOf(u8, name, "Timeout") != null) return "timeout";
+    if (std.mem.indexOf(u8, name, "Reset") != null) return "reset";
+    if (std.mem.indexOf(u8, name, "Unreachable") != null or std.mem.indexOf(u8, name, "UnknownHost") != null or std.mem.indexOf(u8, name, "Name") != null) return "unreachable";
+    return "wire";
+}
+
+fn shouldPersistViewLayout(action: cc.client.view.Action) bool {
+    return switch (action) {
+        .persist_layout => true,
+        .toolbar => |index| index == 5 or index == 6 or index == 8,
+        else => false,
+    };
+}
+
+fn persistViewLayout(io: std.Io, view: *cc.client.view.View, preferences: *cc.client.preferences.Store, path: []const u8) !void {
+    preferences.setUiLayout(
+        view.shell.content_mode == .text,
+        view.shell.comic_columns,
+        view.shell.show_members,
+        view.shell.member_view == .list,
+    );
+    try preferences.saveFile(io, path);
+}
+
 fn resetChatConnectionState(state: *ChatState) void {
     state.joined = false;
     state.join_requested = false;
@@ -1592,7 +1630,7 @@ fn tickBackgroundFeatures(
         if (view.active_dialog == .file_transfer) {
             var amount: [96]u8 = undefined;
             try view.setDialogValueAt(3, try std.fmt.bufPrint(&amount, "{d} / {d} bytes", .{ transferred, transfer.context.expected_size orelse 0 }));
-            try view.setDialogValueAt(4, @tagName(transfer_status));
+            try view.setDialogValueAt(4, transferStatusLabel(transfer_status));
         }
         if (transfer_status != .waiting and transfer_status != .running and !transfer.terminal_announced) {
             if (transfer.thread) |thread| {
@@ -1616,7 +1654,7 @@ fn tickBackgroundFeatures(
     const preferences = &network.runtime.preferences;
     if (state.notification_poll_pending == 0 and
         preferences.notifications.items.len != 0 and
-        !std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled") and
+        !cc.client.dialogs.matchesAny(preferences.notificationDelivery(), &.{ "Off", "Disabled" }) and
         (state.last_notification_poll_ms == 0 or now_ms -| state.last_notification_poll_ms >= 60_000))
     {
         for (state.notification_current.items) |entry| workspace.gpa.free(entry);
@@ -1653,9 +1691,9 @@ fn runInteractivePollBackend(
     const posix = std.posix;
 
     const win = if (comptime @hasDecl(Backend.Window, "openWithDisplay"))
-        try Backend.Window.openWithDisplay(gpa, 960, 720, "Reinked", display orelse return error.DisplayUnset)
+        try Backend.Window.openWithDisplay(gpa, 960, 720, "Comic Chat / Sunday", display orelse return error.DisplayUnset)
     else
-        try Backend.Window.open(gpa, 960, 720, "Reinked");
+        try Backend.Window.open(gpa, 960, 720, "Comic Chat / Sunday");
     defer win.deinit();
     var view = try cc.client.view.View.init(gpa, win.width, win.height);
     defer view.deinit();
@@ -1767,7 +1805,7 @@ fn runInteractivePollBackend(
 fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick: []const u8, channel: []const u8, startup_document: ?[]const u8, runtime: *ConnectionRuntime, io: std.Io) !void {
     const Win32 = cc.platform.win32;
 
-    const win = try Win32.Window.open(gpa, 960, 720, "Reinked");
+    const win = try Win32.Window.open(gpa, 960, 720, "Comic Chat / Sunday");
     defer win.deinit();
     var view = try cc.client.view.View.init(gpa, win.width, win.height);
     defer view.deinit();
@@ -1867,6 +1905,8 @@ fn handleWindowEvent(
                 break :key_result .{ .redraw = true };
             }
             const previous_dialog = view.active_dialog;
+            if (view.handleMenuAccelerator(key, key_input.modifiers.alt)) |_|
+                break :key_result .{ .redraw = true };
             if (view.handleContextMenuKey(key)) |action| {
                 const keep_running = switch (action) {
                     .send_expression => expression: {
@@ -1883,7 +1923,7 @@ fn handleWindowEvent(
             if (view.handleFocusedActionKey(key)) |action| {
                 const keep_running = switch (action) {
                     .quit => false,
-                    .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data),
+                    .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data, &network.runtime.preferences, network.runtime.preferences_path),
                     .connection => connection: {
                         view.openConnectionDialog(network.host, network.reconnect.port, network.effectiveOptions().security == .tls);
                         break :connection true;
@@ -1904,6 +1944,7 @@ fn handleWindowEvent(
                     else => true,
                 };
                 if (previous_dialog != view.active_dialog) try prefillOpenedDialog(view, transcript, editor.text(), &network.runtime.preferences, state, network.clientPtr());
+                if (shouldPersistViewLayout(action)) try persistViewLayout(io, view, &network.runtime.preferences, network.runtime.preferences_path);
                 break :key_result .{ .keep_running = keep_running, .redraw = true };
             }
             if (view.handleMenuKey(key)) |action| {
@@ -1943,12 +1984,13 @@ fn handleWindowEvent(
                     .child_window => child: {
                         spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                             view.openDialog(.channel);
-                            view.setDialogNotice("A separate room window could not be started.");
+                            view.setDialogNotice("The room could not open aside.");
                         };
                         break :child true;
                     },
                     else => true,
                 };
+                if (shouldPersistViewLayout(action)) try persistViewLayout(io, view, &network.runtime.preferences, network.runtime.preferences_path);
                 break :key_result .{ .keep_running = keep_running, .redraw = true };
             }
             if (view.handleTranscriptKey(key, transcript.lines.items.len, key_input.modifiers.shift))
@@ -1970,7 +2012,7 @@ fn handleWindowEvent(
             if (key_input.modifiers.shift and handleEditorSelectionKey(editor, key))
                 break :key_result .{ .redraw = true };
             break :key_result .{
-                .keep_running = try handleWorkspaceInputKey(gpa, io, key, view, editor, client, workspace, nick, state.joined, state.ircx_data),
+                .keep_running = try handleWorkspaceInputKey(gpa, io, key, view, editor, client, workspace, nick, state.joined, state.ircx_data, &network.runtime.preferences, network.runtime.preferences_path),
                 .redraw = true,
             };
         },
@@ -1982,7 +2024,7 @@ fn handleWindowEvent(
                 try prefillOpenedDialog(view, transcript, editor.text(), &network.runtime.preferences, state, network.clientPtr());
             const keep_running = switch (action) {
                 .quit => false,
-                .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data),
+                .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data, &network.runtime.preferences, network.runtime.preferences_path),
                 .connection => connection: {
                     view.openConnectionDialog(network.host, network.reconnect.port, network.effectiveOptions().security == .tls);
                     break :connection true;
@@ -2047,7 +2089,7 @@ fn handleWindowEvent(
                 .child_window => child: {
                     spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                         view.openDialog(.channel);
-                        view.setDialogNotice("A separate room window could not be started.");
+                        view.setDialogNotice("The room could not open aside.");
                     };
                     break :child true;
                 },
@@ -2061,6 +2103,7 @@ fn handleWindowEvent(
                 },
                 else => true,
             };
+            if (shouldPersistViewLayout(action)) try persistViewLayout(io, view, &network.runtime.preferences, network.runtime.preferences_path);
             break :pointer_result .{ .keep_running = keep_running, .redraw = true };
         },
         .other => .{},
@@ -2122,17 +2165,26 @@ fn prefillOpenedDialog(
         .settings => {
             try view.setDialogValueAt(0, if (view.appearance.mode == .dark) "Dark studio" else "Light studio");
             try view.setDialogValueAt(1, switch (view.appearance.accent) {
-                .cobalt => "Cobalt",
+                .cobalt => "Vermillion",
                 .violet => "Violet",
                 .forest => "Forest",
             });
-            try view.setDialogValueAt(2, if (view.appearance.high_contrast) "High contrast" else "Standard");
+            try view.setDialogValueAt(2, if (view.appearance.high_contrast) "High contrast" else "Usual");
             try view.setDialogValueAt(3, if (view.shell.content_mode == .comic) "Comic" else "Text");
             var panels: [16]u8 = undefined;
             try view.setDialogValueAt(4, try std.fmt.bufPrint(&panels, "{d} panels", .{view.shell.comic_columns}));
             try view.setDialogValueAt(5, if (view.shell.show_members) "Shown" else "Hidden");
-            try view.setDialogValueAt(6, if (view.shell.member_view == .icons) "Icons" else "List");
-            try view.setDialogValueAt(7, if (view.status_detailed) "Detailed" else "Compact");
+            try view.setDialogValueAt(6, if (view.shell.member_view == .icons) "Portraits" else "List");
+            try view.setDialogValueAt(7, if (view.status_detailed) "Full" else "Tight");
+        },
+        .about => {
+            try view.setDialogValueAt(0, "Comic Chat");
+            try view.setDialogValueAt(1, "AGPL-3.0-or-later / printed page");
+        },
+        .comics_view => {
+            try view.setDialogValueAt(0, if (view.shell.content_mode == .comic) "Comic" else "Text");
+            var comics_panels: [16]u8 = undefined;
+            try view.setDialogValueAt(1, try std.fmt.bufPrint(&comics_panels, "{d} panels", .{view.shell.comic_columns}));
         },
         .character => {
             for (transcript.roster.items) |member| if (member.is_self and !member.departed) {
@@ -2152,7 +2204,7 @@ fn prefillOpenedDialog(
         },
         .background => try view.setDialogValueAt(0, transcript.resolvedBackdrop()),
         .automation => {
-            try view.setDialogValueAt(0, preferences.greetingMode());
+            try view.setDialogValueAt(0, if (cc.client.dialogs.matchesAny(preferences.greetingMode(), &.{ "Off", "None" })) "Off" else preferences.greetingMode());
             try view.setDialogValueAt(1, preferences.greeting.items);
             var number: [16]u8 = undefined;
             try view.setDialogValueAt(2, try std.fmt.bufPrint(&number, "{d}", .{preferences.auto_ignore_count}));
@@ -2161,7 +2213,13 @@ fn prefillOpenedDialog(
         .notifications => {
             try view.setDialogValueAt(1, "*");
             try view.setDialogValueAt(2, "*");
-            try view.setDialogValueAt(4, preferences.notificationDelivery());
+            const delivery = preferences.notificationDelivery();
+            try view.setDialogValueAt(4, if (cc.client.dialogs.matchesAny(delivery, &.{ "Off", "Disabled" }))
+                "Off"
+            else if (cc.client.dialogs.matchesAny(delivery, &.{ "Sound and page", "Sound and banner" }))
+                "Sound and page"
+            else
+                "Page banner");
         },
         .notification_users => {
             var online: std.ArrayList(u8) = .empty;
@@ -2170,12 +2228,12 @@ fn prefillOpenedDialog(
                 if (index != 0) try online.appendSlice(view.gpa, ", ");
                 try online.appendSlice(view.gpa, member);
             }
-            try view.setDialogValueAt(0, if (online.items.len == 0) "No matching users in the last refresh" else online.items);
+            try view.setDialogValueAt(0, if (online.items.len == 0) "No matching CAST on the last watch" else online.items);
             if (state.notification_current.items.len != 0) try view.setDialogValueAt(1, state.notification_current.items[0]);
-            try view.setDialogValueAt(2, "Refresh");
+            try view.setDialogValueAt(2, "Watch again");
         },
         .ircx_properties => try view.setDialogValueAt(0, ""),
-        .ircx_events => try view.setDialogValueAt(0, "List"),
+        .ircx_events => try view.setDialogValueAt(0, "Show"),
         .set_text_font, .text_font => {
             try view.setDialogValueAt(0, preferences.textFont());
             try view.setDialogValueAt(1, preferences.textStyle());
@@ -2194,15 +2252,29 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(0, "comicchat-print.pdf");
             try view.setDialogValueAt(1, "Save PDF");
         },
+        .setup => {
+            if (view.dialogValueAt(0).len == 0) {
+                try view.setDialogValueAt(0, if (client) |connected| connected.host else "eshmaki.me");
+                try view.setDialogValueAt(1, "6697");
+                try view.setDialogValueAt(2, "Verified TLS");
+            }
+        },
+        .servers => {
+            try view.setDialogValueAt(0, onyxWirePreset(if (client) |connected| connected.host else ""));
+            try view.setDialogValueAt(1, "6697");
+            try view.setDialogValueAt(2, "Verified TLS");
+        },
         .connection_features => {
-            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Disconnected");
-            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "SASL authenticated" else "Not authenticated" else "Unavailable");
-            try view.setDialogValueAt(2, if (state.ircx_data) "Enabled" else "Not enabled");
+            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext (unsafe)" else "Off the wire");
+            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Signing in" else "Off the wire");
+            try view.setDialogValueAt(2, if (state.ircx_data) "Live" else "Hold");
             if (client) |connected| {
                 var capabilities: std.ArrayList(u8) = .empty;
                 defer capabilities.deinit(view.gpa);
                 try connected.appendEnabledCapabilities(&capabilities, view.gpa);
-                try view.setDialogValueAt(3, if (capabilities.items.len == 0) "No capabilities enabled" else capabilities.items);
+                try view.setDialogValueAt(3, if (capabilities.items.len == 0) "None on this wire yet" else capabilities.items);
+            } else {
+                try view.setDialogValueAt(3, "Hold on the wire");
             }
         },
         .rule_sets => {
@@ -2226,8 +2298,8 @@ fn prefillOpenedDialog(
         .advanced_rule_settings => if (preferences.rules.items.len != 0) {
             const rule = preferences.rules.items[0];
             try view.setDialogValueAt(0, rule.name);
-            try view.setDialogValueAt(1, if (rule.enabled) "Yes" else "No");
-            try view.setDialogValueAt(2, if (rule.case_sensitive) "Yes" else "No");
+            try view.setDialogValueAt(1, if (rule.enabled) "On" else "Off");
+            try view.setDialogValueAt(2, if (rule.case_sensitive) "On" else "Off");
         },
         else => {},
     }
@@ -2426,13 +2498,13 @@ fn applyDialogAction(
     if (id == .setup or id == .servers) {
         const request = parseConnectionDialog(value, view.dialogValueAt(1), view.dialogValueAt(2)) catch |err| {
             view.setDialogNotice(switch (err) {
-                error.InvalidHost => "Enter a valid server name without spaces.",
+                error.InvalidHost => "Enter a valid host name without spaces.",
                 error.InvalidPort => "Port must be between 1 and 65535.",
             });
             return;
         };
         network.reconfigure(request.host, request.port, request.security, monotonicMilliseconds(io)) catch {
-            view.setDialogNotice("Could not start that connection. Check the server and security mode.");
+            view.setDialogNotice("Wire failed. Check the host and TLS.");
             return;
         };
         resetChatConnectionState(state);
@@ -2441,7 +2513,7 @@ fn applyDialogAction(
         return;
     }
     if (cc.client.dialogs.requiresInput(id) and value.len == 0) {
-        view.setDialogNotice("Complete the first field before continuing.");
+        view.setDialogNotice("Fill the first field first.");
         return;
     }
     const maybe_client = network.clientPtr();
@@ -2450,13 +2522,13 @@ fn applyDialogAction(
     switch (id) {
         .settings => {
             const dark_mode = std.ascii.eqlIgnoreCase(view.dialogValueAt(0), "Dark studio");
-            const accent: u8 = if (std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Violet")) 1 else if (std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Forest")) 2 else 0;
+            const accent: u8 = cc.client.dialogs.accentIndex(view.dialogValueAt(1));
             const high_contrast = std.ascii.eqlIgnoreCase(view.dialogValueAt(2), "High contrast");
             const text_mode = std.ascii.eqlIgnoreCase(view.dialogValueAt(3), "Text");
             const comic_columns = comicColumnsFromDialog(view.dialogValueAt(4));
             const members_visible = !std.ascii.eqlIgnoreCase(view.dialogValueAt(5), "Hidden");
             const member_list = std.ascii.eqlIgnoreCase(view.dialogValueAt(6), "List");
-            const status_detailed = !std.ascii.eqlIgnoreCase(view.dialogValueAt(7), "Compact");
+            const status_detailed = !cc.client.dialogs.matchesAny(view.dialogValueAt(7), &.{ "Tight", "Compact" });
             preferences.setUiLayout(text_mode, comic_columns, members_visible, member_list);
             preferences.setUiTheme(dark_mode, accent, high_contrast, status_detailed);
             try preferences.saveFile(io, network.runtime.preferences_path);
@@ -2464,17 +2536,17 @@ fn applyDialogAction(
         },
         .room_list => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before browsing rooms.");
+                view.setDialogNotice("Connect first to browse rooms.");
                 return;
             };
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.mem.indexOfAny(u8, value, " \r\n\x00") != null) {
-                view.setDialogNotice("Separate LISTX terms with commas, not spaces.");
+                view.setDialogNotice("Separate search terms with commas, not spaces.");
                 return;
             }
             if (limit.len != 0) {
                 for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("The LISTX result limit must be a number.");
+                    view.setDialogNotice("The room search cap must be a number.");
                     return;
                 };
             }
@@ -2494,20 +2566,43 @@ fn applyDialogAction(
             _ = workspace.activate(index);
             if (maybe_client) |client| try client.joinWithKey(value, view.dialogValueAt(1));
         },
+        .invitation => {
+            const client = maybe_client orelse {
+                view.setDialogNotice("Connect first to accept an invitation.");
+                return;
+            };
+            const index = workspace.ensure(value) catch {
+                view.setDialogNotice("Enter a valid room beginning with # or &.");
+                return;
+            };
+            _ = workspace.activate(index);
+            try client.join(value);
+        },
+        .channel_password => {
+            const client = maybe_client orelse {
+                view.setDialogNotice("Connect first to unlock a room.");
+                return;
+            };
+            try client.joinWithKey(room.name, value);
+        },
+        .password => {
+            view.setDialogNotice("Wire account passwords stay in the password file.");
+            return;
+        },
         .channel_create => {
             const creation_modes = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             const limit = std.mem.trim(u8, view.dialogValueAt(3), " \t");
             if (creation_modes.len != 0 and std.mem.indexOfAny(u8, creation_modes, " \r\n\x00") != null) {
-                view.setDialogNotice("Enter modes as one token, for example +nt.");
+                view.setDialogNotice("Enter room options as one word, without spaces.");
                 return;
             }
             if (limit.len != 0) {
                 for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
+                    view.setDialogNotice("CAST cap must be a positive number.");
                     return;
                 };
                 if ((std.fmt.parseUnsigned(u32, limit, 10) catch 0) == 0) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
+                    view.setDialogNotice("CAST cap must be a positive number.");
                     return;
                 }
             }
@@ -2522,6 +2617,7 @@ fn applyDialogAction(
         .comics_view => {
             view.setContentMode(if (std.ascii.eqlIgnoreCase(view.dialogValueAt(0), "Text")) .text else .comic);
             view.shell.setComicColumns(comicColumnsFromDialog(view.dialogValueAt(1)));
+            try persistViewLayout(io, view, preferences, network.runtime.preferences_path);
         },
         .character => {
             const selected = cc.comic.session.bundledAvatarByName(value) orelse return;
@@ -2530,7 +2626,7 @@ fn applyDialogAction(
         },
         .background => {
             const selected = cc.comic.session.bundledBackdropByName(value) orelse {
-                view.setDialogNotice("Choose one of the bundled Comic Chat backdrops.");
+                view.setDialogNotice("Choose a bundled backdrop.");
                 return;
             };
             try room.transcript.setBackdrop(selected);
@@ -2559,7 +2655,7 @@ fn applyDialogAction(
         },
         .channel_properties => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before changing room properties.");
+                view.setDialogNotice("Connect first to change room properties.");
                 return;
             };
             try client.setTopic(room.name, value);
@@ -2572,11 +2668,11 @@ fn applyDialogAction(
         },
         .ircx_properties => {
             if (!state.ircx_data) {
-                view.setDialogNotice("IRCX properties require an IRCX-enabled connection.");
+                view.setDialogNotice("Connect first.");
                 return;
             }
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before using room properties.");
+                view.setDialogNotice("Connect first to use room properties.");
                 return;
             };
             const entity = if (value.len == 0) room.name else value;
@@ -2584,12 +2680,12 @@ fn applyDialogAction(
             const property_value = view.dialogValueAt(2);
             const operation = view.dialogValueAt(3);
             if (std.mem.indexOfAny(u8, entity, " \r\n\x00") != null or std.mem.indexOfAny(u8, property, " \r\n\x00") != null or hasWireControl(property_value)) {
-                view.setDialogNotice("Channel and property names cannot contain spaces; values must stay on one line.");
+                view.setDialogNotice("Room and property names cannot contain spaces; values must stay on one line.");
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Get common")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Get common", "Get common properties", "Read common", "Read common properties" })) {
                 try client.queryProperty(entity, "OID,NAME,CREATION,LANGUAGE,TOPIC,SUBJECT,CLIENT,ONJOIN,ONPART,LAG");
-            } else if (std.ascii.eqlIgnoreCase(operation, "Get")) {
+            } else if (cc.client.dialogs.matchesAny(operation, &.{ "Get", "Read" })) {
                 if (property.len == 0) {
                     view.setDialogNotice("Enter one or more comma-separated property names.");
                     return;
@@ -2600,48 +2696,48 @@ fn applyDialogAction(
                     view.setDialogNotice("Enter the property to change.");
                     return;
                 }
-                try client.setProperty(entity, property, if (std.ascii.eqlIgnoreCase(operation, "Delete")) "" else property_value);
+                try client.setProperty(entity, property, if (cc.client.dialogs.matchesAny(operation, &.{ "Delete", "Remove" })) "" else property_value);
             }
         },
         .room_access => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Room access controls require an IRCX-enabled connection.");
+                view.setDialogNotice("Connect first.");
                 return;
             }
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before changing room access.");
+                view.setDialogNotice("Connect first to change room access.");
                 return;
             };
             const operation = value;
-            const level = view.dialogValueAt(1);
+            const level = cc.client.dialogs.accessLevelToken(view.dialogValueAt(1));
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
-            if (std.ascii.eqlIgnoreCase(operation, "List")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "List", "Show" })) {
                 try client.accessList(room.name);
-            } else if (std.ascii.eqlIgnoreCase(operation, "Delete") or std.ascii.eqlIgnoreCase(operation, "Clear")) {
-                if (mask.len == 0 and !std.ascii.eqlIgnoreCase(operation, "Clear")) {
-                    view.setDialogNotice("Enter the nickname mask to delete.");
+            } else if (cc.client.dialogs.matchesAny(operation, &.{ "Delete", "Remove", "Clear", "Clear all" })) {
+                if (mask.len == 0 and !cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear all" })) {
+                    view.setDialogNotice("Enter the name pattern to remove.");
                     return;
                 }
-                if (!std.ascii.eqlIgnoreCase(operation, "Clear") and std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
-                    view.setDialogNotice("Use one nickname mask without spaces.");
+                if (!cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear all" }) and std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
+                    view.setDialogNotice("Use one name pattern without spaces.");
                     return;
                 }
-                if (std.ascii.eqlIgnoreCase(operation, "Clear"))
+                if (cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear all" }))
                     try client.accessClear(room.name, level)
                 else
                     try client.accessDelete(room.name, level, mask);
             } else {
                 if (mask.len == 0) {
-                    view.setDialogNotice("Enter a nickname mask such as nick!*@*.");
+                    view.setDialogNotice("Enter a name pattern, such as nick!*@*.");
                     return;
                 }
                 const timeout = std.mem.trim(u8, view.dialogValueAt(3), " \t");
                 for (timeout) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("The ACCESS timeout must be a number of minutes.");
+                    view.setDialogNotice("Timeout must be a number of minutes.");
                     return;
                 };
                 if (std.mem.indexOfAny(u8, mask, " \r\n\x00") != null or hasWireControl(view.dialogValueAt(4))) {
-                    view.setDialogNotice("Use a single nickname mask and a one-line reason.");
+                    view.setDialogNotice("Use a single name pattern and a one-line reason.");
                     return;
                 }
                 try client.accessAdd(room.name, level, mask, view.dialogValueAt(3), view.dialogValueAt(4));
@@ -2649,25 +2745,25 @@ fn applyDialogAction(
         },
         .ircx_events => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Operator event subscriptions require an IRCX-enabled connection.");
+                view.setDialogNotice("Connect first.");
                 return;
             }
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before managing operator events.");
+                view.setDialogNotice("Connect first to manage room events.");
                 return;
             };
             const operation = value;
-            const event = std.mem.trim(u8, view.dialogValueAt(1), " \t");
+            const event = cc.client.dialogs.eventNameToken(std.mem.trim(u8, view.dialogValueAt(1), " \t"));
             const mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.mem.indexOfAny(u8, mask, " \r\n\x00") != null) {
-                view.setDialogNotice("The optional event mask must be one token.");
+                view.setDialogNotice("The optional event filter must be one word.");
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "List")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "List", "Show" })) {
                 try client.eventList(event);
             } else {
                 if (event.len == 0 or std.mem.indexOfAny(u8, event, " \r\n\x00") != null) {
-                    view.setDialogNotice("Enter one IRCX event name.");
+                    view.setDialogNotice("Choose one event.");
                     return;
                 }
                 try client.eventChange(std.ascii.eqlIgnoreCase(operation, "Add"), event, mask);
@@ -2677,7 +2773,7 @@ fn applyDialogAction(
             const count = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(2), " \t"), 10) catch 8;
             const interval = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(3), " \t"), 10) catch 10;
             if (count == 0 or interval == 0) {
-                view.setDialogNotice("Flood limits must be positive numbers.");
+                view.setDialogNotice("Repeat cap must be a positive number.");
                 return;
             }
             if (hasWireControl(view.dialogValueAt(1))) {
@@ -2689,11 +2785,11 @@ fn applyDialogAction(
         },
         .rules, .edit_rule => {
             if (value.len == 0) {
-                view.setDialogNotice("Give the rule a name.");
+                view.setDialogNotice("Name the rule.");
                 return;
             }
             if (hasWireControl(view.dialogValueAt(4))) {
-                view.setDialogNotice("Automation action values must stay on one line.");
+                view.setDialogNotice("Action text must stay on one line.");
                 return;
             }
             try preferences.upsertRule(.{
@@ -2717,12 +2813,12 @@ fn applyDialogAction(
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Advanced limits")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Rule caps", "Rule limits", "Advanced limits" })) {
                 view.openDialog(.advanced_event_params);
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Advanced matching")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Rule matching", "Advanced matching" })) {
                 view.openDialog(.advanced_rule_settings);
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
@@ -2736,12 +2832,12 @@ fn applyDialogAction(
                 };
             } else if (std.ascii.eqlIgnoreCase(operation, "Import")) {
                 preferences.importRulesFile(io, path) catch {
-                    view.setDialogNotice("Could not import that .ccrules file.");
+                    view.setDialogNotice("That rule file could not open.");
                     return;
                 };
             } else if (std.ascii.eqlIgnoreCase(operation, "Export")) {
                 preferences.exportRulesFile(io, path, if (set_name.len == 0) null else set_name) catch {
-                    view.setDialogNotice("Could not export rules to that location.");
+                    view.setDialogNotice("That rule file could not save.");
                     return;
                 };
             }
@@ -2756,7 +2852,7 @@ fn applyDialogAction(
         },
         .rename_loaded_set, .rename_set => {
             preferences.renameRuleSet(value, view.dialogValueAt(1)) catch {
-                view.setDialogNotice("Choose an existing set and enter a new name.");
+                view.setDialogNotice("Choose an existing set and enter a new set name.");
                 return;
             };
             try preferences.saveFile(io, network.runtime.preferences_path);
@@ -2770,11 +2866,11 @@ fn applyDialogAction(
         },
         .advanced_event_params => {
             const maximum = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(1), " \t"), 10) catch {
-                view.setDialogNotice("Maximum occurrences must be a number.");
+                view.setDialogNotice("Repeat cap must be a number.");
                 return;
             };
             const interval = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(2), " \t"), 10) catch {
-                view.setDialogNotice("Interval seconds must be a number.");
+                view.setDialogNotice("Repeat window must be a number.");
                 return;
             };
             const rule = findRule(preferences, value) orelse {
@@ -2789,13 +2885,13 @@ fn applyDialogAction(
                 view.setDialogNotice("Choose an existing rule.");
                 return;
             };
-            rule.enabled = std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Yes");
-            try preferences.configureRule(value, std.ascii.eqlIgnoreCase(view.dialogValueAt(2), "Yes"), rule.maximum_occurrences, rule.interval_s);
+            rule.enabled = cc.client.dialogs.matchesAny(view.dialogValueAt(1), &.{ "On", "Yes" });
+            try preferences.configureRule(value, cc.client.dialogs.matchesAny(view.dialogValueAt(2), &.{ "On", "Yes" }), rule.maximum_occurrences, rule.interval_s);
             try preferences.saveFile(io, network.runtime.preferences_path);
         },
         .notifications => {
             if (value.len == 0) {
-                view.setDialogNotice("Enter a nickname or * pattern to watch.");
+                view.setDialogNotice("Enter a name or * pattern to watch.");
                 return;
             }
             const delivery = view.dialogValueAt(4);
@@ -2805,27 +2901,27 @@ fn applyDialogAction(
                 .user_mask = if (view.dialogValueAt(1).len == 0) "*" else view.dialogValueAt(1),
                 .host_mask = if (view.dialogValueAt(2).len == 0) "*" else view.dialogValueAt(2),
                 .network = view.dialogValueAt(3),
-                .enabled = !std.ascii.eqlIgnoreCase(delivery, "Disabled"),
+                .enabled = !cc.client.dialogs.matchesAny(delivery, &.{ "Off", "Disabled" }),
             });
             try preferences.saveFile(io, network.runtime.preferences_path);
             state.last_notification_poll_ms = 0;
         },
         .notification_users => {
             const operation = view.dialogValueAt(2);
-            if (std.ascii.eqlIgnoreCase(operation, "Refresh")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Watch again", "Refresh" })) {
                 state.notification_poll_pending = 0;
                 state.last_notification_poll_ms = 0;
-                view.setDialogNotice("The saved notification rules will be queried now.");
+                view.setDialogNotice("Watch CAST will query the wire now.");
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Clear list")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Clear", "Clear list" })) {
                 for (state.notification_current.items) |entry| gpa.free(entry);
                 state.notification_current.clearRetainingCapacity();
                 for (state.notification_previous.items) |entry| gpa.free(entry);
                 state.notification_previous.clearRetainingCapacity();
             } else if (std.ascii.eqlIgnoreCase(operation, "Join room")) {
                 const client = maybe_client orelse {
-                    view.setDialogNotice("Connect before joining a room.");
+                    view.setDialogNotice("Connect first to join a room.");
                     return;
                 };
                 const target_room = std.mem.trim(u8, view.dialogValueAt(3), " \t");
@@ -2838,19 +2934,19 @@ fn applyDialogAction(
             } else {
                 const member = std.mem.trim(u8, view.dialogValueAt(1), " \t");
                 if (!containsIgnoreCase(state.notification_current.items, member)) {
-                    view.setDialogNotice("Choose a member from the refreshed online list.");
+                    view.setDialogNotice("Choose a CAST member from the refreshed live list.");
                     return;
                 }
                 if (std.ascii.eqlIgnoreCase(operation, "Whisper")) {
                     const selected = selectRosterMember(&room.transcript, member) orelse {
-                        view.setDialogNotice("That online user is not in this room.");
+                        view.setDialogNotice("That CAST member is not in this room.");
                         return;
                     };
                     view.shell.selectMember(selected);
                     view.shell.setSayMode(.whisper);
-                } else if (std.ascii.eqlIgnoreCase(operation, "Invite to current room")) {
+                } else if (cc.client.dialogs.matchesAny(operation, &.{ "Invite CAST", "Invite to current room" })) {
                     const client = maybe_client orelse {
-                        view.setDialogNotice("Connect before sending an invitation.");
+                        view.setDialogNotice("Connect first to send an invitation.");
                         return;
                     };
                     try client.invite(member, room.name);
@@ -2860,7 +2956,7 @@ fn applyDialogAction(
         .file_transfer => try applyFileTransferDialog(gpa, io, view, maybe_client, state, room),
         .call_link => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before sending a call link.");
+                view.setDialogNotice("Connect first to send a call link.");
                 return;
             };
             const link = view.dialogValueAt(1);
@@ -2869,18 +2965,18 @@ fn applyDialogAction(
                 return;
             }
             if (selectRosterMember(&room.transcript, value) == null) {
-                view.setDialogNotice("That member is not in the current room.");
+                view.setDialogNotice("That CAST member is not in the current room.");
                 return;
             }
             try client.sendCallLink(value, link);
         },
         .member_profile => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before requesting a member profile.");
+                view.setDialogNotice("Connect first to request a CAST profile.");
                 return;
             };
             if (selectRosterMember(&room.transcript, value) == null) {
-                view.setDialogNotice("That member is not in the current room.");
+                view.setDialogNotice("That CAST member is not in the current room.");
                 return;
             }
             try client.requestProfile(value, state.ircx_data);
@@ -2888,22 +2984,22 @@ fn applyDialogAction(
         },
         .sound => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before sending a sound.");
+                view.setDialogNotice("Connect first to send a sound.");
                 return;
             };
             if (std.mem.indexOfAny(u8, value, "\r\n\x00\x01") != null) {
-                view.setDialogNotice("Choose a valid sound name.");
+                view.setDialogNotice("Choose a valid sound.");
                 return;
             }
             const accompanying_message = view.dialogValueAt(1);
             const is_private = view.shell.say_mode == .whisper;
             const target = if (is_private) target: {
                 const member_index = view.shell.selected_member orelse {
-                    view.setDialogNotice("Select a room member before sending a whisper sound.");
+                    view.setDialogNotice("Choose a CAST member before sending a whisper sound.");
                     return;
                 };
                 if (member_index >= room.transcript.roster.items.len or room.transcript.roster.items[member_index].departed) {
-                    view.setDialogNotice("That member is no longer in the room.");
+                    view.setDialogNotice("That CAST member is no longer in the room.");
                     return;
                 }
                 break :target room.transcript.roster.items[member_index].nick;
@@ -2943,7 +3039,7 @@ fn applyDialogAction(
         .invite => if (maybe_client) |client| try client.invite(value, room.name),
         .user_list, .whisper => {
             const selected = selectRosterMember(&room.transcript, value) orelse {
-                view.setDialogNotice("That member is not in the current room.");
+                view.setDialogNotice("That CAST member is not in the current room.");
                 return;
             };
             view.shell.selectMember(selected);
@@ -2951,7 +3047,7 @@ fn applyDialogAction(
         },
         .open_conversation => {
             var loaded = cc.client.files.loadConversation(io, gpa, value) catch {
-                view.setDialogNotice("Could not open that conversation file.");
+                view.setDialogNotice("That conversation could not open.");
                 return;
             };
             errdefer loaded.deinit();
@@ -2963,7 +3059,7 @@ fn applyDialogAction(
             try preferences.saveFile(io, network.runtime.preferences_path);
         },
         .recent_files => {
-            if (std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Remove from list")) {
+            if (cc.client.dialogs.matchesAny(view.dialogValueAt(1), &.{ "Remove", "Remove from list" })) {
                 _ = preferences.removeRecentFile(value);
                 try preferences.saveFile(io, network.runtime.preferences_path);
             } else {
@@ -2982,7 +3078,7 @@ fn applyDialogAction(
         },
         .save_conversation => {
             cc.client.files.saveConversation(io, gpa, value, &room.transcript) catch {
-                view.setDialogNotice("Could not save to that location.");
+                view.setDialogNotice("That conversation could not save.");
                 return;
             };
             try preferences.rememberFile(value);
@@ -2990,19 +3086,19 @@ fn applyDialogAction(
         },
         .open_locator => {
             const document = std.Io.Dir.cwd().readFileAlloc(io, value, gpa, .limited(cc.client.files.max_document_bytes)) catch {
-                view.setDialogNotice("Could not open that chat locator.");
+                view.setDialogNotice("That locator could not open.");
                 return;
             };
             defer gpa.free(document);
             const locator = cc.client.files.parseLocator(document) catch {
-                view.setDialogNotice("That file is not a valid ComicChat locator.");
+                view.setDialogNotice("That file is not a Comic Chat locator.");
                 return;
             };
             var locator_room_index = workspace.active.?;
             const changes_server = if (locator.server) |server| !std.ascii.eqlIgnoreCase(server, network.host) else false;
             if (locator.channel) |located_room| {
                 const index = workspace.ensure(located_room) catch {
-                    view.setDialogNotice("The locator contains an invalid room.");
+                    view.setDialogNotice("That locator room is not valid.");
                     return;
                 };
                 _ = workspace.activate(index);
@@ -3018,7 +3114,7 @@ fn applyDialogAction(
             };
             if (locator.server) |server| if (changes_server) {
                 network.reconfigure(server, network.reconnect.port, network.effectiveOptions().security, monotonicMilliseconds(io)) catch {
-                    view.setDialogNotice("The locator server could not be opened.");
+                    view.setDialogNotice("The locator wire could not open.");
                     return;
                 };
                 resetChatConnectionState(state);
@@ -3027,40 +3123,40 @@ fn applyDialogAction(
         },
         .export_image => {
             const png = cc.render.png.encode(gpa, view.pixels(), view.width(), view.height()) catch {
-                view.setDialogNotice("Could not render the current view.");
+                view.setDialogNotice("The Sunday page could not render.");
                 return;
             };
             defer gpa.free(png);
             cc.client.files.saveBytesAtomic(io, gpa, value, png) catch {
-                view.setDialogNotice("Could not export to that location.");
+                view.setDialogNotice("The Sunday page could not export.");
                 return;
             };
         },
         .print_preview => {
             const pdf = cc.render.pdf.encode(gpa, view.pixels(), view.width(), view.height()) catch {
-                view.setDialogNotice("Could not create a printable preview.");
+                view.setDialogNotice("The Sunday PDF could not render.");
                 return;
             };
             defer gpa.free(pdf);
             cc.client.files.saveBytesAtomic(io, gpa, value, pdf) catch {
-                view.setDialogNotice("Could not save the printable PDF.");
+                view.setDialogNotice("The Sunday PDF could not save.");
                 return;
             };
             const print_action = view.dialogValueAt(1);
             if (std.ascii.eqlIgnoreCase(print_action, "Save PDF and open"))
                 openDesktopPath(window, gpa, value) catch {
-                    view.setDialogNotice("The PDF was saved, but no document viewer could be opened.");
+                    view.setDialogNotice("The Sunday PDF was saved; no viewer opened.");
                     return;
                 };
             if (std.ascii.eqlIgnoreCase(print_action, "Save PDF and print"))
                 printDesktopPath(window, gpa, value) catch {
-                    view.setDialogNotice("The PDF was saved, but no desktop print service was available.");
+                    view.setDialogNotice("The Sunday PDF was saved; no print service is available.");
                     return;
                 };
         },
         .favorite_rooms => {
             const operation = view.dialogValueAt(1);
-            if (std.ascii.eqlIgnoreCase(operation, "Add current room")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Add this room", "Add current room" })) {
                 try preferences.addFavoriteRoom(room.name);
                 try preferences.saveFile(io, network.runtime.preferences_path);
             } else if (std.ascii.eqlIgnoreCase(operation, "Remove")) {
@@ -3082,7 +3178,7 @@ fn applyDialogAction(
 
 fn browseDialogFile(gpa: std.mem.Allocator, window: anytype, view: *cc.client.view.View, id: cc.client.dialogs.Id) !void {
     if (comptime !@hasDecl(@TypeOf(window.*), "chooseFile")) {
-        view.setDialogNotice("Native file selection is unavailable on this platform; enter a path.");
+        view.setDialogNotice("Choose a path; this platform has no file picker.");
         return;
     } else {
         const save = switch (id) {
@@ -3096,7 +3192,7 @@ fn browseDialogFile(gpa: std.mem.Allocator, window: anytype, view: *cc.client.vi
             else => 0,
         };
         const selected = window.chooseFile(gpa, save, cc.client.dialogs.get(id).title) catch {
-            view.setDialogNotice("The desktop file picker could not be opened; enter a path.");
+            view.setDialogNotice("The file picker could not open; choose a path.");
             return;
         };
         if (selected) |path| {
@@ -3202,12 +3298,12 @@ fn applyFileTransferDialog(
     }
 
     const client = maybe_client orelse {
-        view.setDialogNotice("Connect before sending a file.");
+        view.setDialogNotice("Connect first to send a file.");
         return;
     };
     const target = std.mem.trim(u8, view.dialogValueAt(1), " \t");
     if (selectRosterMember(&room.transcript, target) == null) {
-        view.setDialogNotice("Select a member who is still in the current room.");
+        view.setDialogNotice("Choose a CAST member who is still in the current room.");
         return;
     }
     const path = std.mem.trim(u8, view.dialogValueAt(2), " \t");
@@ -3222,11 +3318,11 @@ fn applyFileTransferDialog(
     errdefer gpa.free(payload);
     if (payload.len == 0) {
         gpa.free(payload);
-        view.setDialogNotice("Empty files cannot be sent with the legacy DCC protocol.");
+        view.setDialogNotice("Empty files cannot be sent.");
         return;
     }
     const host_ip = parseIpv4Number(view.dialogValueAt(3)) orelse {
-        view.setDialogNotice("Enter the reachable IPv4 address peers should connect to.");
+        view.setDialogNotice("Enter the IPv4 address the other CAST member should connect to.");
         return;
     };
     const port = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(4), " \t"), 10) catch {
@@ -3312,6 +3408,11 @@ const ConnectionDialogRequest = struct {
     security: cc.net.client.Security,
 };
 
+fn onyxWirePreset(host: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(host, "ircx.us")) return "ircx.us";
+    return "eshmaki.me";
+}
+
 fn parseConnectionDialog(host_text: []const u8, port_text: []const u8, security_text: []const u8) error{ InvalidHost, InvalidPort }!ConnectionDialogRequest {
     const host = std.mem.trim(u8, host_text, " \t");
     if (host.len == 0 or host.len > 253 or std.mem.indexOfAny(u8, host, " \t\r\n\x00") != null) return error.InvalidHost;
@@ -3336,12 +3437,22 @@ test "connection dialog validates a usable endpoint" {
     try std.testing.expectError(error.InvalidPort, parseConnectionDialog("eshmaki.me", "nope", "Verified TLS"));
 }
 
+test "wire list preset prefers live Onyx nodes" {
+    try std.testing.expectEqualStrings("eshmaki.me", onyxWirePreset(""));
+    try std.testing.expectEqualStrings("eshmaki.me", onyxWirePreset("example.test"));
+    try std.testing.expectEqualStrings("eshmaki.me", onyxWirePreset("eshmaki.me"));
+    try std.testing.expectEqualStrings("ircx.us", onyxWirePreset("IRCX.US"));
+}
+
 test "connection failures remain actionable" {
     var state: ChatState = .{ .joined = true, .join_requested = true };
     try std.testing.expect(applyNetworkEvent(.{ .retry_scheduled = error.ConnectionRefused }, &state));
     try std.testing.expect(!state.joined);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") != null);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "click for settings") != null);
+    try std.testing.expectEqualStrings("refused", connectionFailureDetail(error.ConnectionRefused));
+    try std.testing.expectEqualStrings("TLS", connectionFailureDetail(error.TlsHandshakeFailed));
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "refused") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "Wire failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "open Wire setup") != null);
 }
 
 test "comic view choices remain bounded and roster selection ignores departed users" {
@@ -3371,6 +3482,8 @@ fn handleWorkspaceInputKey(
     nick: []const u8,
     connected: bool,
     ircx_data: bool,
+    preferences: *cc.client.preferences.Store,
+    preferences_path: []const u8,
 ) !bool {
     if (key == .enter and editor.text().len > 0) {
         const text = editor.text();
@@ -3381,7 +3494,7 @@ fn handleWorkspaceInputKey(
             while (lines.next()) |line| {
                 if (line.len == 0) continue;
                 try editor.paste(line);
-                if (!try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, maybe_client, workspace, nick, connected, ircx_data)) return false;
+                if (!try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, maybe_client, workspace, nick, connected, ircx_data, preferences, preferences_path)) return false;
             }
             return true;
         }
@@ -3444,7 +3557,13 @@ fn handleWorkspaceInputKey(
         }
     }
     const room = workspace.activeRoom() orelse return true;
-    return handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, room.joined or connected, ircx_data);
+    const mode = view.shell.content_mode;
+    const members = view.shell.show_members;
+    const columns = view.shell.comic_columns;
+    const keep_running = try handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, room.joined or connected, ircx_data);
+    if (view.shell.content_mode != mode or view.shell.show_members != members or view.shell.comic_columns != columns)
+        try persistViewLayout(io, view, preferences, preferences_path);
+    return keep_running;
 }
 
 fn processWorkspaceMessages(
@@ -3650,18 +3769,18 @@ fn finishNotificationWho(gpa: std.mem.Allocator, state: *ChatState, workspace: *
     for (state.notification_current.items) |current| {
         if (!containsIgnoreCase(state.notification_previous.items, current)) {
             var text: [256]u8 = undefined;
-            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched member is online.", .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} is on the wire.", .{current}) catch "A watched CAST is on the wire.", .{ .modes = cc.proto.udi.bm_action });
             if (state.desktop_notification) |old| gpa.free(old);
-            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} is online.", .{current}) catch "A watched member is online.");
+            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} is on the wire.", .{current}) catch "A watched CAST is on the wire.");
             changed = true;
         }
     }
     for (state.notification_previous.items) |previous| {
         if (!containsIgnoreCase(state.notification_current.items, previous)) {
             var text: [256]u8 = undefined;
-            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched member went offline.", .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Notification", std.fmt.bufPrint(&text, "{s} went off the wire.", .{previous}) catch "A watched CAST went off the wire.", .{ .modes = cc.proto.udi.bm_action });
             if (state.desktop_notification) |old| gpa.free(old);
-            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} went offline.", .{previous}) catch "A watched member went offline.");
+            state.desktop_notification = try gpa.dupe(u8, std.fmt.bufPrint(&text, "{s} went off the wire.", .{previous}) catch "A watched CAST went off the wire.");
             changed = true;
         }
     }
@@ -3675,7 +3794,7 @@ fn deliverDesktopNotification(window: anytype, gpa: std.mem.Allocator, state: *C
     const message = state.desktop_notification orelse return;
     defer gpa.free(message);
     state.desktop_notification = null;
-    if (comptime @hasDecl(@TypeOf(window.*), "notify")) window.notify(gpa, "Reinked", message) catch {};
+    if (comptime @hasDecl(@TypeOf(window.*), "notify")) window.notify(gpa, "Comic Chat", message) catch {};
 }
 
 fn containsIgnoreCase(items: []const []u8, needle: []const u8) bool {
@@ -3705,7 +3824,7 @@ fn observeFlood(state: *ChatState, gpa: std.mem.Allocator, nick: []const u8, now
 }
 
 fn sendAutomaticGreeting(client: *cc.net.client.Client, preferences: *const cc.client.preferences.Store, channel: []const u8, nick: []const u8) !void {
-    if (preferences.greeting.items.len == 0 or hasWireControl(preferences.greeting.items) or std.ascii.eqlIgnoreCase(preferences.greetingMode(), "None")) return;
+    if (preferences.greeting.items.len == 0 or hasWireControl(preferences.greeting.items) or cc.client.dialogs.matchesAny(preferences.greetingMode(), &.{ "Off", "None" })) return;
     const text = try replaceNickToken(client.gpa, preferences.greeting.items, nick);
     defer client.gpa.free(text);
     try client.privmsg(if (std.ascii.eqlIgnoreCase(preferences.greetingMode(), "Whisper")) nick else channel, text);
@@ -3748,7 +3867,7 @@ fn runPersistentRules(
         if (std.ascii.eqlIgnoreCase(rule.action, "Ignore")) {
             suppress = true;
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Notify")) {
-            try transcript.addWithOptions("Automation", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
+            try transcript.addWithOptions("Greeting", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Reply")) {
             if (value.len != 0) try client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value);
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Action")) {
@@ -3804,6 +3923,11 @@ fn presentWorkspace(
         .unread = item.unread,
     };
     try view.renderTabs(status, &room.transcript, room.editor.text(), room.editor.cursor, room.editor.selection(), tabs[0..workspace.rooms.items.len], workspace.active.?);
+    if (comptime @hasDecl(@TypeOf(win.*), "setTitle")) {
+        var title_buf: [96]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buf, "Comic Chat / Sunday / {s}", .{room.name}) catch "Comic Chat / Sunday";
+        win.setTitle(title) catch {};
+    }
     try win.present(view.pixels(), view.width(), view.height());
 }
 
@@ -3832,7 +3956,7 @@ fn receiveDccOffer(
     const save_path = std.fmt.bufPrint(&destination, "received-{s}", .{filename}) catch "received-file.bin";
     try view.setDialogValueAt(2, save_path);
     var size_text: [64]u8 = undefined;
-    try view.setDialogValueAt(3, std.fmt.bufPrint(&size_text, "{d} bytes", .{offer.size.?}) catch "size unavailable");
+    try view.setDialogValueAt(3, std.fmt.bufPrint(&size_text, "{d} bytes", .{offer.size.?}) catch "size unknown");
     try view.setDialogValueAt(4, "Waiting for approval");
     view.setDialogNotice("Verify sender and save path before accepting.");
     return true;
@@ -3866,8 +3990,8 @@ fn receiveCallControl(client: *cc.net.client.Client, view: *cc.client.view.View,
     view.openDialog(.call_link);
     try view.setDialogValueAt(0, who);
     try view.setDialogValueAt(1, link);
-    try view.setDialogValueAt(2, "Incoming portable call invitation");
-    view.setDialogNotice("Copy the verified HTTPS link to your browser when you are ready.");
+    try view.setDialogValueAt(2, "Incoming safe-link invitation");
+    view.setDialogNotice("Copy the verified HTTPS link when you are ready.");
     _ = client;
     return true;
 }
@@ -4228,6 +4352,12 @@ fn runToPng(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
 /// Render the shared desktop shell without requiring an X11, Wayland, or
 /// Win32 window. This is both a release-preview command and a deterministic
 /// visual regression surface for the modern UI library.
+fn preview_status(surface: []const u8) []const u8 {
+    if (std.mem.eql(u8, surface, "offline")) return "offline";
+    if (std.mem.eql(u8, surface, "failed")) return "Wire failed - open Wire setup";
+    return "reconnecting";
+}
+
 fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
     const compact = std.mem.eql(u8, surface, "compact") or std.mem.startsWith(u8, surface, "compact-");
     var view = try cc.client.view.View.init(gpa, if (compact) 640 else 960, if (compact) 480 else 720);
@@ -4244,6 +4374,10 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
         try transcript.setAvatar("alex", "armando");
         try transcript.add("alex", "Welcome to #root. The new studio is ready.");
         try transcript.add("comicchat", "Great. The comic view feels much clearer now.");
+        for (transcript.roster.items) |*member| {
+            if (std.ascii.eqlIgnoreCase(member.nick, "comicchat")) member.role = .owner;
+            if (std.ascii.eqlIgnoreCase(member.nick, "alex")) member.role = .operator;
+        }
         if (std.mem.eql(u8, surface, "text-conversation")) {
             try transcript.add("comicchat", "The chat buffer now keeps a full thought together instead of turning every sentence into a separate visual interruption.");
             try transcript.add("alex", "That makes the room easier to scan when several people are talking at once.");
@@ -4265,18 +4399,30 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             .ircx_properties => {
                 try view.setDialogValueAt(0, "#root");
                 try view.setDialogValueAt(1, "TOPIC,ONJOIN");
-                try view.setDialogValueAt(3, "Get");
+                try view.setDialogValueAt(3, "Read");
             },
             .room_access => {
                 try view.setDialogValueAt(0, "Add");
-                try view.setDialogValueAt(1, "HOST");
+                try view.setDialogValueAt(1, "Host");
                 try view.setDialogValueAt(2, "alex!*@*");
                 try view.setDialogValueAt(3, "60");
                 try view.setDialogValueAt(4, "Room helper");
             },
             .ircx_events => {
-                try view.setDialogValueAt(0, "List");
-                try view.setDialogValueAt(1, "CHANNEL");
+                try view.setDialogValueAt(0, "Show");
+                try view.setDialogValueAt(1, "CAST");
+            },
+            .servers => {
+                try view.setDialogValueAt(0, "eshmaki.me");
+                try view.setDialogValueAt(1, "6697");
+                try view.setDialogValueAt(2, "Verified TLS");
+            },
+            .invitation => try view.setDialogValueAt(0, "#root"),
+            .connection_features => {
+                try view.setDialogValueAt(0, "Off the wire");
+                try view.setDialogValueAt(1, "Off the wire");
+                try view.setDialogValueAt(2, "Hold");
+                try view.setDialogValueAt(3, "Hold on the wire");
             },
             .file_transfer => {
                 try view.setDialogValueAt(0, "Receive offer");
@@ -4297,12 +4443,12 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
                 try view.setDialogValueAt(1, "*");
                 try view.setDialogValueAt(2, "*");
                 try view.setDialogValueAt(3, "eshmaki.me");
-                try view.setDialogValueAt(4, "In-app banner");
+                try view.setDialogValueAt(4, "Page banner");
             },
             .call_link => {
                 try view.setDialogValueAt(0, "alex");
                 try view.setDialogValueAt(1, "https://meet.example/room");
-                try view.setDialogValueAt(2, "Portable secure-link invitation");
+                try view.setDialogValueAt(2, "Portable safe-link invitation");
             },
             else => {},
         }
@@ -4340,6 +4486,10 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
         const layout = cc.client.geometry.Layout.compute(view.width(), view.height(), true, true);
         _ = view.handlePointer(.{ .kind = .down, .x = layout.body_camera.x + 30, .y = layout.body_camera.y + 60, .button = .secondary }, transcript.count(), transcript.roster.items.len);
     }
+    if (std.mem.eql(u8, surface, "failed")) {
+        view.openDialog(.setup);
+        view.setDialogNotice("Wire failed. Check the host and TLS.");
+    }
     const preview_input = if (std.mem.eql(u8, surface, "composer"))
         "A polished input should keep the caret visible even when the message becomes wider than the available composer field."
     else if (std.mem.eql(u8, surface, "composer-multiline"))
@@ -4353,9 +4503,9 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             .{ .label = "#portable-ui" },
             .{ .label = "#source-parity", .unread = 7 },
         };
-        try view.renderTabs("reconnecting", &transcript, preview_input, preview_input.len, null, &tabs, tabs.len - 1);
+        try view.renderTabs(preview_status(surface), &transcript, preview_input, preview_input.len, null, &tabs, tabs.len - 1);
     } else {
-        try view.render("#root", "reconnecting", &transcript, preview_input, preview_input.len);
+        try view.render("#root", preview_status(surface), &transcript, preview_input, preview_input.len);
     }
     const png = try cc.render.png.encode(gpa, view.pixels(), view.width(), view.height());
     defer gpa.free(png);
