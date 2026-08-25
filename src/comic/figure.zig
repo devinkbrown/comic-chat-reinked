@@ -27,6 +27,9 @@ pub const Rendered = struct {
     /// `CBody::m_requested` is not visual, but it is part of the exact state
     /// installed by `SetIndices` and must survive the portable assembly path.
     requested: bool = false,
+    /// Cropped generated Color/HD standing card. Comic layout must not
+    /// zoom these around the ground line (legs-only).
+    generated_standing: bool = false,
 
     pub fn deinit(self: *Rendered, gpa: std.mem.Allocator) void {
         self.image.deinit(gpa);
@@ -300,6 +303,7 @@ fn assembleDetailedForSourcePoseInner(
             .face_x = remappedSimpleFaceX(image, record.face.x, crop),
             .head_height = simpleHeadHeight(image.height),
             .requested = selected.requested,
+            .generated_standing = isGeneratedStanding(crop.applied, image),
         };
     }
 
@@ -357,6 +361,7 @@ fn assembleDetailedAnalysisInner(
             .image = image,
             .face_x = remappedSimpleFaceX(image, record.face.x, crop),
             .head_height = simpleHeadHeight(image.height),
+            .generated_standing = isGeneratedStanding(crop.applied, image),
         };
     }
 
@@ -433,6 +438,10 @@ fn selectAvailable(
 /// not the 240×280 pad. Do not replace this with `face.y`.
 fn simpleHeadHeight(image_height: u32) i32 {
     return @intCast(image_height / 2);
+}
+
+fn isGeneratedStanding(cropped_card: bool, image: Image) bool {
+    return cropped_card and image.height >= 80;
 }
 
 fn clampedFaceX(face_x: i32, width: u32) i32 {
@@ -1262,6 +1271,43 @@ test "OTHERMAPPED follows BytesToEmotion exact emotion and scaled intensity" {
     });
     try std.testing.expectEqual(@as(u16, 1), fallback.face.?.emotion_index);
     try std.testing.expectEqual(@as(u16, 9), fallback.torso.?.emotion_index);
+}
+
+test "Anna Color uses peach skin and a red top instead of a purple wash" {
+    const gpa = std.testing.allocator;
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var assembled = try assembleDetailedForText(gpa, color, "");
+    defer assembled.deinit(gpa);
+    try std.testing.expect(assembled.generated_standing);
+    try std.testing.expect(assembled.image.height > assembled.image.width);
+    try std.testing.expect(assembled.image.height >= 160);
+
+    var peach: usize = 0;
+    var red: usize = 0;
+    var purple: usize = 0;
+    for (assembled.image.pixels) |pixel| {
+        if (pixel >> 24 == 0) continue;
+        if (pixel & 0x00ffffff == 0x00ffffff) continue;
+        const red_ch: i32 = @as(u8, @truncate(pixel >> 16));
+        const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue_ch: i32 = @as(u8, @truncate(pixel));
+        if (red_ch == green_ch and green_ch == blue_ch) continue;
+        const max_c = @max(red_ch, @max(green_ch, blue_ch));
+        const min_c = @min(red_ch, @min(green_ch, blue_ch));
+        if (max_c < 40) continue;
+        if (max_c - min_c < 20) continue;
+        if (red_ch > green_ch + 15 and red_ch > blue_ch + 15 and green_ch + 25 > blue_ch)
+            peach += 1;
+        if (red_ch > 120 and red_ch > green_ch + 40 and red_ch > blue_ch + 40 and green_ch < 90)
+            red += 1;
+        if (blue_ch + 10 > red_ch and (blue_ch > green_ch + 20 or red_ch > green_ch + 20) and
+            @abs(red_ch - blue_ch) < 60)
+            purple += 1;
+    }
+    try std.testing.expect(peach > 80);
+    try std.testing.expect(red > 40);
+    try std.testing.expect(peach > purple);
+    try std.testing.expect(red > purple);
 }
 
 test "simple SetIndices uses gesture ordinal while OTHERMAPPED uses expression" {

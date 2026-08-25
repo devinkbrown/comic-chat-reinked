@@ -2827,7 +2827,10 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
 
 fn characterGalleryRect(layout: ui.DialogLayout, first_field: usize) Rect {
     var rect = layout.fieldRectScrolled(2, first_field);
-    rect.h = @min(96, @max(30, layout.primary.y - rect.y - 28));
+    // Standing Color/HD cards are ~93×189. A 96px strip contain-fits them into
+    // a sliver. Use the room down to the dialog buttons so the full silhouette
+    // stays readable.
+    rect.h = @min(220, @max(30, layout.primary.y - rect.y - 28));
     return rect;
 }
 
@@ -3163,6 +3166,14 @@ test "character gallery browses adjacent cast members and previews expression" {
     _ = try view.handleDialogKey(.right, .{});
     try std.testing.expectEqualStrings("Happy", view.dialogValueAt(1));
     try std.testing.expectEqualStrings("Happy", view.currentEmotionLabel());
+    try std.testing.expect(gallery.h >= 72);
+    const preview = ui.AssetPreviewLayout.card(.{
+        .x = cards.x + 6 + @divTrunc(cards.w - 16, 3),
+        .y = cards.y + 4,
+        .w = @divTrunc(cards.w - 16, 3) - 6,
+        .h = cards.h - 8,
+    });
+    try std.testing.expect(preview.artwork.h >= 40);
 }
 
 test "dialog keyboard focus includes actions and protects typed choices" {
@@ -3447,6 +3458,36 @@ test "bare historical names remap to Color for chrome and stay testdata in strip
     try std.testing.expectEqual(color.ptr, remapped.ptr);
     try std.testing.expectEqualStrings("anna color", session.colorCounterpart("anna"));
     try std.testing.expectEqualStrings("anna original", session.colorCounterpart("anna original"));
+}
+
+test "Anna Color chrome portrait is a full standing silhouette with local color" {
+    const data = strip.avatarByName("anna color") orelse return error.TestUnexpectedResult;
+    var portrait = try figure.chromePortrait(std.testing.allocator, data);
+    defer portrait.deinit(std.testing.allocator);
+    try std.testing.expect(portrait.height > portrait.width);
+    try std.testing.expect(portrait.height >= 160);
+    var peach: usize = 0;
+    var red: usize = 0;
+    var top_ink: usize = 0;
+    var bot_ink: usize = 0;
+    for (portrait.pixels, 0..) |pixel, index| {
+        if (pixel >> 24 == 0) continue;
+        if (pixel & 0x00ffffff == 0x00ffffff) continue;
+        const y = index / portrait.width;
+        const red_ch: i32 = @as(u8, @truncate(pixel >> 16));
+        const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue_ch: i32 = @as(u8, @truncate(pixel));
+        if (y < portrait.height / 3) top_ink += 1;
+        if (y >= (portrait.height * 2) / 3) bot_ink += 1;
+        if (red_ch > green_ch + 15 and red_ch > blue_ch + 15 and green_ch + 25 > blue_ch)
+            peach += 1;
+        if (red_ch > 120 and red_ch > green_ch + 40 and red_ch > blue_ch + 40 and green_ch < 90)
+            red += 1;
+    }
+    try std.testing.expect(peach > 80);
+    try std.testing.expect(red > 40);
+    try std.testing.expect(top_ink > 40);
+    try std.testing.expect(bot_ink > 40);
 }
 
 test "every selectable color avatar decodes to a visibly colored gallery portrait" {

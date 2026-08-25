@@ -4242,14 +4242,27 @@ fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io, variant: []const u8, forma
         .{ .speaker = "rebecca color", .text = "Masks and backdrops follow the old draw order." },
         .{ .speaker = "xeno color", .text = "The source renderer returns one complete page." },
     };
+    const wrap_lines = [_]cc.comic.strip.Line{
+        .{ .speaker = "anna color", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "anna color", .text = "A repeated speaker starts a fresh panel that must still show her face." },
+    };
     const lines: []const cc.comic.strip.Line = if (std.mem.eql(u8, variant, "empty"))
         &.{}
     else if (std.mem.eql(u8, variant, "color"))
         &color_lines
+    else if (std.mem.eql(u8, variant, "wrap"))
+        &wrap_lines
     else
         &source_lines;
-    const color_backdrop = bgByName("color apartment");
-    var image = if (std.mem.eql(u8, variant, "color") and color_backdrop != null)
+    const color_backdrop = bgByName("color apartment") orelse bgByName("color cafe");
+    const cafe = bgByName("color cafe");
+    var image = if (std.mem.eql(u8, variant, "wrap") and cafe != null)
+        try cc.comic.strip.renderWithOptions(gpa, lines, .{
+            .backdrop = cafe.?,
+            .page_columns = 4,
+            .reserve_page_columns = true,
+        })
+    else if ((std.mem.eql(u8, variant, "color") or std.mem.eql(u8, variant, "wrap")) and color_backdrop != null)
         try cc.comic.strip.renderWithOptions(gpa, lines, .{ .backdrop = color_backdrop.? })
     else
         try cc.comic.strip.render(gpa, lines);

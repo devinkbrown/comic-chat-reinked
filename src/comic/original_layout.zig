@@ -37,6 +37,11 @@ pub const Body = struct {
     face_x: i32,
     talk_to_ids: []const u32 = &.{},
     history: History = .{},
+    /// Generated Color/HD standing cards. Source zoom-in keeps the pre-zoom
+    /// top and crops around the ground line, which turns a full woman into
+    /// legs-only. Skip that branch so she stays a recognizable whole person.
+    /// Testdata bodies leave this false so goldens stay on `panel.cpp`.
+    keep_recognizable: bool = false,
 };
 
 pub const Placement = struct {
@@ -151,7 +156,7 @@ pub fn layoutScene(
             tops[i] = -unit_height + heights[i];
             body_width += widths[i];
         }
-    } else if (!establishing) {
+    } else if (!establishing and !anyKeepRecognizable(bodies)) {
         zoom_factor = @as(f64, @floatFromInt(unit_width)) / @as(f64, @floatFromInt(body_width));
         var max_head_height: i32 = 0;
         for (ordered, 0..) |_, i| max_head_height = @max(max_head_height, head_heights[i]);
@@ -201,6 +206,11 @@ pub fn layoutScene(
         };
         x_offset += widths[i] + margin;
     }
+    if (anyKeepRecognizable(bodies)) {
+        for (placements) |*placement| {
+            containRecognizableDest(&placement.rect, unit_height);
+        }
+    }
     // Direct port of `AdjustArtToCoord(-unitHeight + maxBodyHeight,
     // zoomFactor)`, panel.cpp:946-956. `SetBBox` takes left,bottom,right,top.
     const fixed_y = -unit_height + max_body_height;
@@ -213,6 +223,29 @@ pub fn layoutScene(
         .art_bbox = .{ .left = 0, .bottom = -log_height + delta, .right = log_width, .top = delta },
         .zoom_factor = zoom_factor,
     };
+}
+
+fn anyKeepRecognizable(bodies: []const Body) bool {
+    for (bodies) |body| if (body.keep_recognizable) return true;
+    return false;
+}
+
+/// Keep a generated standing dest inside the visible panel. Source zoom leaves
+/// the pre-zoom top and a taller dest, which crops a woman to feet. Shift and
+/// shrink so the dest contain-fits the full figure (or at least head+torso).
+fn containRecognizableDest(rect: *Rect, unit_height: i32) void {
+    if (unit_height <= 0) return;
+    if (rect.y < 0) {
+        rect.y = 0;
+    }
+    if (rect.h > unit_height) {
+        rect.h = unit_height;
+        rect.y = 0;
+    }
+    if (rect.y + rect.h > unit_height) {
+        rect.h = unit_height - rect.y;
+    }
+    if (rect.h < 1) rect.h = 1;
 }
 
 /// Port of `AddTalkTos`: starting with requested speakers, append addressed
@@ -356,6 +389,64 @@ pub fn mustStartNewPanel(
 ) bool {
     return forced or current_element_count >= 5 or
         existing_panel_count_including_title < 2 or speaker_already_present;
+}
+
+test "Anna Color continuation layout keeps zoom at 1" {
+    const gpa = std.testing.allocator;
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var assembled = try @import("figure.zig").assembleDetailedForText(gpa, color, "much clearer now.");
+    defer assembled.deinit(gpa);
+    try std.testing.expect(assembled.generated_standing);
+    const bodies = [_]Body{.{
+        .id = 1,
+        .width = @intCast(assembled.image.width),
+        .height = @intCast(assembled.image.height),
+        .head_height = assembled.head_height,
+        .face_x = assembled.face_x,
+        .keep_recognizable = assembled.generated_standing,
+    }};
+    var scene = try layoutScene(gpa, &bodies, default_unit_width, default_unit_height, false);
+    defer scene.deinit(gpa);
+    try std.testing.expectEqual(@as(f64, 1.0), scene.zoom_factor);
+    try std.testing.expect(scene.placements[0].rect.y >= 0);
+    try std.testing.expect(scene.placements[0].rect.y + scene.placements[0].rect.h <= default_unit_height);
+}
+
+test "generated standing figures skip the source zoom-in branch" {
+    const gpa = std.testing.allocator;
+    const zoomed = [_]Body{.{
+        .id = 11,
+        .width = 100,
+        .height = 200,
+        .norm_height = 100,
+        .head_height = 90,
+        .face_x = 25,
+    }};
+    const kept = [_]Body{.{
+        .id = 11,
+        .width = 100,
+        .height = 200,
+        .norm_height = 100,
+        .head_height = 90,
+        .face_x = 25,
+        .keep_recognizable = true,
+    }};
+    var scene_zoom = try layoutScene(gpa, &zoomed, default_unit_width, default_unit_height, false);
+    defer scene_zoom.deinit(gpa);
+    var scene_keep = try layoutScene(gpa, &kept, default_unit_width, default_unit_height, false);
+    defer scene_keep.deinit(gpa);
+    try std.testing.expect(scene_zoom.zoom_factor > 1.1);
+    try std.testing.expectEqual(@as(f64, 1.0), scene_keep.zoom_factor);
+    try std.testing.expect(scene_keep.placements[0].rect.h < scene_zoom.placements[0].rect.h);
+    try std.testing.expect(scene_keep.placements[0].rect.y >= 0);
+    try std.testing.expect(scene_keep.placements[0].rect.y + scene_keep.placements[0].rect.h <= default_unit_height);
+}
+
+test "containRecognizableDest pulls an oversized feet crop back into the panel" {
+    var feet = Rect{ .x = 100, .y = -800, .w = 400, .h = 4000 };
+    containRecognizableDest(&feet, default_unit_height);
+    try std.testing.expectEqual(@as(i32, 0), feet.y);
+    try std.testing.expectEqual(default_unit_height, feet.h);
 }
 
 test "source AddLine preflight preserves title-panel and repeat-speaker rules" {

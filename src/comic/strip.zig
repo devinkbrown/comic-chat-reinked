@@ -127,10 +127,12 @@ pub const PageCrop = struct {
     h: u32,
 };
 
-/// Choose the latest panels that fill `dest_w`×`dest_h` after a width-fit
-/// scale. Short pages return the whole image; tall pages crop from the bottom.
-/// Callers must still pass the full transcript prefix into `renderWithOptions`
-/// so AddLine / hysteresis / the shared CRT stream stay source-faithful.
+/// Choose the latest complete panel rows that fill `dest_w`×`dest_h` after a
+/// width-fit scale. Short pages return the whole image. Tall pages crop from
+/// the bottom on a panel-row boundary so a width-fit cannot slice Anna into
+/// legs on one row and hair on the next. Callers must still pass the full
+/// transcript prefix into `renderWithOptions` so AddLine / hysteresis / the
+/// shared CRT stream stay source-faithful.
 pub fn latestPageCrop(page_w: u32, page_h: u32, dest_w: u32, dest_h: u32) PageCrop {
     if (page_w == 0 or page_h == 0) return .{ .w = page_w, .h = page_h };
     if (dest_w == 0 or dest_h == 0) return .{ .w = page_w, .h = @min(page_h, panel_height) };
@@ -138,12 +140,19 @@ pub fn latestPageCrop(page_w: u32, page_h: u32, dest_w: u32, dest_h: u32) PageCr
         @as(u64, page_h),
         @divTrunc(@as(u64, dest_h) * page_w, dest_w),
     ));
-    const crop_h = @max(@as(u32, 1), visible_h);
+    const stride = panel_height + device_interstice;
+    const rows: u32 = if (stride == 0)
+        1
+    else
+        @max(@as(u32, 1), (visible_h + device_interstice) / stride);
+    const crop_h = @min(page_h, rows * panel_height + (rows - 1) * device_interstice);
+    var y: u32 = if (page_h > crop_h) page_h - crop_h else 0;
+    if (stride > 0 and y >= stride) y = (y / stride) * stride;
     return .{
         .x = 0,
-        .y = page_h - crop_h,
+        .y = y,
         .w = page_w,
-        .h = crop_h,
+        .h = page_h - y,
     };
 }
 
@@ -342,7 +351,8 @@ pub fn renderWithOptions(
             var balloon_random = original_balloon.MsvcrtRand.init(page_random.state);
             var trial_histories: std.ArrayList(HistoryEntry) = .empty;
             defer trial_histories.deinit(gpa);
-            const establishing = isEstablishing(planner.panelCount(), newed_panel);
+            const establishing = isEstablishing(planner.panelCount(), newed_panel) or
+                generatedFamilyAvatar(lineAvatar(input_line));
             var candidate = buildCandidate(
                 gpa,
                 base,
@@ -483,6 +493,13 @@ fn buildCandidate(
             };
         }
     } else {
+        // Balloon layout uppercases before it splits. A continuation leftover
+        // like "...CLEARER NOW." is all-caps and would select a shouting /
+        // kick pose. Generated standing cards then dest-overflow into
+        // legs-only. Keep the original line's pose so Color/HD Anna stays a
+        // whole person. Testdata goldens still use the leftover fragment.
+        const pose_source = input_line.pose_text orelse
+            if (generatedFamilyAvatar(lineAvatar(input_line))) input_line.text else request.words;
         var spoken = try OwnedLine.init(
             gpa,
             lineIdentity(input_line),
@@ -490,7 +507,7 @@ fn buildCandidate(
             lineAvatar(input_line),
             request.words,
             request_formatting,
-            input_line.pose_text orelse request.words,
+            pose_source,
             input_line.pose_state,
             input_line.talk_targets,
             request.modes,
@@ -608,6 +625,7 @@ fn renderScene(
         body.norm_height = 100;
         body.head_height = rendered[index].head_height;
         body.face_x = rendered[index].face_x;
+        body.keep_recognizable = rendered[index].generated_standing;
         body.history = historyFor(history_before, body.id);
     }
 
@@ -1103,6 +1121,10 @@ fn isEstablishing(panel_count: usize, newed_panel: bool) bool {
     return panel_count <= 1 or (!newed_panel and panel_count <= 2);
 }
 
+fn generatedFamilyAvatar(name: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(name, " color") or std.ascii.endsWithIgnoreCase(name, " hd");
+}
+
 fn updateNewedPanel(newed_panel: *bool, kind: original_page.AttemptKind, replace_last: bool) void {
     if (kind == .line) newed_panel.* = !replace_last;
 }
@@ -1554,8 +1576,71 @@ test "latest page crop keeps a short page and crops a tall page from the bottom"
     try std.testing.expectEqual(@as(u32, 650), short.w);
     try std.testing.expectEqual(@as(u32, 315), short.h);
 
-    const tall = latestPageCrop(650, 2000, 325, 315);
+    const three_rows = 3 * panel_height + 2 * device_interstice;
+    const tall = latestPageCrop(650, three_rows, 325, 315);
     try std.testing.expectEqual(@as(u32, 650), tall.w);
-    try std.testing.expectEqual(@as(u32, 630), tall.h);
-    try std.testing.expectEqual(@as(u32, 1370), tall.y);
+    try std.testing.expectEqual(panel_height, tall.h);
+    try std.testing.expectEqual(2 * (panel_height + device_interstice), tall.y);
+
+    const two_rows = 2 * panel_height + device_interstice;
+    const mid_row = latestPageCrop(4 * panel_width + 3 * device_interstice, two_rows, 700, 250);
+    try std.testing.expectEqual(panel_height, mid_row.h);
+    try std.testing.expectEqual(panel_height + device_interstice, mid_row.y);
+}
+
+test "Anna Color continuation keeps her head in the panel" {
+    const gpa = std.testing.allocator;
+    const lines = [_]Line{
+        .{ .speaker = "anna color", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "anna color", .text = "A repeated speaker starts a fresh panel that must still show her face." },
+    };
+    var image = try renderWithOptions(gpa, &lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try std.testing.expect(image.height >= panel_height);
+
+    const stride = panel_width + device_interstice;
+    const row_stride = panel_height + device_interstice;
+    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    const rows = if (image.height == panel_height) 1 else image.height / row_stride + 1;
+    var checked: usize = 0;
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var high_red: usize = 0;
+            var high_peach: usize = 0;
+            var y: u32 = 0;
+            while (y < panel_height) : (y += 1) {
+                var x: u32 = 0;
+                while (x < panel_width) : (x += 1) {
+                    const pixel = image.pixels[(y0 + y) * image.width + x0 + x];
+                    const red: i32 = @as(u8, @truncate(pixel >> 16));
+                    const green: i32 = @as(u8, @truncate(pixel >> 8));
+                    const blue: i32 = @as(u8, @truncate(pixel));
+                    if (red == green and green == blue) continue;
+                    if (red >= 245 and green >= 245 and blue >= 245) continue;
+                    if (y >= (panel_height * 6) / 10) continue;
+                    if (red > 120 and red > green + 40 and red > blue + 40 and green < 90)
+                        high_red += 1;
+                    if (red > green + 15 and red > blue + 15 and green + 25 > blue and
+                        red > 90 and red < 230 and green > 60 and blue > 40)
+                        high_peach += 1;
+                }
+            }
+            if (high_red + high_peach < 20) continue;
+            // A legs-only dest has the red top and face below the midline.
+            try std.testing.expect(high_peach > 10);
+            try std.testing.expect(high_red > 8);
+            checked += 1;
+        }
+    }
+    try std.testing.expect(checked >= 2);
 }

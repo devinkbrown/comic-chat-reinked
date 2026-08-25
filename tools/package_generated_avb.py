@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import colorsys
 import hashlib
-import math
 import struct
 from pathlib import Path
 
@@ -84,49 +83,82 @@ def normalize_pose(path: Path) -> Image.Image:
     return canvas
 
 
-def color_signature(path: Path) -> tuple[float, float]:
-    """Derive a stable hue and saturation from a colored character reference."""
-    reference = Image.open(path).convert("RGB")
-    hue_x = 0.0
-    hue_y = 0.0
-    saturation_total = 0.0
-    weight_total = 0.0
-    for red, green, blue in reference.getdata():
-        hue, saturation, value = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
-        if value > 0.96 or saturation < 0.16:
+def _chromatic_hue_bins(image: Image.Image) -> dict[int, int]:
+    bins: dict[int, int] = {}
+    for red, green, blue in image.get_flattened_data():
+        if red >= 245 and green >= 245 and blue >= 245:
             continue
-        weight = saturation * (1.0 - abs(value - 0.56))
-        hue_x += weight * math.cos(hue * 2.0 * math.pi)
-        hue_y += weight * math.sin(hue * 2.0 * math.pi)
-        saturation_total += saturation * weight
-        weight_total += weight
-    if weight_total == 0.0:
-        raise ValueError(f"{path} contains no usable colored reference pixels")
-    hue = 0.0 if hue_x == 0.0 and hue_y == 0.0 else (math.atan2(hue_y, hue_x) / (2.0 * math.pi)) % 1.0
-    return hue, max(0.28, min(0.72, saturation_total / weight_total))
+        hue, saturation, value = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
+        if value < 0.16 or saturation < 0.14:
+            continue
+        bucket = int(hue * 12) % 12
+        bins[bucket] = bins.get(bucket, 0) + 1
+    return bins
 
 
-def colorize_pose(pose: Image.Image, reference: Path) -> Image.Image:
-    """Tint a monochrome authored pose while preserving ink, shading, and matte."""
-    hue, base_saturation = color_signature(reference)
+def has_local_color(image: Image.Image) -> bool:
+    """True when the pose already has independently painted regions."""
+    bins = _chromatic_hue_bins(image)
+    chromatic = sum(bins.values())
+    if chromatic < 200:
+        return False
+    strong = sum(1 for count in bins.values() if count >= max(80, chromatic * 0.03))
+    return strong >= 2
+
+
+def _silhouette_bbox(image: Image.Image) -> tuple[int, int, int, int]:
+    inverted = ImageChops.invert(image.convert("RGB"))
+    bbox = inverted.getbbox()
+    if bbox is None:
+        raise ValueError("image contains no visible silhouette")
+    return bbox
+
+
+def transfer_local_color(pose: Image.Image, reference: Path) -> Image.Image:
+    """Copy the reference's per-region hues onto a grayscale pose.
+
+    Aligns silhouettes, then keeps the pose's ink and luminance so shading
+    stays put. This is not a one-hue wash: a red top and peach skin stay
+    different colors.
+    """
+    ref = Image.open(reference).convert("RGB")
+    pose_box = _silhouette_bbox(pose)
+    ref_box = _silhouette_bbox(ref)
+    pose_w = max(1, pose_box[2] - pose_box[0])
+    pose_h = max(1, pose_box[3] - pose_box[1])
+    ref_w = max(1, ref_box[2] - ref_box[0])
+    ref_h = max(1, ref_box[3] - ref_box[1])
+    ref_px = ref.load()
     result = pose.copy()
     pixels = result.load()
     for y in range(result.height):
         for x in range(result.width):
             red, green, blue = pixels[x, y]
-            value = (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255.0
             if red >= 245 and green >= 245 and blue >= 245:
                 continue
-            # Keep the generated line art crisp and nearly black; color the
-            # material areas proportionally to their original lightness.
-            if value < 0.30:
+            value = (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255.0
+            if value < 0.22:
                 ink = int(18 + value * 75)
                 pixels[x, y] = (ink, ink, ink)
                 continue
-            saturation = base_saturation * (0.54 + (1.0 - value) * 0.46)
-            colored = colorsys.hsv_to_rgb(hue, saturation, min(0.94, value * 1.08))
+            nx = min(1.0, max(0.0, (x - pose_box[0]) / pose_w))
+            ny = min(1.0, max(0.0, (y - pose_box[1]) / pose_h))
+            rx = min(ref.width - 1, ref_box[0] + int(nx * (ref_w - 1)))
+            ry = min(ref.height - 1, ref_box[1] + int(ny * (ref_h - 1)))
+            sample = ref_px[rx, ry]
+            hue, saturation, _ = colorsys.rgb_to_hsv(sample[0] / 255, sample[1] / 255, sample[2] / 255)
+            if saturation < 0.08:
+                continue
+            colored = colorsys.hsv_to_rgb(hue, min(0.85, saturation), min(0.94, value * 1.04))
             pixels[x, y] = tuple(round(channel * 255) for channel in colored)
     return result
+
+
+def colorize_pose(pose: Image.Image, reference: Path) -> Image.Image:
+    """Keep authored local color. Only paint grayscale poses from the reference."""
+    if has_local_color(pose):
+        return pose
+    return transfer_local_color(pose, reference)
 
 
 def bmp24(image: Image.Image) -> bytes:
@@ -212,7 +244,7 @@ def main() -> None:
     parser.add_argument("--copyright", required=True, dest="copyright_text")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--portrait-icon", action="store_true", help="crop the icon to a readable head-and-shoulders portrait")
-    parser.add_argument("--color-reference", type=Path, help="derive a character color treatment from this portrait")
+    parser.add_argument("--color-reference", type=Path, help="paint grayscale poses from this portrait's local colors; already-colored poses are kept")
     parser.add_argument("poses", nargs=len(POSES), type=Path, metavar="POSE")
     args = parser.parse_args()
     for pose in args.poses:
