@@ -135,6 +135,8 @@ const XConn = struct {
     utf16_string: u32 = 0,
     wm_state: u32 = 0,
     wm_change_state: u32 = 0,
+    randr_opcode: u8 = 0,
+    randr_event: u8 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -247,6 +249,7 @@ pub fn keysymToKey(sym: u32) Key {
     if (sym >= 0x01000000 and sym <= 0x0110ffff) return .{ .char = @intCast(sym - 0x01000000) };
     if (xkb.charForX11Cyrillic(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Latin2(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Greek(sym)) |ch| return .{ .char = ch };
     return switch (sym) {
         0xff08 => .backspace,
         0xff09 => .tab,
@@ -390,6 +393,7 @@ pub const Window = struct {
         if (self.conn.screen.root_depth != image_depth) return error.UnsupportedDepth;
 
         try internSessionAtoms(&self.conn);
+        enableRandr(&self.conn) catch {};
         self.scale = try detectScale(gpa, &self.conn, env, &self.pending_events);
         const pixel_w = try std.math.mul(u32, w, self.scale);
         const pixel_h = try std.math.mul(u32, h, self.scale);
@@ -518,6 +522,9 @@ pub const Window = struct {
 
     fn decode(self: *Window, event: [32]u8) Event {
         const kind = event[0] & 0x7f;
+        if (self.conn.randr_event != 0 and kind == self.conn.randr_event) {
+            return self.handleRandrScreenChange(event);
+        }
         switch (kind) {
             0 => return .close, // request error; treat as fatal for the UI
             2 => { // KeyPress
@@ -1321,6 +1328,13 @@ pub const Window = struct {
         self.wm_hidden = wmStateIsHidden(get32(event[12..16]));
     }
 
+    fn handleRandrScreenChange(self: *Window, event: [32]u8) Event {
+        const dims = randrScreenChangeSize(event);
+        if (dims.width_px != 0) self.conn.screen.width_px = dims.width_px;
+        if (dims.width_mm != 0) self.conn.screen.width_mm = dims.width_mm;
+        return self.refreshScale() orelse .other;
+    }
+
     fn refreshKeymap(self: *Window) void {
         const next = fetchKeymapStashing(self.gpa, &self.conn, &self.pending_events) catch return;
         self.keymap.deinit(self.gpa);
@@ -1995,6 +2009,49 @@ fn setNetWmState(conn: *XConn, window: u32, atoms: []const u32) !void {
 
 fn selectRootPropertyNotify(conn: *XConn) !void {
     try selectPropertyNotify(conn, conn.screen.root);
+}
+
+fn queryExtension(conn: *XConn, name: []const u8) !?struct { major: u8, first_event: u8 } {
+    const padded = pad4(name.len);
+    const req = try std.heap.page_allocator.alloc(u8, 8 + padded);
+    defer std.heap.page_allocator.free(req);
+    @memset(req, 0);
+    req[0] = 98;
+    put16(req[2..4], @intCast(req.len / 4));
+    put16(req[4..6], @intCast(name.len));
+    @memcpy(req[8 .. 8 + name.len], name);
+    try writeAll(conn, req);
+    const reply = try readReply(conn);
+    if (reply[1] == 0) return null;
+    return .{ .major = reply[8], .first_event = reply[9] };
+}
+
+fn enableRandr(conn: *XConn) !void {
+    const ext = (try queryExtension(conn, "RANDR")) orelse return;
+    if (ext.major == 0 or ext.first_event == 0) return;
+    conn.randr_opcode = ext.major;
+    conn.randr_event = ext.first_event;
+    var version_req: [12]u8 = @splat(0);
+    version_req[0] = ext.major;
+    put16(version_req[2..4], 3);
+    put32(version_req[4..8], 1);
+    put32(version_req[8..12], 2);
+    try writeAll(conn, &version_req);
+    _ = try readReply(conn);
+    var select_req: [12]u8 = @splat(0);
+    select_req[0] = ext.major;
+    select_req[1] = 4;
+    put16(select_req[2..4], 3);
+    put32(select_req[4..8], conn.screen.root);
+    put16(select_req[8..10], 1); // RRScreenChangeNotifyMask
+    try writeAll(conn, &select_req);
+}
+
+fn randrScreenChangeSize(event: [32]u8) struct { width_px: u16, width_mm: u16 } {
+    return .{
+        .width_px = get16(event[24..26]),
+        .width_mm = get16(event[28..30]),
+    };
 }
 
 fn sendXdndClientMessage(conn: *XConn, dest: u32, typ: u32, data: [5]u32) !void {
@@ -2720,9 +2777,20 @@ test "Keymap.translate uses group bits 13-14 without reading the next key" {
     try std.testing.expectEqual(Key{ .char = 0x0424 }, keysymToKey(0x06e6));
     try std.testing.expectEqual(Key{ .char = 0x0142 }, keysymToKey(0x01b3));
     try std.testing.expectEqual(Key{ .char = 0x0151 }, keysymToKey(0x01f5));
+    try std.testing.expectEqual(Key{ .char = 0x03b1 }, keysymToKey(0x07e1));
+    try std.testing.expectEqual(Key{ .char = 0x03a9 }, keysymToKey(0x07d8));
 
     var pair = [_]u32{ 'a', 'A', 'b', 'B' };
     const km2 = Keymap{ .syms = &pair, .per = 2, .min = 8 };
     try std.testing.expectEqual(Key{ .char = 'a' }, km2.translate(8, 1 << 13));
     try std.testing.expectEqual(Key{ .char = 'b' }, km2.translate(9, 0));
+}
+
+test "RANDR ScreenChangeNotify size fields sit at spec offsets 24 and 28" {
+    var event: [32]u8 = @splat(0);
+    put16(event[24..26], 3840);
+    put16(event[28..30], 600);
+    const dims = randrScreenChangeSize(event);
+    try std.testing.expectEqual(@as(u16, 3840), dims.width_px);
+    try std.testing.expectEqual(@as(u16, 600), dims.width_mm);
 }

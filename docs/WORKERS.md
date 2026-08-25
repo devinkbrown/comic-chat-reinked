@@ -93,12 +93,15 @@ hash.
   includes `text/plain;charset=utf8`, `text/uri-list`, and
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
   strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
-  stashes events that arrive during GetProperty. Central European Latin-2
-  / named keysyms type without an IME. X11 re-reads `Xft.dpi` when the root
-  `RESOURCE_MANAGER` property changes, falls back to screen millimeter
-  size, and reinstalls the scaled cursor plus physical WM size hints.
-  Wayland binds `wl_compositor` at v6 when advertised and honors
-  `preferred_buffer_scale`. Both backends track maximized/fullscreen
+  stashes events that arrive during GetProperty. Clipboard text normalizes
+  CR/LF to LF. Central European Latin-2, Greek, and named keysyms type
+  without an IME. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
+  property changes, listens for RANDR `ScreenChangeNotify`, falls back to
+  screen millimeter size, and reinstalls the scaled cursor plus physical
+  WM size hints. Wayland binds `wl_compositor` at v6 when advertised,
+  honors `preferred_buffer_scale`, and can derive integer scale from
+  output geometry millimeters when no scale event arrives. Keyboard enter
+  arms client-side repeat for a held non-modifier key. Both backends track maximized/fullscreen
   window state; X11 also tracks `_NET_WM_STATE_HIDDEN` and ICCCM
   `WM_STATE` / `WM_CHANGE_STATE`, and Wayland records tiled/suspended xdg
   states. When advertised, Wayland requests server-side decorations. X11 installs a scaled core cursor and `_NET_WM_ICON`, and

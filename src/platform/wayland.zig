@@ -439,6 +439,9 @@ pub const Window = struct {
     xdg_toplevel_id: u32 = 0,
     output_ids: [max_outputs]u32 = @splat(0),
     output_scales: [max_outputs]u32 = @splat(1),
+    output_width_px: [max_outputs]u32 = @splat(0),
+    output_width_mm: [max_outputs]u32 = @splat(0),
+    output_have_scale: [max_outputs]bool = @splat(false),
     output_count: u8 = 0,
     entered_outputs: [max_outputs]u32 = @splat(0),
     entered_count: u8 = 0,
@@ -885,18 +888,34 @@ pub const Window = struct {
             return null;
         }
         if (self.outputIndex(msg.object)) |index| {
-            if (msg.opcode == 3) {
-                if (msg.body.len != 4) return error.InvalidWaylandMessage;
-                const announced = getI32(msg.body);
-                if (announced > 0 and announced <= 8) {
-                    self.output_scales[index] = @intCast(announced);
-                    const previous = self.output_scale;
-                    self.output_scale = self.currentOutputScale();
-                    if (self.configured and previous != self.output_scale) {
-                        self.refreshFallbackCursor();
-                        return Event.expose;
+            switch (msg.opcode) {
+                0 => { // geometry(..., physical_width, physical_height, ...)
+                    if (msg.body.len < 16) return error.InvalidWaylandMessage;
+                    const mm = getI32(msg.body[8..12]);
+                    self.output_width_mm[index] = if (mm > 0) @intCast(mm) else 0;
+                    self.applyOutputMmScale(index);
+                },
+                1 => { // mode(flags, width, height, refresh)
+                    if (msg.body.len != 16) return error.InvalidWaylandMessage;
+                    const px = getI32(msg.body[4..8]);
+                    self.output_width_px[index] = if (px > 0) @intCast(px) else 0;
+                    self.applyOutputMmScale(index);
+                },
+                3 => { // scale(factor)
+                    if (msg.body.len != 4) return error.InvalidWaylandMessage;
+                    const announced = getI32(msg.body);
+                    if (announced > 0 and announced <= 8) {
+                        self.output_have_scale[index] = true;
+                        self.output_scales[index] = @intCast(announced);
                     }
-                }
+                },
+                else => {},
+            }
+            const previous = self.output_scale;
+            self.output_scale = self.currentOutputScale();
+            if (self.configured and previous != self.output_scale) {
+                self.refreshFallbackCursor();
+                return Event.expose;
             }
             return null;
         }
@@ -1497,6 +1516,21 @@ pub const Window = struct {
         self.alt_right = false;
         self.super_left = mods.super;
         self.super_right = false;
+        if (heldNonModifierFromKeyArray(keys)) |code| {
+            self.held_key_code = code;
+            self.held_key_shift = mods.shift;
+            self.held_key_control = mods.control;
+            if (self.repeat_delay_ms > 0) {
+                self.next_repeat_at_ms = nowMs(self.conn.io) +| @as(u64, @intCast(self.repeat_delay_ms));
+            }
+        }
+    }
+
+    fn applyOutputMmScale(self: *Window, index: usize) void {
+        if (self.output_have_scale[index]) return;
+        if (services.scaleFromScreenMm(self.output_width_px[index], self.output_width_mm[index])) |scale| {
+            self.output_scales[index] = scale;
+        }
     }
 
     fn surfaceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
@@ -2305,6 +2339,22 @@ fn heldModsFromKeyArray(keys: []const u8) HeldMods {
     return mods;
 }
 
+fn isModifierEvdev(code: u32) bool {
+    return switch (code) {
+        29, 42, 54, 56, 58, 97, 100, 125, 126 => true,
+        else => false,
+    };
+}
+
+fn heldNonModifierFromKeyArray(keys: []const u8) ?u32 {
+    var off: usize = 0;
+    while (off + 4 <= keys.len) : (off += 4) {
+        const code = get32(keys[off..][0..4]);
+        if (!isModifierEvdev(code)) return code;
+    }
+    return null;
+}
+
 fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
     return switch (code) {
         1 => .escape,
@@ -2895,6 +2945,13 @@ test "Wayland output scale follows the entered surface, then the max bound outpu
     try std.testing.expectEqual(@as(u32, 2), window.currentOutputScale());
     window.preferred_buffer_scale = 3;
     try std.testing.expectEqual(@as(u32, 3), window.currentOutputScale());
+    window.preferred_buffer_scale = 0;
+    window.entered_count = 0;
+    window.output_have_scale[0] = false;
+    window.output_width_px[0] = 3840;
+    window.output_width_mm[0] = 600;
+    window.applyOutputMmScale(0);
+    try std.testing.expectEqual(@as(u32, 2), window.output_scales[0]);
 }
 
 test "Wayland discrete axis wins over continuous axis in the same frame" {
@@ -3012,6 +3069,11 @@ test "keyboard-enter key array restores held modifiers" {
     try std.testing.expect(!mods.alt);
     try std.testing.expect(!mods.super);
     try std.testing.expect(!heldModsFromKeyArray(&.{}).shift);
+    var mixed: [8]u8 = undefined;
+    put32(mixed[0..4], 42);
+    put32(mixed[4..8], 30);
+    try std.testing.expectEqual(@as(u32, 30), heldNonModifierFromKeyArray(&mixed).?);
+    try std.testing.expect(heldNonModifierFromKeyArray(keys[0..4]) == null);
 }
 
 test "IME cursor rectangle sits on the bottom composer strip" {

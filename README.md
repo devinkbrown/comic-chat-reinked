@@ -278,15 +278,17 @@ min/max size, tracks maximized/fullscreen/tiled/suspended configure states,
 requests server-side decorations when advertised, copies through
 `wl_data_device` and `zwp_primary_selection_v1` (including
 `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
-decode including receive-only `text/plain;charset=utf-16`), injects
+decode including receive-only `text/plain;charset=utf-16`, and CR/LF
+normalized to LF), injects
 text/`file:` drops as typed keys with `data_offer.set_actions(copy)`, shows
 a `wp_cursor_shape_v1` or scaled shm pointer, and sets
 `xdg_toplevel_icon_v1` when advertised.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
-`RESOURCE_MANAGER` property changes, falling back to screen millimeter size,
-and reinstalling the scaled cursor plus physical WM size hints), owns ICCCM
+`RESOURCE_MANAGER` property changes, RANDR `ScreenChangeNotify`, and screen
+millimeter size, and reinstalling the scaled cursor plus physical WM size
+hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
 `text/uri-list`, `UTF16_STRING`, and `TIMESTAMP` (preferring the owner's
 TARGETS list), accepts XDND text/`file:`

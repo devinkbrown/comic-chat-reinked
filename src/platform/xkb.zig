@@ -13,8 +13,8 @@
 //! a third keysym, plus a second group when the keymap publishes two
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
 //! group-2 character of a non-US or dual-layout keymap actually correct.
-//! Named Central European letters and X11 Latin-2 keysyms (`0x01a0`–`0x01ff`)
-//! resolve to characters without an IME. A
+//! Named Central European letters, X11 Latin-2 keysyms (`0x01a0`–`0x01ff`),
+//! and Greek letters resolve to characters without an IME. A
 //! bounded dead-key / Multi_key composer plus optional XCompose locale
 //! tables (`~/.XCompose`,
 //! `XCOMPOSEFILE`, `%L`) cover European accents (see `Compose`). A
@@ -656,6 +656,60 @@ const named_latin_ext_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Tcommaaccent", 0x021a },
 });
 
+const named_greek_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "Greek_ALPHA", 0x0391 },
+    .{ "Greek_BETA", 0x0392 },
+    .{ "Greek_GAMMA", 0x0393 },
+    .{ "Greek_DELTA", 0x0394 },
+    .{ "Greek_EPSILON", 0x0395 },
+    .{ "Greek_ZETA", 0x0396 },
+    .{ "Greek_ETA", 0x0397 },
+    .{ "Greek_THETA", 0x0398 },
+    .{ "Greek_IOTA", 0x0399 },
+    .{ "Greek_KAPPA", 0x039a },
+    .{ "Greek_LAMDA", 0x039b },
+    .{ "Greek_LAMBDA", 0x039b },
+    .{ "Greek_MU", 0x039c },
+    .{ "Greek_NU", 0x039d },
+    .{ "Greek_XI", 0x039e },
+    .{ "Greek_OMICRON", 0x039f },
+    .{ "Greek_PI", 0x03a0 },
+    .{ "Greek_RHO", 0x03a1 },
+    .{ "Greek_SIGMA", 0x03a3 },
+    .{ "Greek_TAU", 0x03a4 },
+    .{ "Greek_UPSILON", 0x03a5 },
+    .{ "Greek_PHI", 0x03a6 },
+    .{ "Greek_CHI", 0x03a7 },
+    .{ "Greek_PSI", 0x03a8 },
+    .{ "Greek_OMEGA", 0x03a9 },
+    .{ "Greek_alpha", 0x03b1 },
+    .{ "Greek_beta", 0x03b2 },
+    .{ "Greek_gamma", 0x03b3 },
+    .{ "Greek_delta", 0x03b4 },
+    .{ "Greek_epsilon", 0x03b5 },
+    .{ "Greek_zeta", 0x03b6 },
+    .{ "Greek_eta", 0x03b7 },
+    .{ "Greek_theta", 0x03b8 },
+    .{ "Greek_iota", 0x03b9 },
+    .{ "Greek_kappa", 0x03ba },
+    .{ "Greek_lamda", 0x03bb },
+    .{ "Greek_lambda", 0x03bb },
+    .{ "Greek_mu", 0x03bc },
+    .{ "Greek_nu", 0x03bd },
+    .{ "Greek_xi", 0x03be },
+    .{ "Greek_omicron", 0x03bf },
+    .{ "Greek_pi", 0x03c0 },
+    .{ "Greek_rho", 0x03c1 },
+    .{ "Greek_sigma", 0x03c3 },
+    .{ "Greek_finalsmallsigma", 0x03c2 },
+    .{ "Greek_tau", 0x03c4 },
+    .{ "Greek_upsilon", 0x03c5 },
+    .{ "Greek_phi", 0x03c6 },
+    .{ "Greek_chi", 0x03c7 },
+    .{ "Greek_psi", 0x03c8 },
+    .{ "Greek_omega", 0x03c9 },
+});
+
 /// ISO-8859-2 codepoints for X11 Latin-2 keysyms `0x01a0`–`0x01ff`.
 const latin2_01a0 = [_]u21{
     0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
@@ -682,6 +736,7 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     if (named_char_keysyms.get(name)) |character| return character;
     if (named_cyrillic_keysyms.get(name)) |character| return character;
     if (named_latin_ext_keysyms.get(name)) |character| return character;
+    if (named_greek_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
         if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return null;
@@ -705,6 +760,17 @@ pub fn charForX11Cyrillic(sym: u32) ?u21 {
 pub fn charForX11Latin2(sym: u32) ?u21 {
     if (sym < 0x01a0 or sym > 0x01ff) return null;
     return latin2_01a0[sym - 0x01a0];
+}
+
+/// Legacy X11 Greek keysyms. SIGMA skips U+03A2; final sigma is 0x07f3.
+pub fn charForX11Greek(sym: u32) ?u21 {
+    if (sym >= 0x07c1 and sym <= 0x07d1) return @intCast(0x0391 + (sym - 0x07c1));
+    if (sym >= 0x07d2 and sym <= 0x07d8) return @intCast(0x03a3 + (sym - 0x07d2));
+    if (sym >= 0x07e1 and sym <= 0x07f1) return @intCast(0x03b1 + (sym - 0x07e1));
+    if (sym == 0x07f2) return 0x03c3;
+    if (sym == 0x07f3) return 0x03c2;
+    if (sym >= 0x07f4 and sym <= 0x07f9) return @intCast(0x03c4 + (sym - 0x07f4));
+    return null;
 }
 
 /// Resolves a keysym name to a named (non-character) key, if it is one.
@@ -1286,6 +1352,10 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(@as(u21, 0x0151), charForKeysym("odoubleacute").?);
     try std.testing.expectEqual(@as(u21, 0x0142), charForX11Latin2(0x01b3).?);
     try std.testing.expectEqual(@as(u21, 0x0151), charForX11Latin2(0x01f5).?);
+    try std.testing.expectEqual(@as(u21, 0x03b1), charForKeysym("Greek_alpha").?);
+    try std.testing.expectEqual(@as(u21, 0x03a3), charForKeysym("Greek_SIGMA").?);
+    try std.testing.expectEqual(@as(u21, 0x03c2), charForX11Greek(0x07f3).?);
+    try std.testing.expectEqual(@as(u21, 0x03a9), charForX11Greek(0x07d8).?);
     try std.testing.expectEqual(NamedKey.backspace, namedKeyForKeysym("BackSpace").?);
     try std.testing.expectEqual(NamedKey.page_up, namedKeyForKeysym("Prior").?);
     try std.testing.expectEqual(@as(?NamedKey, null), namedKeyForKeysym("nonexistent_keysym_name"));

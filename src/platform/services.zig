@@ -172,31 +172,63 @@ fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
 /// Clipboard bytes to UTF-8: strip a UTF-8 BOM or decode UTF-16 with BOM.
 pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, bytes, "\xEF\xBB\xBF")) {
-        return gpa.dupe(u8, bytes[3..]);
+        return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes[3..]));
     }
     if (bytes.len >= 2 and bytes.len % 2 == 0) {
         if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) {
-            return utf16ToUtf8(gpa, bytes[2..], .little);
+            return normalizeClipboardNewlinesOwned(gpa, try utf16ToUtf8(gpa, bytes[2..], .little));
         }
         if (std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
-            return utf16ToUtf8(gpa, bytes[2..], .big);
+            return normalizeClipboardNewlinesOwned(gpa, try utf16ToUtf8(gpa, bytes[2..], .big));
         }
     }
-    return gpa.dupe(u8, bytes);
+    return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
 }
 
 /// Decode `UTF16_STRING` / UTF-16 clipboard bytes. Honors a BOM when present,
 /// otherwise assumes little-endian (the usual X11/Windows convention).
 pub fn clipboardUtf16BytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
-    if (bytes.len >= 2) {
-        if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) {
-            return utf16ToUtf8(gpa, bytes[2..], .little);
+    const decoded = blk: {
+        if (bytes.len >= 2) {
+            if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) {
+                break :blk try utf16ToUtf8(gpa, bytes[2..], .little);
+            }
+            if (std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
+                break :blk try utf16ToUtf8(gpa, bytes[2..], .big);
+            }
         }
-        if (std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
-            return utf16ToUtf8(gpa, bytes[2..], .big);
+        break :blk try utf16ToUtf8(gpa, bytes, .little);
+    };
+    return normalizeClipboardNewlinesOwned(gpa, decoded);
+}
+
+/// Collapse CR/LF and lone CR to LF so Windows and some GTK pastes match Unix.
+pub fn normalizeClipboardNewlines(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, text, '\r') == null) return gpa.dupe(u8, text);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\r') {
+            try out.append(gpa, '\n');
+            if (i + 1 < text.len and text[i + 1] == '\n') {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
         }
+        try out.append(gpa, text[i]);
+        i += 1;
     }
-    return utf16ToUtf8(gpa, bytes, .little);
+    return out.toOwnedSlice(gpa);
+}
+
+fn normalizeClipboardNewlinesOwned(gpa: std.mem.Allocator, owned: []u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, owned, '\r') == null) return owned;
+    const next = try normalizeClipboardNewlines(gpa, owned);
+    gpa.free(owned);
+    return next;
 }
 
 fn utf16ToUtf8(gpa: std.mem.Allocator, bytes: []const u8, endian: std.builtin.Endian) ![]u8 {
@@ -770,4 +802,7 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     const raw_le = try clipboardUtf16BytesToUtf8(gpa, "h\x00i\x00");
     defer gpa.free(raw_le);
     try std.testing.expectEqualStrings("hi", raw_le);
+    const crlf = try clipboardBytesToUtf8(gpa, "a\r\nb\rc");
+    defer gpa.free(crlf);
+    try std.testing.expectEqualStrings("a\nb\nc", crlf);
 }
