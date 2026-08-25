@@ -12,7 +12,9 @@
 //! levels 1–3: unshifted, Shift, and AltGr/ISO Level3 when the keymap lists
 //! a third keysym, plus a second group when the keymap publishes two
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
-//! group-2 character of a non-US or dual-layout keymap actually correct. A
+//! group-2 character of a non-US or dual-layout keymap actually correct.
+//! Named Central European letters and X11 Latin-2 keysyms (`0x01a0`–`0x01ff`)
+//! resolve to characters without an IME. A
 //! bounded dead-key / Multi_key composer plus optional XCompose locale
 //! tables (`~/.XCompose`,
 //! `XCOMPOSEFILE`, `%L`) cover European accents (see `Compose`). A
@@ -602,6 +604,74 @@ const named_cyrillic_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Cyrillic_IO", 0x0401 },
 });
 
+/// Central European XKB names (Polish, Hungarian, Czech, Slovak, Romanian).
+const named_latin_ext_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "lstroke", 0x0142 },
+    .{ "Lstroke", 0x0141 },
+    .{ "aogonek", 0x0105 },
+    .{ "Aogonek", 0x0104 },
+    .{ "eogonek", 0x0119 },
+    .{ "Eogonek", 0x0118 },
+    .{ "sacute", 0x015b },
+    .{ "Sacute", 0x015a },
+    .{ "cacute", 0x0107 },
+    .{ "Cacute", 0x0106 },
+    .{ "nacute", 0x0144 },
+    .{ "Nacute", 0x0143 },
+    .{ "zacute", 0x017a },
+    .{ "Zacute", 0x0179 },
+    .{ "zabovedot", 0x017c },
+    .{ "Zabovedot", 0x017b },
+    .{ "zcaron", 0x017e },
+    .{ "Zcaron", 0x017d },
+    .{ "scaron", 0x0161 },
+    .{ "Scaron", 0x0160 },
+    .{ "ccaron", 0x010d },
+    .{ "Ccaron", 0x010c },
+    .{ "rcaron", 0x0159 },
+    .{ "Rcaron", 0x0158 },
+    .{ "ecaron", 0x011b },
+    .{ "Ecaron", 0x011a },
+    .{ "ncaron", 0x0148 },
+    .{ "Ncaron", 0x0147 },
+    .{ "dcaron", 0x010f },
+    .{ "Dcaron", 0x010e },
+    .{ "tcaron", 0x0165 },
+    .{ "Tcaron", 0x0164 },
+    .{ "lcaron", 0x013e },
+    .{ "Lcaron", 0x013d },
+    .{ "uring", 0x016f },
+    .{ "Uring", 0x016e },
+    .{ "odoubleacute", 0x0151 },
+    .{ "Odoubleacute", 0x0150 },
+    .{ "udoubleacute", 0x0171 },
+    .{ "Udoubleacute", 0x0170 },
+    .{ "abreve", 0x0103 },
+    .{ "Abreve", 0x0102 },
+    .{ "gbreve", 0x011f },
+    .{ "Gbreve", 0x011e },
+    .{ "scommaaccent", 0x0219 },
+    .{ "Scommaaccent", 0x0218 },
+    .{ "tcommaaccent", 0x021b },
+    .{ "Tcommaaccent", 0x021a },
+});
+
+/// ISO-8859-2 codepoints for X11 Latin-2 keysyms `0x01a0`–`0x01ff`.
+const latin2_01a0 = [_]u21{
+    0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
+    0x00a8, 0x0160, 0x015e, 0x0164, 0x0179, 0x00ad, 0x017d, 0x017b,
+    0x00b0, 0x0105, 0x02db, 0x0142, 0x00b4, 0x013e, 0x015b, 0x02c7,
+    0x00b8, 0x0161, 0x015f, 0x0165, 0x017a, 0x02dd, 0x017e, 0x017c,
+    0x0154, 0x00c1, 0x00c2, 0x0102, 0x00c4, 0x0139, 0x0106, 0x00c7,
+    0x010c, 0x00c9, 0x0118, 0x00cb, 0x011a, 0x00cd, 0x00ce, 0x010e,
+    0x0110, 0x0143, 0x0147, 0x00d3, 0x00d4, 0x0150, 0x00d6, 0x00d7,
+    0x0158, 0x016e, 0x00da, 0x0170, 0x00dc, 0x00dd, 0x0162, 0x00df,
+    0x0155, 0x00e1, 0x00e2, 0x0103, 0x00e4, 0x013a, 0x0107, 0x00e7,
+    0x010d, 0x00e9, 0x0119, 0x00eb, 0x011b, 0x00ed, 0x00ee, 0x010f,
+    0x0111, 0x0144, 0x0148, 0x00f3, 0x00f4, 0x0151, 0x00f6, 0x00f7,
+    0x0159, 0x016f, 0x00fa, 0x0171, 0x00fc, 0x00fd, 0x0163, 0x02d9,
+};
+
 /// Resolves a keysym name to a plain character, if it is one. Covers the
 /// bare-letter/digit case ("a", "A", "5") and the named-punctuation table
 /// above; returns null for anything else (a named key, or an unrecognized
@@ -611,6 +681,7 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     if (std.mem.eql(u8, name, "EuroSign") or std.mem.eql(u8, name, "euro")) return 0x20ac;
     if (named_char_keysyms.get(name)) |character| return character;
     if (named_cyrillic_keysyms.get(name)) |character| return character;
+    if (named_latin_ext_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
         if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return null;
@@ -628,6 +699,12 @@ pub fn charForX11Cyrillic(sym: u32) ?u21 {
         return if (sym >= 0x06e0) lower - 0x20 else lower;
     }
     return null;
+}
+
+/// Legacy X11 Latin-2 keysyms used by Central European layouts.
+pub fn charForX11Latin2(sym: u32) ?u21 {
+    if (sym < 0x01a0 or sym > 0x01ff) return null;
+    return latin2_01a0[sym - 0x01a0];
 }
 
 /// Resolves a keysym name to a named (non-character) key, if it is one.
@@ -1205,6 +1282,10 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(@as(u8, '5'), charForKeysym("5").?);
     try std.testing.expectEqual(@as(?u21, null), charForKeysym("nonexistent_keysym_name"));
     try std.testing.expectEqual(@as(?u21, 0x20ac), charForKeysym("U20AC"));
+    try std.testing.expectEqual(@as(u21, 0x0142), charForKeysym("lstroke").?);
+    try std.testing.expectEqual(@as(u21, 0x0151), charForKeysym("odoubleacute").?);
+    try std.testing.expectEqual(@as(u21, 0x0142), charForX11Latin2(0x01b3).?);
+    try std.testing.expectEqual(@as(u21, 0x0151), charForX11Latin2(0x01f5).?);
     try std.testing.expectEqual(NamedKey.backspace, namedKeyForKeysym("BackSpace").?);
     try std.testing.expectEqual(NamedKey.page_up, namedKeyForKeysym("Prior").?);
     try std.testing.expectEqual(@as(?NamedKey, null), namedKeyForKeysym("nonexistent_keysym_name"));

@@ -246,6 +246,7 @@ pub fn keysymToKey(sym: u32) Key {
     if (sym >= 0x20 and sym <= 0xff) return .{ .char = @intCast(sym) };
     if (sym >= 0x01000000 and sym <= 0x0110ffff) return .{ .char = @intCast(sym - 0x01000000) };
     if (xkb.charForX11Cyrillic(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Latin2(sym)) |ch| return .{ .char = ch };
     return switch (sym) {
         0xff08 => .backspace,
         0xff09 => .tab,
@@ -389,7 +390,7 @@ pub const Window = struct {
         if (self.conn.screen.root_depth != image_depth) return error.UnsupportedDepth;
 
         try internSessionAtoms(&self.conn);
-        self.scale = try detectScale(gpa, &self.conn, env);
+        self.scale = try detectScale(gpa, &self.conn, env, &self.pending_events);
         const pixel_w = try std.math.mul(u32, w, self.scale);
         const pixel_h = try std.math.mul(u32, h, self.scale);
         if (pixel_w > std.math.maxInt(u16) or pixel_h > std.math.maxInt(u16)) return error.InvalidWindowSize;
@@ -414,7 +415,7 @@ pub const Window = struct {
         try setNetWmState(&self.conn, self.window, &.{});
         try selectRootPropertyNotify(&self.conn);
         try setNetWmIcon(self.gpa, &self.conn, self.window);
-        self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, self.scale, env) catch 0;
+        self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, self.scale, env, &self.pending_events) catch 0;
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
         try mapWindow(&self.conn, self.window);
@@ -696,6 +697,11 @@ pub const Window = struct {
     }
 
     fn convertAndRead(self: *Window, gpa: std.mem.Allocator, selection: u32) !?[]u8 {
+        if (self.bestOfferedTextTarget(gpa, selection)) |target| {
+            if (self.readOneTextTarget(gpa, selection, target)) |text| {
+                if (text != null) return text;
+            } else |_| {}
+        }
         if (self.convertTarget(gpa, selection, self.conn.utf8_string, self.conn.utf8_string)) |text| {
             if (text) |bytes| {
                 if (bytes.len != 0) return try self.decodeClipboardBytes(gpa, bytes);
@@ -760,6 +766,34 @@ pub const Window = struct {
             if (text) |bytes| return try self.decodeClipboardBytes(gpa, bytes);
         } else |_| {}
         return null;
+    }
+
+    fn bestOfferedTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32) ?u32 {
+        if (self.conn.targets == 0) return null;
+        const bytes = (self.convertTarget(gpa, selection, self.conn.targets, self.conn.targets) catch return null) orelse return null;
+        defer gpa.free(bytes);
+        return preferredTextAtom(&self.conn, bytes);
+    }
+
+    fn readOneTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) !?[]u8 {
+        if (target == 0) return null;
+        const text = try self.convertTarget(gpa, selection, target, target);
+        const bytes = text orelse return null;
+        if (bytes.len == 0) {
+            gpa.free(bytes);
+            return null;
+        }
+        if (target == self.conn.mime_uri_list) {
+            if (self.takeUriListPath(gpa, bytes)) |path| return path;
+        }
+        if (target == self.conn.utf16_string) {
+            const decoded = services.clipboardUtf16BytesToUtf8(gpa, bytes) catch {
+                return try self.decodeClipboardBytes(gpa, bytes);
+            };
+            gpa.free(bytes);
+            return decoded;
+        }
+        return try self.decodeClipboardBytes(gpa, bytes);
     }
 
     fn takeUriListPath(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ?[]u8 {
@@ -861,7 +895,7 @@ pub const Window = struct {
     }
 
     fn readSelectionProperty(self: *Window, gpa: std.mem.Allocator, property: u32) !?[]u8 {
-        const first = getWindowPropertyRaw(gpa, &self.conn, self.window, property, true) catch return null;
+        const first = getWindowPropertyRaw(gpa, &self.conn, self.window, property, true, &self.pending_events) catch return null;
         if (self.conn.incr != 0 and first.typ == self.conn.incr) {
             gpa.free(first.bytes);
             return try self.readIncrProperty(gpa, property);
@@ -883,7 +917,7 @@ pub const Window = struct {
                     continue;
                 }
                 if (raw[16] != property_new_value) continue;
-                const chunk = getWindowPropertyRaw(gpa, &self.conn, self.window, property, true) catch continue;
+                const chunk = getWindowPropertyRaw(gpa, &self.conn, self.window, property, true, &self.pending_events) catch continue;
                 defer gpa.free(chunk.bytes);
                 if (chunk.bytes.len == 0) return try acc.toOwnedSlice(gpa);
                 if (acc.items.len + chunk.bytes.len > max_clipboard_bytes) return error.ClipboardTooLarge;
@@ -1093,11 +1127,11 @@ pub const Window = struct {
     fn refreshScale(self: *Window) ?Event {
         const env = services.readEnviron(self.gpa) catch return null;
         defer self.gpa.free(env);
-        const new_scale = detectScale(self.gpa, &self.conn, env) catch return null;
+        const new_scale = detectScale(self.gpa, &self.conn, env, &self.pending_events) catch return null;
         if (new_scale == self.scale) return null;
         self.scale = new_scale;
         if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
-        self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, new_scale, env) catch 0;
+        self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, new_scale, env, &self.pending_events) catch 0;
         setSizeHints(&self.conn, self.window, self.pixel_width, self.pixel_height, new_scale) catch {};
         const w = physicalToLogical(self.pixel_width, new_scale);
         const h = physicalToLogical(self.pixel_height, new_scale);
@@ -1120,7 +1154,7 @@ pub const Window = struct {
 
     fn readXdndTypeList(self: *Window) void {
         if (self.xdnd_source == 0 or self.conn.xdnd_type_list == 0) return;
-        const bytes = getWindowProperty(self.gpa, &self.conn, self.xdnd_source, self.conn.xdnd_type_list) catch return;
+        const bytes = getWindowProperty(self.gpa, &self.conn, self.xdnd_source, self.conn.xdnd_type_list, &self.pending_events) catch return;
         defer self.gpa.free(bytes);
         var off: usize = 0;
         while (off + 4 <= bytes.len) : (off += 4) {
@@ -1259,7 +1293,7 @@ pub const Window = struct {
 
     fn readNetWmState(self: *Window) void {
         if (self.conn.net_wm_state == 0) return;
-        const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.net_wm_state) catch return;
+        const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.net_wm_state, &self.pending_events) catch return;
         defer self.gpa.free(bytes);
         self.wm_max_horz = false;
         self.wm_max_vert = false;
@@ -1277,7 +1311,7 @@ pub const Window = struct {
 
     fn readWmState(self: *Window) void {
         if (self.conn.wm_state == 0) return;
-        const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.wm_state) catch return;
+        const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.wm_state, &self.pending_events) catch return;
         defer self.gpa.free(bytes);
         if (bytes.len < 4) return;
         self.wm_hidden = wmStateIsHidden(get32(bytes[0..4]));
@@ -1585,18 +1619,7 @@ fn fetchKeymap(gpa: std.mem.Allocator, conn: *XConn) !Keymap {
     req[5] = count;
     try writeAll(conn, &req);
 
-    const reply = try readReply(conn);
-    const per = reply[1];
-    const total = @as(usize, get32(reply[4..8])); // u32 keysyms following
-
-    const syms = try gpa.alloc(u32, total);
-    errdefer gpa.free(syms);
-    const raw = try gpa.alloc(u8, total * 4);
-    defer gpa.free(raw);
-    try readExact(conn, raw);
-    for (syms, 0..) |*s, i| s.* = get32(raw[i * 4 .. i * 4 + 4]);
-
-    return .{ .syms = syms, .per = per, .min = conn.min_keycode };
+    return finishKeymap(gpa, conn, try readReply(conn), conn.min_keycode);
 }
 
 /// Same as fetchKeymap, but queues MappingNotify-adjacent events instead of
@@ -1609,19 +1632,10 @@ fn fetchKeymapStashing(gpa: std.mem.Allocator, conn: *XConn, stash: *std.ArrayLi
     req[4] = conn.min_keycode;
     req[5] = count;
     try writeAll(conn, &req);
+    return finishKeymap(gpa, conn, try readReplyStashing(gpa, conn, stash), conn.min_keycode);
+}
 
-    var header: [32]u8 = undefined;
-    while (true) {
-        try readExact(conn, &header);
-        switch (header[0]) {
-            0 => return error.X11ServerError,
-            1 => break,
-            else => {
-                if (stash.items.len < 32) try stash.append(gpa, header);
-            },
-        }
-    }
-
+fn finishKeymap(gpa: std.mem.Allocator, conn: *XConn, header: [32]u8, min: u8) !Keymap {
     const per = header[1];
     const total = @as(usize, get32(header[4..8]));
     const syms = try gpa.alloc(u32, total);
@@ -1630,20 +1644,31 @@ fn fetchKeymapStashing(gpa: std.mem.Allocator, conn: *XConn, stash: *std.ArrayLi
     defer gpa.free(raw);
     try readExact(conn, raw);
     for (syms, 0..) |*s, i| s.* = get32(raw[i * 4 .. i * 4 + 4]);
-
-    return .{ .syms = syms, .per = per, .min = conn.min_keycode };
+    return .{ .syms = syms, .per = per, .min = min };
 }
 
 /// Wait for the next reply, skipping (discarding) any events that arrive
 /// first. Only used during setup, before the event loop starts.
 fn readReply(conn: *XConn) ![32]u8 {
+    return readReplyMaybeStashing(undefined, conn, null);
+}
+
+fn readReplyStashing(gpa: std.mem.Allocator, conn: *XConn, stash: *std.ArrayList([32]u8)) ![32]u8 {
+    return readReplyMaybeStashing(gpa, conn, stash);
+}
+
+fn readReplyMaybeStashing(gpa: std.mem.Allocator, conn: *XConn, stash: ?*std.ArrayList([32]u8)) ![32]u8 {
     while (true) {
         var head: [32]u8 = undefined;
         try readExact(conn, &head);
         switch (head[0]) {
             0 => return error.X11ServerError,
             1 => return head,
-            else => continue, // stray event during setup
+            else => {
+                if (stash) |list| {
+                    if (list.items.len < 32) try list.append(gpa, head);
+                }
+            },
         }
     }
 }
@@ -1902,9 +1927,9 @@ fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
     try changePropertyCardinals(conn, window, conn.net_wm_icon, packed_icon);
 }
 
-fn installScaledCursor(gpa: std.mem.Allocator, conn: *XConn, window: u32, scale: u32, env: []const u8) !u32 {
+fn installScaledCursor(gpa: std.mem.Allocator, conn: *XConn, window: u32, scale: u32, env: []const u8, stash: ?*std.ArrayList([32]u8)) !u32 {
     var resources: []u8 = &.{};
-    if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager)) |bytes| {
+    if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager, stash)) |bytes| {
         resources = bytes;
     } else |_| {}
     defer if (resources.len != 0) gpa.free(resources);
@@ -1990,9 +2015,9 @@ fn sendXdndClientMessage(conn: *XConn, dest: u32, typ: u32, data: [5]u32) !void 
     try writeAll(conn, &req);
 }
 
-fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8) !u32 {
+fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8, stash: ?*std.ArrayList([32]u8)) !u32 {
     if (services.scaleFromEnvironment(env)) |scale| return scale;
-    if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager)) |resources| {
+    if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager, stash)) |resources| {
         defer gpa.free(resources);
         if (services.parseXftDpi(resources)) |dpi| return services.scaleFromDpi(dpi);
     } else |_| {}
@@ -2131,11 +2156,11 @@ const PropertyValue = struct {
     bytes: []u8,
 };
 
-fn getWindowProperty(gpa: std.mem.Allocator, conn: *XConn, window: u32, property: u32) ![]u8 {
-    return (try getWindowPropertyRaw(gpa, conn, window, property, false)).bytes;
+fn getWindowProperty(gpa: std.mem.Allocator, conn: *XConn, window: u32, property: u32, stash: ?*std.ArrayList([32]u8)) ![]u8 {
+    return (try getWindowPropertyRaw(gpa, conn, window, property, false, stash)).bytes;
 }
 
-fn getWindowPropertyRaw(gpa: std.mem.Allocator, conn: *XConn, window: u32, property: u32, delete: bool) !PropertyValue {
+fn getWindowPropertyRaw(gpa: std.mem.Allocator, conn: *XConn, window: u32, property: u32, delete: bool, stash: ?*std.ArrayList([32]u8)) !PropertyValue {
     var req: [24]u8 = @splat(0);
     req[0] = 20;
     req[1] = if (delete) 1 else 0;
@@ -2146,7 +2171,7 @@ fn getWindowPropertyRaw(gpa: std.mem.Allocator, conn: *XConn, window: u32, prope
     put32(req[20..24], 256 * 1024);
     try writeAll(conn, &req);
 
-    const reply = try readReply(conn);
+    const reply = try readReplyMaybeStashing(gpa, conn, stash);
     const extra_words = get32(reply[4..8]);
     const extra = try gpa.alloc(u8, extra_words * 4);
     errdefer gpa.free(extra);
@@ -2329,6 +2354,33 @@ fn freeGc(conn: *XConn, gc: u32) !void {
 
 fn wmStateIsHidden(state: u32) bool {
     return state != 1; // ICCCM NormalState=1; Withdrawn=0, Iconic=3
+}
+
+fn textAtomRank(conn: *const XConn, atom: u32) u8 {
+    if (atom == 0) return 0;
+    if (atom == conn.utf8_string) return 7;
+    if (atom == conn.mime_text_utf8) return 6;
+    if (atom == conn.mime_text_utf8_alt) return 5;
+    if (atom == conn.mime_text_plain) return 4;
+    if (atom == conn.utf16_string or atom == conn.mime_uri_list) return 3;
+    if (atom == conn.text) return 2;
+    if (atom == atom_string) return 1;
+    return 0;
+}
+
+fn preferredTextAtom(conn: *const XConn, atoms: []const u8) ?u32 {
+    var best: u32 = 0;
+    var best_rank: u8 = 0;
+    var off: usize = 0;
+    while (off + 4 <= atoms.len) : (off += 4) {
+        const atom = get32(atoms[off..][0..4]);
+        const rank = textAtomRank(conn, atom);
+        if (rank > best_rank) {
+            best_rank = rank;
+            best = atom;
+        }
+    }
+    return if (best != 0) best else null;
 }
 
 fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
@@ -2604,6 +2656,12 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 106));
     try std.testing.expect(isClipboardTextTarget(&conn, 107));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
+
+    var atoms: [12]u8 = undefined;
+    put32(atoms[0..4], atom_string);
+    put32(atoms[4..8], 100);
+    put32(atoms[8..12], 107);
+    try std.testing.expectEqual(@as(u32, 100), preferredTextAtom(&conn, &atoms).?);
 }
 
 test "x11 dead keysyms stay non-character until the composer combines them" {
@@ -2660,6 +2718,8 @@ test "Keymap.translate uses group bits 13-14 without reading the next key" {
     try std.testing.expectEqual(Key{ .char = 'Z' }, km.translate(10, (1 << 13) | 1));
     try std.testing.expectEqual(Key{ .char = 0x0444 }, keysymToKey(0x06c6));
     try std.testing.expectEqual(Key{ .char = 0x0424 }, keysymToKey(0x06e6));
+    try std.testing.expectEqual(Key{ .char = 0x0142 }, keysymToKey(0x01b3));
+    try std.testing.expectEqual(Key{ .char = 0x0151 }, keysymToKey(0x01f5));
 
     var pair = [_]u32{ 'a', 'A', 'b', 'B' };
     const km2 = Keymap{ .syms = &pair, .per = 2, .min = 8 };

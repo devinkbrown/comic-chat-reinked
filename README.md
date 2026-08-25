@@ -288,7 +288,8 @@ TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `RESOURCE_MANAGER` property changes, falling back to screen millimeter size,
 and reinstalling the scaled cursor plus physical WM size hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, `UTF16_STRING`, and `TIMESTAMP`, accepts XDND text/`file:`
+`text/uri-list`, `UTF16_STRING`, and `TIMESTAMP` (preferring the owner's
+TARGETS list), accepts XDND text/`file:`
 drops as typed keys, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE`, honors keyboard group bits and
 MappingNotify without dropping queued events, resets compose on FocusOut,

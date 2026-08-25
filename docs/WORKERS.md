@@ -92,7 +92,9 @@ hash.
   `data_offer.set_actions` copy when accepting a drop. Clipboard MIME
   includes `text/plain;charset=utf8`, `text/uri-list`, and
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
-  strip and UTF-16 decode. X11 re-reads `Xft.dpi` when the root
+  strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
+  stashes events that arrive during GetProperty. Central European Latin-2
+  / named keysyms type without an IME. X11 re-reads `Xft.dpi` when the root
   `RESOURCE_MANAGER` property changes, falls back to screen millimeter
   size, and reinstalls the scaled cursor plus physical WM size hints.
   Wayland binds `wl_compositor` at v6 when advertised and honors
