@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build the complete reproducible ComicChat release set: four native binaries,
-# one self-contained source archive, and one checksum manifest.
+# Build the complete reproducible ComicChat release set: native binaries for
+# Windows x86_64 plus Linux amd64/arm64 and the BSD x86_64 pair, one
+# self-contained source archive, and one checksum manifest.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -118,6 +119,7 @@ package_source() {
 mkdir -p "$output_dir"
 rm -f "$output_dir"/reinked-"$version"-windows-x86_64.zip \
       "$output_dir"/reinked-"$version"-linux-x86_64.tar.gz \
+      "$output_dir"/reinked-"$version"-linux-aarch64.tar.gz \
       "$output_dir"/reinked-"$version"-freebsd-x86_64.tar.gz \
       "$output_dir"/reinked-"$version"-openbsd-x86_64.tar.gz \
       "$output_dir"/reinked-"$version"-source.tar.gz \
@@ -127,6 +129,8 @@ package_target x86_64-windows windows-x86_64 reinked.exe \
     "reinked-$version-windows-x86_64.zip" zip
 package_target x86_64-linux linux-x86_64 reinked \
     "reinked-$version-linux-x86_64.tar.gz" tar.gz
+package_target aarch64-linux linux-aarch64 reinked \
+    "reinked-$version-linux-aarch64.tar.gz" tar.gz
 package_target x86_64-freebsd freebsd-x86_64 reinked \
     "reinked-$version-freebsd-x86_64.tar.gz" tar.gz
 package_target x86_64-openbsd openbsd-x86_64 reinked \
@@ -136,6 +140,7 @@ package_source
 (cd "$output_dir" && sha256sum \
     "reinked-$version-windows-x86_64.zip" \
     "reinked-$version-linux-x86_64.tar.gz" \
+    "reinked-$version-linux-aarch64.tar.gz" \
     "reinked-$version-freebsd-x86_64.tar.gz" \
     "reinked-$version-openbsd-x86_64.tar.gz" \
     "reinked-$version-source.tar.gz" \

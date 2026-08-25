@@ -1713,6 +1713,24 @@ fn runInteractivePollBackend(
             if (!event_result.keep_running) return;
             redraw = redraw or event_result.redraw;
         }
+        if (@hasDecl(Backend.Window, "pollEvent")) {
+            while (try win.pollEvent()) |queued| {
+                const event_result = try handleWindowEvent(
+                    gpa,
+                    io,
+                    win,
+                    queued,
+                    &view,
+                    &network,
+                    &state,
+                    &workspace,
+                    nick,
+                    channel,
+                );
+                if (!event_result.keep_running) return;
+                redraw = redraw or event_result.redraw;
+            }
+        }
         if (has_client_side_repeat) {
             if (win.checkRepeat()) |repeat_event| {
                 const event_result = try handleWindowEvent(

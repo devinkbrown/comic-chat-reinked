@@ -8,14 +8,66 @@
 //!
 //! Keyboard: the compositor-provided XKB keymap fd is received (see
 //! `xkb.zig`'s bounded text-format parser) and drives translation for the
-//! configured layout's base and Shift levels — non-US layouts now produce
-//! their real characters, not a hardcoded US table. Client-side key repeat
-//! (Wayland deliberately leaves this to the client, unlike X11's native
-//! auto-repeat) is implemented via `repeat_info` + `Window.checkRepeat`.
+//! configured layout's base, Shift, AltGr/ISO Level3, and group-2 symbols
+//! — non-US and dual-layout keymaps produce their real characters, not a
+//! hardcoded US table. Client-side key repeat (Wayland deliberately leaves
+//! this to the client, unlike X11's native auto-repeat) is implemented via
+//! `repeat_info` + `Window.checkRepeat`. Keyboard leave resets compose.
 //!
-//! Committed compose/dead-key/IME text is received through text-input-v3 when
-//! the compositor advertises it. The bounded XKB parser remains the fallback
-//! for compositors without that protocol.
+//! Dead-key and Multi_key sequences are composed client-side from the keymap
+//! names (see `xkb.Compose`), including an optional bounded XCompose locale
+//! table. Committed IME text is received through text-input-v3 when the
+//! compositor advertises it; IME preedit suppresses the keyboard/compose
+//! path. text-input-v3 also gets a multiline content hint and a bounded
+//! cursor rectangle so IME candidate windows sit on the composer strip.
+//! Fractional buffer scale uses `wp_fractional_scale_v1` +
+//! `wp_viewporter` when advertised, otherwise `wl_surface.preferred_buffer_scale`
+//! (compositor v6) or the entered `wl_output` integer scale; the fallback
+//! shm cursor is refreshed when that scale changes. Keyboard enter restores
+//! held Shift/Ctrl/Alt/Super from the keys array and Caps Lock from the
+//! conventional Lock modifier bit when the compositor reports it. Clipboard uses
+//! `wl_data_device` and `zwp_primary_selection_v1` when present, including
+//! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
+//! UTF-16 decode (including `text/plain;charset=utf-16` / `utf16` / `UTF16_STRING`
+//! on receive only), receive-only `text/html`, receive-only `text/rtf` /
+//! `application/rtf`, receive-only `text/x-uri-list`, and receive-only desktop
+//! file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
+//! `application/x-moz-file`). Middle-click pastes PRIMARY as typed keys
+//! and falls back to `wl-paste --primary` when the native primary protocol
+//! is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed keys;
+//! CLIPBOARD paste does not read PRIMARY, and local text is used only
+//! while this client still owns the clipboard source. A copy before the
+//! first seat serial is stored and advertised once a serial arrives.
+//! Pointer leave and incoming DnD motion emit pointer moves so hover
+//! tracks the seat; a held button emits `.up` before the `(-1,-1)` clear.
+//! NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
+//! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/13/15 (plus `latin1`/`latin9`/`latin5`/`latin2`/`cyrillic`/`greek` aliases), Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R `text/plain` charset MIME,
+//! Markdown, and extra KDE5/Mozilla-priv/KDE suggested-filename file MIME are accepted.
+//! `present()` skips
+//! commits while the toplevel is suspended; leaving suspended or gaining
+//! xdg activated exposes, and text-input disables when not activated.
+//! Text and `file:` drops arrive as typed keys (no new
+//! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
+//! accepting a drop; `data_offer.finish` and `set_actions` are sent only when
+//! `wl_data_device_manager` is bound at v3+, including failed or empty offers.
+//! A `wp_cursor_shape_v1` default pointer is used when
+//! advertised, otherwise a scaled shm arrow (refreshed on integer and
+//! fractional scale changes). `xdg_toplevel_icon_v1` ships
+//! 32@1 and 64@2 buffers when advertised. A supplied `XDG_ACTIVATION_TOKEN` is consumed through
+//! `xdg_activation_v1` so a launcher-started window can take focus (not
+//! used for notify/urgency). `openPath` requests a fresh
+//! `xdg_activation_v1` token for `xdg-open` when advertised.
+//! When a decoration manager is advertised, the client
+//! requests server-side decorations (`zxdg` or `xdg`) and re-requests SSD
+//! once if the compositor configures client-side mode. xdg-shell records
+//! maximized/fullscreen/tiled/suspended configure states, records
+//! `wm_capabilities` / `configure_bounds` when xdg-shell is v5+, and advertises
+//! the same min/max size as the X11 WM hints. `present()` attaches a
+//! `wl_surface.frame` callback and coalesces later commits until it fires.
+//! High-resolution
+//! `axis_value120` wheels snap to the same logical ticks as discrete axes;
+//! `axis_stop` clears the discrete latch so later continuous axis events work.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -44,6 +96,7 @@ const buffer_destroy: u16 = 0;
 const surface_destroy: u16 = 0;
 const surface_attach: u16 = 1;
 const surface_damage: u16 = 2;
+const surface_frame: u16 = 3;
 const surface_commit: u16 = 6;
 const surface_set_buffer_scale: u16 = 8;
 const surface_damage_buffer: u16 = 9;
@@ -51,7 +104,37 @@ const seat_get_pointer: u16 = 0;
 const seat_get_keyboard: u16 = 1;
 const seat_get_touch: u16 = 2;
 const seat_release: u16 = 3;
+const pointer_set_cursor: u16 = 0;
+const cursor_shape_get_pointer: u16 = 1;
+const cursor_shape_set_shape: u16 = 1;
+const cursor_shape_default: u32 = 1;
+const toplevel_icon_create_icon: u16 = 1;
+const toplevel_icon_set_icon: u16 = 2;
+const toplevel_icon_set_name: u16 = 1;
+const toplevel_icon_add_buffer: u16 = 2;
 const keyboard_release: u16 = 0;
+const data_device_manager_create_data_source: u16 = 0;
+const data_device_manager_get_data_device: u16 = 1;
+const data_source_offer: u16 = 0;
+const data_source_destroy: u16 = 1;
+const data_device_set_selection: u16 = 1;
+const data_device_release: u16 = 2;
+const data_offer_receive: u16 = 1;
+const data_offer_destroy: u16 = 2;
+const viewporter_get_viewport: u16 = 1;
+const viewport_destroy: u16 = 0;
+const viewport_set_destination: u16 = 2;
+const fractional_manager_get_fractional_scale: u16 = 1;
+const primary_manager_create_source: u16 = 0;
+const primary_manager_get_device: u16 = 1;
+const primary_device_set_selection: u16 = 0;
+const primary_device_destroy: u16 = 1;
+const primary_source_offer: u16 = 0;
+const primary_source_destroy: u16 = 1;
+const primary_offer_receive: u16 = 0;
+const primary_offer_destroy: u16 = 1;
+const max_outputs: usize = 8;
+const max_clipboard_bytes = 1024 * 1024;
 const xdg_wm_base_destroy: u16 = 0;
 const xdg_wm_base_get_xdg_surface: u16 = 2;
 const xdg_wm_base_pong: u16 = 3;
@@ -61,6 +144,165 @@ const xdg_surface_ack_configure: u16 = 4;
 const xdg_toplevel_destroy: u16 = 0;
 const xdg_toplevel_set_title: u16 = 2;
 const xdg_toplevel_set_app_id: u16 = 3;
+const xdg_activation_get_token: u16 = 1;
+const xdg_activation_activate: u16 = 2;
+const activation_token_destroy: u16 = 0;
+const activation_token_set_serial: u16 = 1;
+const activation_token_set_app_id: u16 = 2;
+const activation_token_set_surface: u16 = 3;
+const activation_token_commit: u16 = 4;
+const xdg_toplevel_set_max_size: u16 = 7;
+const xdg_toplevel_set_min_size: u16 = 8;
+const xdg_min_width: u32 = 160;
+const xdg_min_height: u32 = 120;
+const xdg_max_width: u32 = 8192;
+const xdg_max_height: u32 = 8192;
+const xdg_state_maximized: u32 = 1;
+const xdg_state_fullscreen: u32 = 2;
+const xdg_state_activated: u32 = 4;
+const xdg_state_tiled_left: u32 = 5;
+const xdg_state_tiled_right: u32 = 6;
+const xdg_state_tiled_top: u32 = 7;
+const xdg_state_tiled_bottom: u32 = 8;
+const xdg_state_suspended: u32 = 9;
+const xdg_wm_cap_window_menu: u32 = 1;
+const xdg_wm_cap_maximize: u32 = 2;
+const xdg_wm_cap_fullscreen: u32 = 3;
+const xdg_wm_cap_minimize: u32 = 4;
+const xkb_mod_lock: u32 = 1 << 1;
+const xkb_mod_num: u32 = 1 << 2;
+const data_offer_accept: u16 = 0;
+const data_offer_finish: u16 = 3;
+const data_offer_set_actions: u16 = 4;
+const dnd_action_copy: u32 = 1;
+const decoration_get_toplevel: u16 = 1;
+const decoration_set_mode: u16 = 1;
+const decoration_mode_client_side: u32 = 1;
+const decoration_mode_server_side: u32 = 2;
+const text_input_destroy: u16 = 0;
+const text_input_enable: u16 = 1;
+const text_input_disable: u16 = 2;
+const text_input_set_content_type: u16 = 5;
+const text_input_set_cursor_rectangle: u16 = 6;
+const text_input_commit: u16 = 7;
+const text_input_hint_multiline: u32 = 0x400;
+const ime_cursor_height: i32 = 24;
+const ime_cursor_margin: i32 = 8;
+
+const text_mime_types = [_][]const u8{
+    "text/plain;charset=utf-8",
+    "text/plain;charset=utf8",
+    "text/plain",
+    "text/uri-list",
+    "TEXT",
+    "STRING",
+    "UTF8_STRING",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes` because
+/// the source payload is UTF-8.
+const utf16_mime_types = [_][]const u8{
+    "text/plain;charset=utf-16",
+    "text/plain;charset=utf16",
+    "UTF16_STRING",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const html_mime_types = [_][]const u8{
+    "text/html",
+    "text/html;charset=utf-8",
+    "text/html;charset=utf8",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const extra_uri_list_mime_types = [_][]const u8{
+    "text/x-uri-list",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const rtf_mime_types = [_][]const u8{
+    "text/rtf",
+    "application/rtf",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const desktop_file_mime_types = [_][]const u8{
+    "x-special/gnome-copied-files",
+    "x-special/nautilus-clipboard",
+    "text/x-moz-url",
+    "application/x-moz-file",
+    "application/x-kde4-urilist",
+    "application/x-kde5-urilist",
+    "application/x-kde-suggestedfilename",
+    "text/x-moz-url-priv",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const compound_text_mime_types = [_][]const u8{
+    "COMPOUND_TEXT",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const latin_mime_types = [_][]const u8{
+    "text/plain;charset=ISO-8859-1",
+    "text/plain;charset=iso-8859-1",
+    "text/plain;charset=latin1",
+    "text/plain;charset=latin-1",
+    "text/plain;charset=ISO-8859-15",
+    "text/plain;charset=iso-8859-15",
+    "text/plain;charset=latin9",
+    "text/plain;charset=latin-9",
+    "text/plain;charset=ISO-8859-2",
+    "text/plain;charset=iso-8859-2",
+    "text/plain;charset=latin2",
+    "text/plain;charset=latin-2",
+    "text/plain;charset=ISO-8859-9",
+    "text/plain;charset=iso-8859-9",
+    "text/plain;charset=latin5",
+    "text/plain;charset=latin-5",
+    "text/plain;charset=ISO-8859-5",
+    "text/plain;charset=iso-8859-5",
+    "text/plain;charset=cyrillic",
+    "text/plain;charset=ISO-8859-7",
+    "text/plain;charset=iso-8859-7",
+    "text/plain;charset=greek",
+    "text/plain;charset=ISO-8859-3",
+    "text/plain;charset=iso-8859-3",
+    "text/plain;charset=ISO-8859-4",
+    "text/plain;charset=iso-8859-4",
+    "text/plain;charset=ISO-8859-6",
+    "text/plain;charset=iso-8859-6",
+    "text/plain;charset=ISO-8859-8",
+    "text/plain;charset=iso-8859-8",
+    "text/plain;charset=windows-1252",
+    "text/plain;charset=cp1252",
+    "text/plain;charset=windows-1251",
+    "text/plain;charset=cp1251",
+    "text/plain;charset=windows-1250",
+    "text/plain;charset=cp1250",
+    "text/plain;charset=ISO-8859-13",
+    "text/plain;charset=iso-8859-13",
+    "text/plain;charset=windows-1253",
+    "text/plain;charset=cp1253",
+    "text/plain;charset=windows-1254",
+    "text/plain;charset=cp1254",
+    "text/plain;charset=windows-1255",
+    "text/plain;charset=cp1255",
+    "text/plain;charset=windows-1256",
+    "text/plain;charset=cp1256",
+    "text/plain;charset=windows-1257",
+    "text/plain;charset=cp1257",
+    "text/plain;charset=KOI8-R",
+    "text/plain;charset=koi8-r",
+    "text/plain;charset=koi8r",
+    "KOI8-R",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const markdown_mime_types = [_][]const u8{
+    "text/markdown",
+    "text/x-markdown",
+};
 
 pub const Key = shared_event.Key;
 pub const Event = shared_event.Event;
@@ -75,8 +317,18 @@ const Globals = struct {
     shm: Global = .{},
     seat: Global = .{},
     xdg_wm_base: Global = .{},
-    output: Global = .{},
+    outputs: [max_outputs]Global = @splat(.{}),
+    output_count: u8 = 0,
     text_input_manager: Global = .{},
+    data_device_manager: Global = .{},
+    viewporter: Global = .{},
+    fractional_manager: Global = .{},
+    primary_manager: Global = .{},
+    cursor_shape_manager: Global = .{},
+    toplevel_icon_manager: Global = .{},
+    decoration_manager: Global = .{},
+    decoration_zxdg: bool = true,
+    activation: Global = .{},
 
     fn record(self: *Globals, name: u32, interface: []const u8, version: u32) void {
         const value = Global{ .name = name, .version = version };
@@ -88,10 +340,31 @@ const Globals = struct {
             self.seat = value;
         } else if (std.mem.eql(u8, interface, "xdg_wm_base") and self.xdg_wm_base.name == 0) {
             self.xdg_wm_base = value;
-        } else if (std.mem.eql(u8, interface, "wl_output") and self.output.name == 0) {
-            self.output = value;
+        } else if (std.mem.eql(u8, interface, "wl_output") and self.output_count < max_outputs) {
+            self.outputs[self.output_count] = value;
+            self.output_count += 1;
         } else if (std.mem.eql(u8, interface, "zwp_text_input_manager_v3") and self.text_input_manager.name == 0) {
             self.text_input_manager = value;
+        } else if (std.mem.eql(u8, interface, "wl_data_device_manager") and self.data_device_manager.name == 0) {
+            self.data_device_manager = value;
+        } else if (std.mem.eql(u8, interface, "wp_viewporter") and self.viewporter.name == 0) {
+            self.viewporter = value;
+        } else if (std.mem.eql(u8, interface, "wp_fractional_scale_manager_v1") and self.fractional_manager.name == 0) {
+            self.fractional_manager = value;
+        } else if (std.mem.eql(u8, interface, "zwp_primary_selection_device_manager_v1") and self.primary_manager.name == 0) {
+            self.primary_manager = value;
+        } else if (std.mem.eql(u8, interface, "wp_cursor_shape_manager_v1") and self.cursor_shape_manager.name == 0) {
+            self.cursor_shape_manager = value;
+        } else if (std.mem.eql(u8, interface, "xdg_toplevel_icon_manager_v1") and self.toplevel_icon_manager.name == 0) {
+            self.toplevel_icon_manager = value;
+        } else if (std.mem.eql(u8, interface, "zxdg_decoration_manager_v1") and self.decoration_manager.name == 0) {
+            self.decoration_manager = value;
+            self.decoration_zxdg = true;
+        } else if (std.mem.eql(u8, interface, "xdg_decoration_manager_v1") and self.decoration_manager.name == 0) {
+            self.decoration_manager = value;
+            self.decoration_zxdg = false;
+        } else if (std.mem.eql(u8, interface, "xdg_activation_v1") and self.activation.name == 0) {
+            self.activation = value;
         }
     }
 };
@@ -259,6 +532,15 @@ const Connection = struct {
     }
 };
 
+const PendingPresent = struct {
+    buffer_id: u32,
+    pixel_w: u32,
+    pixel_h: u32,
+    logical_w: u32,
+    logical_h: u32,
+    use_viewport: bool,
+};
+
 const Buffer = struct {
     id: u32,
     width: u32,
@@ -307,14 +589,90 @@ pub const Window = struct {
     last_primary_click_ms: u32 = 0,
     last_primary_x: i32 = 0,
     last_primary_y: i32 = 0,
+    held_primary: bool = false,
+    held_middle: bool = false,
+    held_secondary: bool = false,
+    pending_pointer: ?Event = null,
     surface_id: u32 = 0,
     xdg_wm_base_id: u32 = 0,
     xdg_surface_id: u32 = 0,
     xdg_toplevel_id: u32 = 0,
-    output_id: u32 = 0,
+    output_ids: [max_outputs]u32 = @splat(0),
+    output_scales: [max_outputs]u32 = @splat(1),
+    output_width_px: [max_outputs]u32 = @splat(0),
+    output_width_mm: [max_outputs]u32 = @splat(0),
+    output_have_scale: [max_outputs]bool = @splat(false),
+    output_count: u8 = 0,
+    entered_outputs: [max_outputs]u32 = @splat(0),
+    entered_count: u8 = 0,
     output_scale: u32 = 1,
+    preferred_buffer_scale: u32 = 0,
+    viewporter_id: u32 = 0,
+    viewport_id: u32 = 0,
+    fractional_manager_id: u32 = 0,
+    fractional_scale_id: u32 = 0,
+    fractional_scale_120: u32 = 0,
+    primary_manager_id: u32 = 0,
+    primary_device_id: u32 = 0,
+    primary_source_id: u32 = 0,
+    primary_offer_id: u32 = 0,
+    pending_primary_offer_id: u32 = 0,
+    primary_offer_has_text: bool = false,
+    pending_primary_offer_has_text: bool = false,
     text_input_manager_id: u32 = 0,
     text_input_id: u32 = 0,
+    data_device_manager_id: u32 = 0,
+    data_device_version: u32 = 0,
+    data_device_id: u32 = 0,
+    data_source_id: u32 = 0,
+    data_offer_id: u32 = 0,
+    pending_offer_id: u32 = 0,
+    offer_has_text: bool = false,
+    pending_offer_has_text: bool = false,
+    pending_drop_mime: []const u8 = "",
+    dnd_offer_id: u32 = 0,
+    dnd_has_text: bool = false,
+    dnd_mime: []const u8 = "",
+    toplevel_maximized: bool = false,
+    toplevel_fullscreen: bool = false,
+    toplevel_tiled: bool = false,
+    toplevel_suspended: bool = false,
+    toplevel_activated: bool = false,
+    bounds_width: i32 = 0,
+    bounds_height: i32 = 0,
+    wm_can_window_menu: bool = false,
+    wm_can_maximize: bool = false,
+    wm_can_fullscreen: bool = false,
+    wm_can_minimize: bool = false,
+    caps_from_compositor: bool = false,
+    num_from_compositor: bool = false,
+    cursor_shape_manager_id: u32 = 0,
+    cursor_shape_device_id: u32 = 0,
+    cursor_surface_id: u32 = 0,
+    cursor_buffer: ?Buffer = null,
+    cursor_hotspot_x: i32 = 1,
+    cursor_hotspot_y: i32 = 1,
+    toplevel_icon_manager_id: u32 = 0,
+    toplevel_icon_id: u32 = 0,
+    icon_buffer: ?Buffer = null,
+    icon_buffer_2x: ?Buffer = null,
+    decoration_manager_id: u32 = 0,
+    decoration_id: u32 = 0,
+    decoration_mode: u32 = 0,
+    decoration_retry: bool = false,
+    activation_id: u32 = 0,
+    startup_token: []const u8 = "",
+    frame_callback_id: u32 = 0,
+    pending_present: ?PendingPresent = null,
+    last_serial: u32 = 0,
+    clipboard_needs_serial: bool = false,
+    middle_paste: bool = false,
+    clipboard_text: []u8 = &.{},
+    axis_have_discrete: bool = false,
+    ime_composing: bool = false,
+    last_committed: ?u21 = null,
+    compose_table: ?xkb.ComposeTable = null,
+    compose: xkb.Compose = .{},
     committed_text: std.ArrayList(u21) = .empty,
     committed_text_offset: usize = 0,
 
@@ -328,12 +686,18 @@ pub const Window = struct {
     shift_right: bool = false,
     control_left: bool = false,
     control_right: bool = false,
+    alt_left: bool = false,
+    alt_right: bool = false,
+    super_left: bool = false,
+    super_right: bool = false,
     caps_lock: bool = false,
+    num_lock: bool = false,
     /// The compositor's layout, once a keymap event with a supported format
     /// has been received and successfully parsed. Null before that (falls
     /// back to evdevToKey's hardcoded US table) and if the compositor sent
     /// an unsupported format or a keymap this bounded parser could not read.
     xkb_keymap: ?xkb.Keymap = null,
+    xkb_group: u32 = 0,
     /// Repeats per second and initial hold delay from the compositor's
     /// repeat_info (wl_keyboard v4+); non-positive rate means repeat is
     /// disabled entirely, matching the Wayland protocol's own convention.
@@ -358,46 +722,28 @@ pub const Window = struct {
 
         const self = try gpa.create(Window);
         errdefer gpa.destroy(self);
-        self.gpa = gpa;
-        self.threaded = std.Io.Threaded.init(gpa, .{});
+        self.* = .{
+            .gpa = gpa,
+            .threaded = std.Io.Threaded.init(gpa, .{}),
+            .conn = undefined,
+            .width = w,
+            .height = h,
+        };
         errdefer self.threaded.deinit();
+        {
+            const env = try services.readEnviron(gpa);
+            defer gpa.free(env);
+            self.loadComposeFromEnv(env);
+            if (services.startupToken(env)) |token| {
+                self.startup_token = gpa.dupe(u8, token) catch "";
+            }
+        }
+        errdefer self.unloadCompose();
 
         const io = self.threaded.io();
         const stream = try openUnixSocket(io, socket_path);
         errdefer stream.close(io);
         self.conn = .{ .io = io, .stream = stream };
-        self.registry_id = 0;
-        self.compositor_id = 0;
-        self.compositor_version = 0;
-        self.shm_id = 0;
-        self.seat_id = 0;
-        self.seat_version = 0;
-        self.keyboard_id = 0;
-        self.pointer_id = 0;
-        self.touch_id = 0;
-        self.touch_contact = null;
-        self.pointer_x = 0;
-        self.pointer_y = 0;
-        self.surface_id = 0;
-        self.xdg_wm_base_id = 0;
-        self.xdg_surface_id = 0;
-        self.xdg_toplevel_id = 0;
-        self.output_id = 0;
-        self.output_scale = 1;
-        self.text_input_manager_id = 0;
-        self.text_input_id = 0;
-        self.committed_text = .empty;
-        self.committed_text_offset = 0;
-        self.width = w;
-        self.height = h;
-        self.pending_width = 0;
-        self.pending_height = 0;
-        self.configured = false;
-        self.argb_supported = false;
-        self.shift_left = false;
-        self.shift_right = false;
-        self.caps_lock = false;
-        self.buffers = .empty;
 
         var globals: Globals = .{};
         try self.discoverGlobals(&globals);
@@ -407,22 +753,63 @@ pub const Window = struct {
         if (globals.xdg_wm_base.name == 0) return error.MissingXdgWmBase;
 
         self.compositor_id = try self.conn.allocId();
-        self.compositor_version = @min(globals.compositor.version, 4);
+        self.compositor_version = @min(globals.compositor.version, 6);
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.compositor, "wl_compositor", self.compositor_version, self.compositor_id);
 
         self.shm_id = try self.conn.allocId();
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.shm, "wl_shm", 1, self.shm_id);
 
         self.seat_id = try self.conn.allocId();
-        self.seat_version = @min(globals.seat.version, 5);
+        self.seat_version = @min(globals.seat.version, 8);
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.seat, "wl_seat", self.seat_version, self.seat_id);
 
         self.xdg_wm_base_id = try self.conn.allocId();
-        try sendBind(&self.conn, self.gpa, self.registry_id, globals.xdg_wm_base, "xdg_wm_base", 1, self.xdg_wm_base_id);
+        try sendBind(&self.conn, self.gpa, self.registry_id, globals.xdg_wm_base, "xdg_wm_base", @min(globals.xdg_wm_base.version, 6), self.xdg_wm_base_id);
 
-        if (globals.output.name != 0) {
-            self.output_id = try self.conn.allocId();
-            try sendBind(&self.conn, self.gpa, self.registry_id, globals.output, "wl_output", @min(globals.output.version, 2), self.output_id);
+        var output_i: u8 = 0;
+        while (output_i < globals.output_count) : (output_i += 1) {
+            const output_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.outputs[output_i], "wl_output", @min(globals.outputs[output_i].version, 2), output_id);
+            self.output_ids[self.output_count] = output_id;
+            self.output_scales[self.output_count] = 1;
+            self.output_count += 1;
+        }
+        if (globals.data_device_manager.name != 0) {
+            self.data_device_manager_id = try self.conn.allocId();
+            self.data_device_version = @min(globals.data_device_manager.version, 3);
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.data_device_manager, "wl_data_device_manager", self.data_device_version, self.data_device_manager_id);
+            self.data_device_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.data_device_manager_id, data_device_manager_get_data_device, self.data_device_id, self.seat_id);
+        }
+        if (globals.primary_manager.name != 0) {
+            self.primary_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.primary_manager, "zwp_primary_selection_device_manager_v1", 1, self.primary_manager_id);
+            self.primary_device_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.primary_manager_id, primary_manager_get_device, self.primary_device_id, self.seat_id);
+        }
+        if (globals.cursor_shape_manager.name != 0) {
+            self.cursor_shape_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.cursor_shape_manager, "wp_cursor_shape_manager_v1", 1, self.cursor_shape_manager_id);
+        }
+        if (globals.toplevel_icon_manager.name != 0) {
+            self.toplevel_icon_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.toplevel_icon_manager, "xdg_toplevel_icon_manager_v1", 1, self.toplevel_icon_manager_id);
+        }
+        if (globals.decoration_manager.name != 0) {
+            self.decoration_manager_id = try self.conn.allocId();
+            try sendBind(
+                &self.conn,
+                self.gpa,
+                self.registry_id,
+                globals.decoration_manager,
+                if (globals.decoration_zxdg) "zxdg_decoration_manager_v1" else "xdg_decoration_manager_v1",
+                1,
+                self.decoration_manager_id,
+            );
+        }
+        if (globals.activation.name != 0) {
+            self.activation_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.activation, "xdg_activation_v1", 1, self.activation_id);
         }
         if (globals.text_input_manager.name != 0) {
             self.text_input_manager_id = try self.conn.allocId();
@@ -433,12 +820,29 @@ pub const Window = struct {
 
         self.surface_id = try self.conn.allocId();
         try sendOneU32(&self.conn, self.compositor_id, compositor_create_surface, self.surface_id);
+        if (globals.viewporter.name != 0 and globals.fractional_manager.name != 0) {
+            self.viewporter_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.viewporter, "wp_viewporter", 1, self.viewporter_id);
+            self.viewport_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.viewporter_id, viewporter_get_viewport, self.viewport_id, self.surface_id);
+            self.fractional_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.fractional_manager, "wp_fractional_scale_manager_v1", 1, self.fractional_manager_id);
+            self.fractional_scale_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.fractional_manager_id, fractional_manager_get_fractional_scale, self.fractional_scale_id, self.surface_id);
+        }
         self.xdg_surface_id = try self.conn.allocId();
         try sendTwoU32(&self.conn, self.xdg_wm_base_id, xdg_wm_base_get_xdg_surface, self.xdg_surface_id, self.surface_id);
         self.xdg_toplevel_id = try self.conn.allocId();
         try sendOneU32(&self.conn, self.xdg_surface_id, xdg_surface_get_toplevel, self.xdg_toplevel_id);
         try sendString(&self.conn, self.gpa, self.xdg_toplevel_id, xdg_toplevel_set_title, title);
         try sendString(&self.conn, self.gpa, self.xdg_toplevel_id, xdg_toplevel_set_app_id, "comicchat");
+        try sendTwoU32(&self.conn, self.xdg_toplevel_id, xdg_toplevel_set_min_size, xdg_min_width, xdg_min_height);
+        try sendTwoU32(&self.conn, self.xdg_toplevel_id, xdg_toplevel_set_max_size, xdg_max_width, xdg_max_height);
+        if (self.decoration_manager_id != 0) {
+            self.decoration_id = try self.conn.allocId();
+            try sendTwoU32(&self.conn, self.decoration_manager_id, decoration_get_toplevel, self.decoration_id, self.xdg_toplevel_id);
+            try sendOneU32(&self.conn, self.decoration_id, decoration_set_mode, decoration_mode_server_side);
+        }
 
         // xdg-shell forbids attaching a buffer before this initial, empty
         // commit has elicited a configure which the client acknowledges.
@@ -449,15 +853,23 @@ pub const Window = struct {
             _ = try self.dispatch(msg);
         }
         if (!self.argb_supported) return error.Argb8888Unsupported;
+        self.installToplevelIcon() catch {};
+        self.activateStartupToken() catch {};
         return self;
     }
 
     pub fn writeClipboard(self: *Window, text: []const u8) !void {
-        return services.writeClipboard(self.conn.io, .wayland, text);
+        if (self.writeClipboardNative(text)) |_| return else |_| {
+            return services.writeClipboard(self.conn.io, .wayland, text);
+        }
     }
 
     pub fn readClipboard(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        return services.readClipboard(gpa, self.conn.io, .wayland);
+        if (self.readClipboardNative(gpa)) |text| {
+            return text;
+        } else |_| {
+            return services.readClipboard(gpa, self.conn.io, .wayland);
+        }
     }
 
     pub fn chooseFile(self: *Window, gpa: std.mem.Allocator, save: bool, title: []const u8) !?[]u8 {
@@ -465,7 +877,12 @@ pub const Window = struct {
     }
 
     pub fn openPath(self: *Window, gpa: std.mem.Allocator, path: []const u8) !void {
-        return services.openPath(gpa, self.conn.io, path);
+        if (self.takeOutgoingActivationToken()) |token| {
+            defer self.gpa.free(token);
+            return services.openPathActivated(gpa, self.conn.io, path, token);
+        }
+        var fallback: [64]u8 = undefined;
+        return services.openPathActivated(gpa, self.conn.io, path, services.generatedStartupId(&fallback));
     }
 
     pub fn printPath(self: *Window, gpa: std.mem.Allocator, path: []const u8) !void {
@@ -480,11 +897,33 @@ pub const Window = struct {
         self.destroyProtocolObjects() catch {};
         self.conn.stream.close(self.conn.io);
         if (self.xkb_keymap) |*keymap| keymap.deinit();
+        if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
+        if (self.startup_token.len != 0) self.gpa.free(self.startup_token);
         for (self.buffers.items) |*buffer| buffer.deinit();
         self.buffers.deinit(self.gpa);
+        if (self.cursor_buffer) |*buffer| buffer.deinit();
+        if (self.icon_buffer) |*buffer| buffer.deinit();
+        if (self.icon_buffer_2x) |*buffer| buffer.deinit();
         self.committed_text.deinit(self.gpa);
         self.threaded.deinit();
+        self.unloadCompose();
         self.gpa.destroy(self);
+    }
+
+    fn loadComposeFromEnv(self: *Window, env: []const u8) void {
+        self.compose_table = xkb.loadComposeTable(self.gpa, env) catch null;
+        if (self.compose_table) |*table| {
+            self.compose.table = table;
+        }
+    }
+
+    fn unloadCompose(self: *Window) void {
+        self.compose.table = null;
+        self.compose.reset();
+        if (self.compose_table) |*table| {
+            table.deinit();
+            self.compose_table = null;
+        }
     }
 
     /// Pollable Wayland connection socket.
@@ -495,14 +934,16 @@ pub const Window = struct {
     /// Commit a full 0xAARRGGBB frame through a reusable ARGB8888 wl_buffer.
     pub fn present(self: *Window, pixels: []const u32, w: u32, h: u32) !void {
         if (!self.configured) return error.SurfaceNotConfigured;
+        if (self.toplevel_suspended) return;
         if (w == 0 or h == 0 or w > std.math.maxInt(i32) or h > std.math.maxInt(i32)) {
             return error.InvalidWindowSize;
         }
         const count = try std.math.mul(usize, @as(usize, w), @as(usize, h));
         if (pixels.len != count) return error.BadFramebufferSize;
 
-        const pixel_w = try std.math.mul(u32, w, self.output_scale);
-        const pixel_h = try std.math.mul(u32, h, self.output_scale);
+        const dims = self.bufferDimensions(w, h);
+        const pixel_w = dims.w;
+        const pixel_h = dims.h;
         self.discardIdleBuffersExcept(pixel_w, pixel_h);
         var index: ?usize = null;
         for (self.buffers.items, 0..) |buffer, i| {
@@ -517,30 +958,94 @@ pub const Window = struct {
         }
         const buffer = &self.buffers.items[index.?];
         const destination: []u32 = std.mem.bytesAsSlice(u32, buffer.memory);
-        var source_y: u32 = 0;
-        while (source_y < h) : (source_y += 1) {
-            var scale_y: u32 = 0;
-            while (scale_y < self.output_scale) : (scale_y += 1) {
-                var source_x: u32 = 0;
-                while (source_x < w) : (source_x += 1) {
-                    const pixel = pixels[@as(usize, source_y) * w + source_x];
-                    var scale_x: u32 = 0;
-                    while (scale_x < self.output_scale) : (scale_x += 1) {
-                        destination[@as(usize, source_y * self.output_scale + scale_y) * pixel_w + source_x * self.output_scale + scale_x] = pixel;
-                    }
-                }
-            }
-        }
+        scaleNearestTo(destination, pixels, w, h, pixel_w, pixel_h);
         buffer.busy = true;
 
-        if (self.compositor_version >= 3) try sendOneU32(&self.conn, self.surface_id, surface_set_buffer_scale, self.output_scale);
-        try sendAttach(&self.conn, self.surface_id, buffer.id);
+        const pending = PendingPresent{
+            .buffer_id = buffer.id,
+            .pixel_w = pixel_w,
+            .pixel_h = pixel_h,
+            .logical_w = w,
+            .logical_h = h,
+            .use_viewport = dims.use_viewport,
+        };
+        if (self.frame_callback_id != 0) {
+            if (self.pending_present) |old| {
+                if (old.buffer_id != pending.buffer_id) self.unbusyBuffer(old.buffer_id);
+            }
+            self.pending_present = pending;
+            return;
+        }
+        try self.attachAndCommit(pending);
+        self.requestFrame();
+    }
+
+    fn attachAndCommit(self: *Window, pending: PendingPresent) !void {
+        if (self.compositor_version >= 3) {
+            try sendOneU32(&self.conn, self.surface_id, surface_set_buffer_scale, if (pending.use_viewport) 1 else self.output_scale);
+        }
+        if (pending.use_viewport) {
+            try sendTwoU32(
+                &self.conn,
+                self.viewport_id,
+                viewport_set_destination,
+                @bitCast(@as(i32, @intCast(pending.logical_w))),
+                @bitCast(@as(i32, @intCast(pending.logical_h))),
+            );
+        }
+        try sendAttach(&self.conn, self.surface_id, pending.buffer_id);
         if (self.compositor_version >= 4) {
-            try sendDamage(&self.conn, self.surface_id, surface_damage_buffer, pixel_w, pixel_h);
+            try sendDamage(&self.conn, self.surface_id, surface_damage_buffer, pending.pixel_w, pending.pixel_h);
         } else {
-            try sendDamage(&self.conn, self.surface_id, surface_damage, w, h);
+            try sendDamage(&self.conn, self.surface_id, surface_damage, pending.logical_w, pending.logical_h);
         }
         try sendEmpty(&self.conn, self.surface_id, surface_commit);
+    }
+
+    fn requestFrame(self: *Window) void {
+        if (self.frame_callback_id != 0) return;
+        const callback = self.conn.allocId() catch return;
+        sendOneU32(&self.conn, self.surface_id, surface_frame, callback) catch return;
+        self.frame_callback_id = callback;
+    }
+
+    fn finishFrameCallback(self: *Window) void {
+        self.frame_callback_id = 0;
+        const pending = self.pending_present orelse return;
+        self.pending_present = null;
+        self.attachAndCommit(pending) catch {
+            self.unbusyBuffer(pending.buffer_id);
+            return;
+        };
+        self.requestFrame();
+    }
+
+    fn unbusyBuffer(self: *Window, buffer_id: u32) void {
+        for (self.buffers.items) |*buffer| {
+            if (buffer.id == buffer_id) {
+                buffer.busy = false;
+                return;
+            }
+        }
+    }
+
+    fn shouldDeferPresent(frame_callback_id: u32) bool {
+        return frame_callback_id != 0;
+    }
+
+    fn bufferDimensions(self: *const Window, logical_w: u32, logical_h: u32) struct { w: u32, h: u32, use_viewport: bool } {
+        if (self.viewport_id != 0 and self.fractional_scale_120 != 0) {
+            return .{
+                .w = scale120(logical_w, self.fractional_scale_120),
+                .h = scale120(logical_h, self.fractional_scale_120),
+                .use_viewport = true,
+            };
+        }
+        return .{
+            .w = logical_w * self.output_scale,
+            .h = logical_h * self.output_scale,
+            .use_viewport = false,
+        };
     }
 
     /// Read and dispatch exactly one wire event. Protocol-only events (buffer
@@ -548,8 +1053,16 @@ pub const Window = struct {
     /// as `.other`. Keeping this one-message boundary is required by poll-based
     /// callers: a release can be the only readable message, and waiting here
     /// for a later visible event would starve the IRC socket indefinitely.
+    /// Drain a decoded key or pointer event without reading the Wayland socket.
+    pub fn pollEvent(self: *Window) !?Event {
+        if (self.takeCommittedKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
+        return null;
+    }
+
     pub fn nextEvent(self: *Window) !Event {
         if (self.takeCommittedKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
         const msg = try self.conn.readMessage(self.gpa);
         defer msg.deinit(self.gpa);
         return try self.dispatch(msg) orelse .other;
@@ -566,13 +1079,23 @@ pub const Window = struct {
     /// a burst of catch-up repeats once it resumes.
     pub fn checkRepeat(self: *Window) ?Event {
         if (self.takeCommittedKey()) |event| return event;
+        if (self.takePendingPointer()) |event| return event;
+        if (self.ime_composing) return null;
         const code = self.held_key_code orelse return null;
         if (self.repeat_rate_per_sec <= 0) return null;
         const now = nowMs(self.conn.io);
         if (now < self.next_repeat_at_ms) return null;
         const interval_ms: u64 = @intCast(@max(1, @divTrunc(1000, self.repeat_rate_per_sec)));
         self.next_repeat_at_ms = now +| interval_ms;
-        return .{ .key = .{ .key = self.translateKey(code, self.held_key_shift), .modifiers = .{ .shift = self.held_key_shift, .control = self.held_key_control } } };
+        return .{ .key = .{
+            .key = self.translateKey(code, self.held_key_shift),
+            .modifiers = .{
+                .shift = self.held_key_shift,
+                .control = self.held_key_control,
+                .alt = self.alt_left or self.alt_right,
+                .super = self.super_left or self.super_right,
+            },
+        } };
     }
 
     fn discoverGlobals(self: *Window, globals: *Globals) !void {
@@ -621,13 +1144,78 @@ pub const Window = struct {
             }
             return null;
         }
-        if (self.output_id != 0 and msg.object == self.output_id) {
-            if (msg.opcode == 3) {
-                if (msg.body.len != 4) return error.InvalidWaylandMessage;
-                const announced = getI32(msg.body);
-                if (announced > 0 and announced <= 8) self.output_scale = @intCast(announced);
+        if (self.outputIndex(msg.object)) |index| {
+            switch (msg.opcode) {
+                0 => { // geometry(..., physical_width, physical_height, ...)
+                    if (msg.body.len < 16) return error.InvalidWaylandMessage;
+                    const mm = getI32(msg.body[8..12]);
+                    self.output_width_mm[index] = if (mm > 0) @intCast(mm) else 0;
+                    self.applyOutputMmScale(index);
+                },
+                1 => { // mode(flags, width, height, refresh)
+                    if (msg.body.len != 16) return error.InvalidWaylandMessage;
+                    const px = getI32(msg.body[4..8]);
+                    self.output_width_px[index] = if (px > 0) @intCast(px) else 0;
+                    self.applyOutputMmScale(index);
+                },
+                3 => { // scale(factor)
+                    if (msg.body.len != 4) return error.InvalidWaylandMessage;
+                    const announced = getI32(msg.body);
+                    if (announced > 0 and announced <= 8) {
+                        self.output_have_scale[index] = true;
+                        self.output_scales[index] = @intCast(announced);
+                    }
+                },
+                else => {},
+            }
+            const previous = self.output_scale;
+            self.output_scale = self.currentOutputScale();
+            if (self.configured and previous != self.output_scale) {
+                self.refreshFallbackCursor();
+                self.installToplevelIcon() catch {};
+                return Event.expose;
             }
             return null;
+        }
+        if (self.fractional_scale_id != 0 and msg.object == self.fractional_scale_id) {
+            if (msg.opcode == 0) {
+                if (msg.body.len != 4) return error.InvalidWaylandMessage;
+                const previous = self.fractional_scale_120;
+                self.fractional_scale_120 = get32(msg.body);
+                if (self.configured and previous != self.fractional_scale_120) {
+                    self.refreshFallbackCursor();
+                    self.installToplevelIcon() catch {};
+                    return Event.expose;
+                }
+            }
+            return null;
+        }
+        if (self.data_device_id != 0 and msg.object == self.data_device_id) {
+            return try self.dataDeviceEvent(msg.opcode, msg.body);
+        }
+        if (self.data_source_id != 0 and msg.object == self.data_source_id) {
+            return try self.dataSourceEvent(msg.opcode, msg.body);
+        }
+        if (self.data_offer_id != 0 and msg.object == self.data_offer_id) {
+            return try self.dataOfferEvent(msg.opcode, msg.body);
+        }
+        if (self.dnd_offer_id != 0 and msg.object == self.dnd_offer_id) {
+            return try self.dataOfferEvent(msg.opcode, msg.body);
+        }
+        if (self.pending_offer_id != 0 and msg.object == self.pending_offer_id) {
+            return try self.dataOfferEvent(msg.opcode, msg.body);
+        }
+        if (self.primary_device_id != 0 and msg.object == self.primary_device_id) {
+            return try self.primaryDeviceEvent(msg.opcode, msg.body);
+        }
+        if (self.primary_source_id != 0 and msg.object == self.primary_source_id) {
+            return try self.primarySourceEvent(msg.opcode, msg.body);
+        }
+        if (self.primary_offer_id != 0 and msg.object == self.primary_offer_id) {
+            return try self.primaryOfferEvent(msg.opcode, msg.body);
+        }
+        if (self.pending_primary_offer_id != 0 and msg.object == self.pending_primary_offer_id) {
+            return try self.primaryOfferEvent(msg.opcode, msg.body);
         }
         if (self.text_input_id != 0 and msg.object == self.text_input_id) {
             return try self.textInputEvent(msg.opcode, msg.body);
@@ -641,18 +1229,74 @@ pub const Window = struct {
         if (self.touch_id != 0 and msg.object == self.touch_id) {
             return try self.touchEvent(msg.opcode, msg.body);
         }
+        if (self.frame_callback_id != 0 and msg.object == self.frame_callback_id) {
+            self.finishFrameCallback();
+            return null;
+        }
+        if (self.decoration_id != 0 and msg.object == self.decoration_id) {
+            if (msg.opcode == 0 and msg.body.len >= 4) {
+                const mode = get32(msg.body);
+                self.decoration_mode = mode;
+                if (decorationModeIsClientSide(mode) and !self.decoration_retry) {
+                    self.decoration_retry = true;
+                    sendOneU32(&self.conn, self.decoration_id, decoration_set_mode, decoration_mode_server_side) catch {};
+                }
+            }
+            return null;
+        }
         if (msg.object == self.xdg_toplevel_id) {
             switch (msg.opcode) {
                 0 => {
                     if (msg.body.len < 12) return error.InvalidWaylandMessage;
-                    self.pending_width = getI32(msg.body[0..4]);
-                    self.pending_height = getI32(msg.body[4..8]);
+                    self.pending_width = clampToBounds(getI32(msg.body[0..4]), self.bounds_width);
+                    self.pending_height = clampToBounds(getI32(msg.body[4..8]), self.bounds_height);
                     const array_len: usize = @intCast(get32(msg.body[8..12]));
                     if (array_len > msg.body.len - 12) return error.InvalidWaylandMessage;
                     if (12 + pad4(array_len) != msg.body.len) return error.InvalidWaylandMessage;
+                    const states = msg.body[12 .. 12 + array_len];
+                    self.toplevel_maximized = configureContainsState(states, xdg_state_maximized);
+                    self.toplevel_fullscreen = configureContainsState(states, xdg_state_fullscreen);
+                    self.toplevel_tiled = configureContainsState(states, xdg_state_tiled_left) or
+                        configureContainsState(states, xdg_state_tiled_right) or
+                        configureContainsState(states, xdg_state_tiled_top) or
+                        configureContainsState(states, xdg_state_tiled_bottom);
+                    const was_suspended = self.toplevel_suspended;
+                    self.toplevel_suspended = configureContainsState(states, xdg_state_suspended);
+                    const was_activated = self.toplevel_activated;
+                    self.toplevel_activated = configureContainsState(states, xdg_state_activated);
+                    if (!was_activated and self.toplevel_activated) {
+                        self.enableTextInput() catch {};
+                    } else if (was_activated and !self.toplevel_activated) {
+                        self.disableTextInput() catch {};
+                    } else if (self.toplevel_activated) {
+                        self.refreshTextInput() catch {};
+                    }
+                    if ((was_suspended and !self.toplevel_suspended) or
+                        (!was_activated and self.toplevel_activated))
+                    {
+                        return Event.expose;
+                    }
                     return null;
                 },
                 1 => return Event.close,
+                2 => { // configure_bounds(width, height), xdg-shell v4
+                    if (msg.body.len < 8) return error.InvalidWaylandMessage;
+                    self.bounds_width = getI32(msg.body[0..4]);
+                    self.bounds_height = getI32(msg.body[4..8]);
+                    return null;
+                },
+                3 => { // wm_capabilities(array), xdg-shell v5
+                    if (msg.body.len < 4) return error.InvalidWaylandMessage;
+                    const array_len: usize = @intCast(get32(msg.body[0..4]));
+                    if (array_len > msg.body.len - 4) return error.InvalidWaylandMessage;
+                    if (4 + pad4(array_len) != msg.body.len) return error.InvalidWaylandMessage;
+                    const caps = msg.body[4 .. 4 + array_len];
+                    self.wm_can_window_menu = configureContainsState(caps, xdg_wm_cap_window_menu);
+                    self.wm_can_maximize = configureContainsState(caps, xdg_wm_cap_maximize);
+                    self.wm_can_fullscreen = configureContainsState(caps, xdg_wm_cap_fullscreen);
+                    self.wm_can_minimize = configureContainsState(caps, xdg_wm_cap_minimize);
+                    return null;
+                },
                 else => return null,
             }
         }
@@ -668,11 +1312,13 @@ pub const Window = struct {
             self.pending_height = 0;
             self.configured = true;
             if (self.width != old_w or self.height != old_h) {
+                self.refreshTextInput() catch {};
                 return .{ .resize = .{ .w = self.width, .h = self.height } };
             }
+            self.refreshTextInput() catch {};
             return Event.expose;
         }
-        if (msg.object == self.surface_id) return null;
+        if (msg.object == self.surface_id) return try self.surfaceEvent(msg.opcode, msg.body);
         for (self.buffers.items) |*buffer| {
             if (msg.object == buffer.id) {
                 if (msg.opcode == 0) buffer.busy = false;
@@ -687,6 +1333,10 @@ pub const Window = struct {
             if (self.pointer_id == 0) {
                 self.pointer_id = try self.conn.allocId();
                 try sendOneU32(&self.conn, self.seat_id, seat_get_pointer, self.pointer_id);
+                if (self.cursor_shape_manager_id != 0 and self.cursor_shape_device_id == 0) {
+                    self.cursor_shape_device_id = try self.conn.allocId();
+                    try sendTwoU32(&self.conn, self.cursor_shape_manager_id, cursor_shape_get_pointer, self.cursor_shape_device_id, self.pointer_id);
+                }
             }
         } else if (self.pointer_id != 0) {
             if (self.seat_version >= 3) try sendEmpty(&self.conn, self.pointer_id, pointer_release);
@@ -700,8 +1350,16 @@ pub const Window = struct {
         } else if (self.keyboard_id != 0) {
             if (self.seat_version >= 3) try sendEmpty(&self.conn, self.keyboard_id, keyboard_release);
             self.keyboard_id = 0;
+            self.compose.reset();
             self.shift_left = false;
             self.shift_right = false;
+            self.control_left = false;
+            self.control_right = false;
+            self.alt_left = false;
+            self.alt_right = false;
+            self.super_left = false;
+            self.super_right = false;
+            self.held_key_code = null;
         }
         if ((capabilities & seat_touch) != 0) {
             if (self.touch_id == 0) {
@@ -723,12 +1381,14 @@ pub const Window = struct {
                 self.touch_contact = getI32(body[12..16]);
                 self.pointer_x = @divTrunc(getI32(body[16..20]), 256);
                 self.pointer_y = @divTrunc(getI32(body[20..24]), 256);
+                self.noteHeldButton(.primary, true);
                 return .{ .pointer = .{ .kind = .down, .x = self.pointer_x, .y = self.pointer_y, .button = .primary } };
             },
             1 => { // up(serial, time, id)
                 if (body.len != 12) return error.InvalidWaylandMessage;
                 if (self.touch_contact == null or self.touch_contact.? != getI32(body[8..12])) return null;
                 self.touch_contact = null;
+                self.noteHeldButton(.primary, false);
                 return .{ .pointer = .{ .kind = .up, .x = self.pointer_x, .y = self.pointer_y, .button = .primary } };
             },
             2 => { // motion(time, id, x, y)
@@ -742,6 +1402,7 @@ pub const Window = struct {
                 if (body.len != 0) return error.InvalidWaylandMessage;
                 if (self.touch_contact == null) return null;
                 self.touch_contact = null;
+                self.noteHeldButton(.primary, false);
                 return .{ .pointer = .{ .kind = .up, .x = self.pointer_x, .y = self.pointer_y, .button = .primary } };
             },
             3, 5, 6 => return null,
@@ -753,30 +1414,72 @@ pub const Window = struct {
         switch (opcode) {
             0 => { // enter(surface)
                 if (body.len != 4 or get32(body) != self.surface_id) return error.InvalidWaylandMessage;
-                try sendEmpty(&self.conn, self.text_input_id, 1); // enable
-                try sendTwoU32(&self.conn, self.text_input_id, 5, 0, 0); // normal text
-                try sendEmpty(&self.conn, self.text_input_id, 7); // commit state
+                if (self.toplevel_activated) try self.enableTextInput();
             },
             1 => { // leave(surface)
                 if (body.len != 4) return error.InvalidWaylandMessage;
-                try sendEmpty(&self.conn, self.text_input_id, 2); // disable
-                try sendEmpty(&self.conn, self.text_input_id, 7);
+                self.ime_composing = false;
+                self.last_committed = null;
+                try self.disableTextInput();
+            },
+            2 => { // preedit_string(text, cursor_begin, cursor_end)
+                const text = try parseLeadingString(body);
+                self.ime_composing = text.len != 0;
             },
             3 => { // commit_string(text)
                 const text = try parseWireString(body);
                 if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidWaylandString;
                 var view = try std.unicode.Utf8View.init(text);
                 var iterator = view.iterator();
+                var last: ?u21 = null;
                 while (iterator.nextCodepoint()) |codepoint| {
                     if (self.committed_text.items.len - self.committed_text_offset >= 4096) break;
                     try self.committed_text.append(self.gpa, codepoint);
+                    last = codepoint;
                 }
+                self.last_committed = last;
+                self.ime_composing = false;
                 return self.takeCommittedKey();
             },
-            2, 4, 5 => {}, // preedit/delete/done do not commit application text
+            4 => {}, // delete_surrounding_text
+            5 => self.ime_composing = false, // done
             else => {},
         }
         return null;
+    }
+
+    fn enableTextInput(self: *Window) !void {
+        if (self.text_input_id == 0) return;
+        try sendEmpty(&self.conn, self.text_input_id, text_input_enable);
+        try sendTwoU32(&self.conn, self.text_input_id, text_input_set_content_type, text_input_hint_multiline, 0);
+        try self.sendCursorRectangle();
+        try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
+    }
+
+    fn disableTextInput(self: *Window) !void {
+        if (self.text_input_id == 0) return;
+        self.ime_composing = false;
+        try sendEmpty(&self.conn, self.text_input_id, text_input_disable);
+        try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
+    }
+
+    fn refreshTextInput(self: *Window) !void {
+        if (self.text_input_id == 0 or !self.configured) return;
+        try self.sendCursorRectangle();
+        try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
+    }
+
+    fn sendCursorRectangle(self: *Window) !void {
+        const rect = imeCursorRect(self.width, self.height);
+        try sendFourI32(
+            &self.conn,
+            self.text_input_id,
+            text_input_set_cursor_rectangle,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+        );
     }
 
     fn takeCommittedKey(self: *Window) ?Event {
@@ -790,17 +1493,45 @@ pub const Window = struct {
         return .{ .key = .{ .key = .{ .char = codepoint }, .modifiers = .{} } };
     }
 
+    fn takePendingPointer(self: *Window) ?Event {
+        const event = self.pending_pointer orelse return null;
+        self.pending_pointer = null;
+        return event;
+    }
+
+    fn noteHeldButton(self: *Window, button: shared_event.PointerButton, down: bool) void {
+        switch (button) {
+            .primary => self.held_primary = down,
+            .middle => self.held_middle = down,
+            .secondary => self.held_secondary = down,
+            .none => {},
+        }
+    }
+
+    fn pointerLeave(self: *Window) Event {
+        const held = shared_event.firstHeldPointerButton(self.held_primary, self.held_middle, self.held_secondary);
+        self.held_primary = false;
+        self.held_middle = false;
+        self.held_secondary = false;
+        const sequence = shared_event.pointerLeaveSequence(held);
+        self.pending_pointer = sequence.queued;
+        return sequence.first;
+    }
+
     fn pointerEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
         switch (opcode) {
             0 => { // enter(serial, surface, x, y)
                 if (body.len != 16) return error.InvalidWaylandMessage;
+                self.noteSerial(get32(body[0..4]));
                 self.pointer_x = @divTrunc(getI32(body[8..12]), 256);
                 self.pointer_y = @divTrunc(getI32(body[12..16]), 256);
+                self.applyPointerCursor();
                 return .{ .pointer = .{ .kind = .move, .x = self.pointer_x, .y = self.pointer_y } };
             },
             1 => { // leave(serial, surface)
                 if (body.len != 8) return error.InvalidWaylandMessage;
-                return null;
+                self.noteSerial(get32(body[0..4]));
+                return self.pointerLeave();
             },
             2 => { // motion(time, x, y)
                 if (body.len != 12) return error.InvalidWaylandMessage;
@@ -810,6 +1541,8 @@ pub const Window = struct {
             },
             3 => { // button(serial, time, button, state)
                 if (body.len != 16) return error.InvalidWaylandMessage;
+                self.noteSerial(get32(body[0..4]));
+                self.applyPointerCursor();
                 const button: shared_event.PointerButton = switch (get32(body[8..12])) {
                     0x110 => .primary,
                     0x111 => .secondary,
@@ -817,6 +1550,17 @@ pub const Window = struct {
                     else => .none,
                 };
                 const pressed = get32(body[12..16]) != 0;
+                if (pressed and button == .middle) {
+                    if (self.pastePrimaryAsKeys()) |ev| {
+                        self.middle_paste = true;
+                        return ev;
+                    }
+                }
+                if (!pressed and button == .middle and self.middle_paste) {
+                    self.middle_paste = false;
+                    return null;
+                }
+                self.noteHeldButton(button, pressed);
                 var clicks: u8 = 1;
                 if (pressed and button == .primary) {
                     const now = get32(body[4..8]);
@@ -836,8 +1580,41 @@ pub const Window = struct {
             },
             4 => { // axis(time, axis, value)
                 if (body.len != 12) return error.InvalidWaylandMessage;
+                if (self.axis_have_discrete) return null;
                 if (get32(body[4..8]) != 0) return null;
                 const value = getI32(body[8..12]);
+                return .{ .pointer = .{
+                    .kind = .wheel,
+                    .x = self.pointer_x,
+                    .y = self.pointer_y,
+                    .wheel_y = if (value < 0) 1 else if (value > 0) -1 else 0,
+                } };
+            },
+            5 => { // frame
+                self.axis_have_discrete = false;
+                return null;
+            },
+            7 => { // axis_stop(time, axis)
+                self.axis_have_discrete = false;
+                return null;
+            },
+            8 => { // axis_discrete(axis, discrete)
+                if (body.len != 8) return error.InvalidWaylandMessage;
+                if (get32(body[0..4]) != 0) return null;
+                self.axis_have_discrete = true;
+                const discrete = getI32(body[4..8]);
+                return .{ .pointer = .{
+                    .kind = .wheel,
+                    .x = self.pointer_x,
+                    .y = self.pointer_y,
+                    .wheel_y = if (discrete < 0) 1 else if (discrete > 0) -1 else 0,
+                } };
+            },
+            9 => { // axis_value120(axis, value120)
+                if (body.len != 8) return error.InvalidWaylandMessage;
+                if (get32(body[0..4]) != 0) return null;
+                self.axis_have_discrete = true;
+                const value = getI32(body[4..8]);
                 return .{ .pointer = .{
                     .kind = .wheel,
                     .x = self.pointer_x,
@@ -872,8 +1649,11 @@ pub const Window = struct {
             },
             1 => { // enter(serial, surface, keys array)
                 if (body.len < 12) return error.InvalidWaylandMessage;
+                self.noteSerial(get32(body[0..4]));
                 const keys_len: usize = @intCast(get32(body[8..12]));
                 if (12 + pad4(keys_len) != body.len) return error.InvalidWaylandMessage;
+                self.applyHeldKeys(body[12 .. 12 + keys_len]);
+                self.refreshTextInput() catch {};
                 return null;
             },
             2 => { // leave
@@ -882,11 +1662,19 @@ pub const Window = struct {
                 self.shift_right = false;
                 self.control_left = false;
                 self.control_right = false;
+                self.alt_left = false;
+                self.alt_right = false;
+                self.super_left = false;
+                self.super_right = false;
                 self.held_key_code = null;
+                self.ime_composing = false;
+                self.compose.reset();
+                self.disableTextInput() catch {};
                 return null;
             },
             3 => { // key(serial, time, key, state)
                 if (body.len != 16) return error.InvalidWaylandMessage;
+                self.noteSerial(get32(body[0..4]));
                 const code = get32(body[8..12]);
                 const state = get32(body[12..16]);
                 const down = state != 0;
@@ -895,12 +1683,20 @@ pub const Window = struct {
                     54 => self.shift_right = down,
                     29 => self.control_left = down,
                     97 => self.control_right = down,
+                    56 => self.alt_left = down,
+                    100 => self.alt_right = down,
+                    125 => self.super_left = down,
+                    126 => self.super_right = down,
                     58 => if (state == 1) {
                         self.caps_lock = !self.caps_lock;
                     },
+                    69 => if (state == 1) {
+                        self.num_lock = !self.num_lock;
+                    },
                     else => {},
                 }
-                if (code != 42 and code != 54 and code != 58) {
+                const is_modifier = code == 42 or code == 54 or code == 29 or code == 97 or code == 56 or code == 100 or code == 125 or code == 126 or code == 58 or code == 69;
+                if (!is_modifier) {
                     if (down) {
                         self.held_key_code = code;
                         self.held_key_shift = self.shift_left or self.shift_right;
@@ -910,16 +1706,58 @@ pub const Window = struct {
                         self.held_key_code = null;
                     }
                 }
-                if (!down or code == 42 or code == 54 or code == 29 or code == 97 or code == 58) return null;
+                if (!down) {
+                    return null;
+                }
+                if (is_modifier) return null;
+                if (self.ime_composing) return null;
                 const shifted = self.shift_left or self.shift_right;
-                return .{ .key = .{ .key = self.translateKey(code, shifted), .modifiers = .{ .shift = shifted, .control = self.control_left or self.control_right } } };
+                const control = self.control_left or self.control_right;
+                const paste = if (self.currentKeysymName(code, shifted)) |name|
+                    xkb.isClipboardPasteKeyName(name, shifted, control)
+                else
+                    isClipboardPasteEvdev(code, shifted, control);
+                if (paste) {
+                    if (self.pasteClipboardAsKeys()) |ev| {
+                        self.held_key_code = null;
+                        return ev;
+                    }
+                }
+                const key = self.translateComposed(code, shifted, control);
+                if (key) |translated| {
+                    if (shouldSuppressImeDuplicate(self.last_committed, translated)) {
+                        self.last_committed = null;
+                        self.held_key_code = null;
+                        return null;
+                    }
+                    self.last_committed = null;
+                }
+                if (key == null) {
+                    self.held_key_code = null;
+                    return null;
+                }
+                return .{ .key = .{
+                    .key = key.?,
+                    .modifiers = .{
+                        .shift = shifted,
+                        .control = control,
+                        .alt = self.alt_left or self.alt_right,
+                        .super = self.super_left or self.super_right,
+                    },
+                } };
             },
             4 => { // modifiers(serial, depressed, latched, locked, group)
                 if (body.len != 20) return error.InvalidWaylandMessage;
-                // Modifier bit positions are defined by the compositor's XKB
-                // keymap. This dependency-free backend intentionally ignores
-                // that keymap, so retain the physical evdev key state above
-                // instead of guessing Shift/Caps bit indices.
+                // Depressed Shift/Ctrl/Alt/Super stay on the evdev key bits
+                // because those indices are not stable across keymaps. Caps
+                // Lock is the conventional Lock modifier (bit 1) in virtually
+                // every XKB map; when the compositor reports it, prefer that
+                // over the local evdev toggle so a lock already held at
+                // keyboard enter is not missed. Group is the layout slot.
+                const locked = get32(body[12..16]);
+                self.caps_lock = capsLockFromLocked(locked, self.caps_lock, &self.caps_from_compositor);
+                self.num_lock = lockFromLocked(locked, xkb_mod_num, self.num_lock, &self.num_from_compositor);
+                self.xkb_group = get32(body[16..20]);
                 return null;
             },
             5 => { // repeat_info(rate, delay), available because the seat is bound at v4+
@@ -959,16 +1797,752 @@ pub const Window = struct {
     /// simply the base character's uppercase form).
     fn translateKey(self: *Window, code: u32, shift: bool) Key {
         if (self.xkb_keymap) |*keymap| {
-            if (keymap.keysymFor(code, false)) |base_keysym| {
-                const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
-                const effective_shift = if (is_letter) (shift != self.caps_lock) else shift;
-                if (keymap.keysymFor(code, effective_shift)) |keysym| {
+            if (self.alt_right) {
+                if (keymap.keysymForGroupLevel(code, self.xkb_group, .level3)) |keysym| {
+                    if (xkb.charForKeysym(keysym)) |ch| return .{ .char = ch };
+                    if (xkb.namedKeyForKeysym(keysym)) |named| return namedKeyToKey(named);
+                }
+            }
+            if (keymap.keysymForGroupLevel(code, self.xkb_group, .base)) |base_keysym| {
+                const shift_name = keymap.keysymForGroupLevel(code, self.xkb_group, .shift);
+                const effective_shift = self.effectiveLevelShift(base_keysym, shift_name, shift);
+                if (keymap.keysymForGroupLevel(code, self.xkb_group, if (effective_shift) .shift else .base)) |keysym| {
                     if (xkb.charForKeysym(keysym)) |ch| return .{ .char = ch };
                     if (xkb.namedKeyForKeysym(keysym)) |named| return namedKeyToKey(named);
                 }
             }
         }
-        return evdevToKey(code, shift, self.caps_lock);
+        return evdevToKey(code, shift, self.caps_lock, self.num_lock);
+    }
+
+    fn effectiveLevelShift(self: *const Window, base_keysym: []const u8, shift_keysym: ?[]const u8, shift: bool) bool {
+        if (xkb.isKeypadKeysymName(base_keysym) or (shift_keysym != null and xkb.isKeypadKeysymName(shift_keysym.?))) {
+            return xkb.keypadUsesNumeric(self.num_lock, shift);
+        }
+        const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
+        return if (is_letter) (shift != self.caps_lock) else shift;
+    }
+
+    fn currentKeysymName(self: *const Window, code: u32, shift: bool) ?[]const u8 {
+        const keymap = self.xkb_keymap orelse return null;
+        if (self.alt_right) {
+            if (keymap.keysymForGroupLevel(code, self.xkb_group, .level3)) |name| return name;
+        }
+        if (keymap.keysymForGroupLevel(code, self.xkb_group, .base)) |base_keysym| {
+            const shift_name = keymap.keysymForGroupLevel(code, self.xkb_group, .shift);
+            const effective_shift = self.effectiveLevelShift(base_keysym, shift_name, shift);
+            return keymap.keysymForGroupLevel(code, self.xkb_group, if (effective_shift) .shift else .base);
+        }
+        return null;
+    }
+
+    fn translateComposed(self: *Window, code: u32, shift: bool, control: bool) ?Key {
+        if (control) {
+            self.compose.reset();
+            return self.translateKey(code, shift);
+        }
+        if (self.currentKeysymName(code, shift)) |name| {
+            switch (self.compose.feedName(name)) {
+                .pending => return null,
+                .char => |ch| return .{ .char = ch },
+                .pass => {},
+            }
+        }
+        const key = self.translateKey(code, shift);
+        return switch (key) {
+            .escape => blk: {
+                self.compose.reset();
+                break :blk .escape;
+            },
+            .char => |ch| switch (self.compose.feedChar(ch)) {
+                .pending => null,
+                .char => |out| .{ .char = out },
+                .pass => .{ .char = ch },
+            },
+            else => blk: {
+                if (self.compose.active()) self.compose.reset();
+                break :blk key;
+            },
+        };
+    }
+
+    fn outputIndex(self: *const Window, id: u32) ?usize {
+        var i: usize = 0;
+        while (i < self.output_count) : (i += 1) {
+            if (self.output_ids[i] == id) return i;
+        }
+        return null;
+    }
+
+    fn currentOutputScale(self: *const Window) u32 {
+        if (self.preferred_buffer_scale != 0) return self.preferred_buffer_scale;
+        var scale: u32 = 1;
+        var i: usize = 0;
+        while (i < self.entered_count) : (i += 1) {
+            if (self.outputIndex(self.entered_outputs[i])) |index| {
+                scale = @max(scale, self.output_scales[index]);
+            }
+        }
+        if (self.entered_count == 0 and self.output_count != 0) {
+            var j: usize = 0;
+            while (j < self.output_count) : (j += 1) scale = @max(scale, self.output_scales[j]);
+        }
+        return scale;
+    }
+
+    fn applyHeldKeys(self: *Window, keys: []const u8) void {
+        const mods = heldModsFromKeyArray(keys);
+        self.shift_left = mods.shift;
+        self.shift_right = false;
+        self.control_left = mods.control;
+        self.control_right = false;
+        self.alt_left = mods.alt;
+        self.alt_right = false;
+        self.super_left = mods.super;
+        self.super_right = false;
+        if (heldNonModifierFromKeyArray(keys)) |code| {
+            self.held_key_code = code;
+            self.held_key_shift = mods.shift;
+            self.held_key_control = mods.control;
+            if (self.repeat_delay_ms > 0) {
+                self.next_repeat_at_ms = nowMs(self.conn.io) +| @as(u64, @intCast(self.repeat_delay_ms));
+            }
+        }
+    }
+
+    fn applyOutputMmScale(self: *Window, index: usize) void {
+        if (self.output_have_scale[index]) return;
+        if (services.scaleFromScreenMm(self.output_width_px[index], self.output_width_mm[index])) |scale| {
+            self.output_scales[index] = scale;
+        }
+    }
+
+    fn surfaceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // enter(output)
+                if (body.len != 4) return null;
+                const output = get32(body);
+                if (self.indexOfEntered(output) != null) return null;
+                if (self.entered_count >= max_outputs) return null;
+                self.entered_outputs[self.entered_count] = output;
+                self.entered_count += 1;
+            },
+            1 => { // leave(output)
+                if (body.len != 4) return null;
+                const output = get32(body);
+                if (self.indexOfEntered(output)) |index| {
+                    self.entered_count -= 1;
+                    self.entered_outputs[index] = self.entered_outputs[self.entered_count];
+                    self.entered_outputs[self.entered_count] = 0;
+                }
+            },
+            2 => { // preferred_buffer_scale(factor), compositor v6
+                if (body.len != 4) return null;
+                self.preferred_buffer_scale = get32(body);
+            },
+            else => return null,
+        }
+        const previous = self.output_scale;
+        self.output_scale = self.currentOutputScale();
+        if (self.configured and previous != self.output_scale) {
+            self.refreshFallbackCursor();
+            self.installToplevelIcon() catch {};
+            return Event.expose;
+        }
+        return null;
+    }
+
+    fn indexOfEntered(self: *const Window, output: u32) ?usize {
+        var i: usize = 0;
+        while (i < self.entered_count) : (i += 1) {
+            if (self.entered_outputs[i] == output) return i;
+        }
+        return null;
+    }
+
+    fn pastePrimaryAsKeys(self: *Window) ?Event {
+        if (self.readPrimaryNative(self.gpa)) |text| {
+            if (text) |bytes| {
+                defer self.gpa.free(bytes);
+                return self.enqueueDropText(bytes) catch null;
+            }
+        } else |_| {}
+        const fallback = services.readPrimary(self.gpa, self.conn.io, .wayland) catch return null;
+        const bytes = fallback orelse return null;
+        defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn pasteClipboardAsKeys(self: *Window) ?Event {
+        if (self.readClipboardNative(self.gpa)) |text| {
+            if (text) |bytes| {
+                defer self.gpa.free(bytes);
+                return self.enqueueDropText(bytes) catch null;
+            }
+        } else |_| {}
+        const fallback = services.readClipboard(self.gpa, self.conn.io, .wayland) catch return null;
+        const bytes = fallback orelse return null;
+        defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn readPrimaryNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
+        if (self.clipboard_text.len != 0 and self.primary_source_id != 0) {
+            return try gpa.dupe(u8, self.clipboard_text);
+        }
+        if (self.primary_offer_id != 0 and self.primary_offer_has_text) {
+            return try self.receiveOffer(gpa, self.primary_offer_id, primary_offer_receive);
+        }
+        return null;
+    }
+
+    fn noteSerial(self: *Window, serial: u32) void {
+        if (serial == 0) return;
+        self.last_serial = serial;
+        self.flushPendingClipboard() catch {};
+    }
+
+    fn writeClipboardNative(self: *Window, text: []const u8) !void {
+        if (text.len > max_clipboard_bytes) return error.ClipboardTooLarge;
+        if (self.data_device_id == 0) return error.MissingDataDevice;
+        const copy = try self.gpa.dupe(u8, text);
+        if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
+        self.clipboard_text = copy;
+        if (self.last_serial == 0) {
+            self.clipboard_needs_serial = true;
+            return;
+        }
+        try self.advertiseClipboard();
+    }
+
+    fn flushPendingClipboard(self: *Window) !void {
+        if (!self.clipboard_needs_serial) return;
+        if (self.last_serial == 0 or self.data_device_id == 0 or self.clipboard_text.len == 0) return;
+        try self.advertiseClipboard();
+    }
+
+    fn advertiseClipboard(self: *Window) !void {
+        if (self.data_source_id != 0) {
+            sendEmpty(&self.conn, self.data_source_id, data_source_destroy) catch {};
+            self.data_source_id = 0;
+        }
+        self.data_source_id = try self.conn.allocId();
+        try sendOneU32(&self.conn, self.data_device_manager_id, data_device_manager_create_data_source, self.data_source_id);
+        try self.offerTextMimes(self.data_source_id, data_source_offer);
+        try sendTwoU32(&self.conn, self.data_device_id, data_device_set_selection, self.data_source_id, self.last_serial);
+        if (self.primary_device_id != 0) {
+            if (self.primary_source_id != 0) {
+                sendEmpty(&self.conn, self.primary_source_id, primary_source_destroy) catch {};
+                self.primary_source_id = 0;
+            }
+            self.primary_source_id = try self.conn.allocId();
+            try sendOneU32(&self.conn, self.primary_manager_id, primary_manager_create_source, self.primary_source_id);
+            try self.offerTextMimes(self.primary_source_id, primary_source_offer);
+            try sendTwoU32(&self.conn, self.primary_device_id, primary_device_set_selection, self.primary_source_id, self.last_serial);
+        }
+        self.clipboard_needs_serial = false;
+    }
+
+    fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
+        if (self.clipboard_text.len != 0 and (self.data_source_id != 0 or self.clipboard_needs_serial)) {
+            return try gpa.dupe(u8, self.clipboard_text);
+        }
+        if (self.data_offer_id != 0 and self.offer_has_text) {
+            return try self.receiveOffer(gpa, self.data_offer_id, data_offer_receive);
+        }
+        return error.MissingDataOffer;
+    }
+
+    fn receiveOffer(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16) ![]u8 {
+        var last_empty: ?[]u8 = null;
+        for (desktop_file_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    if (self.takeDesktopFilePath(gpa, text)) |path| return path;
+                    return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (text_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    if (std.mem.eql(u8, mime, "text/uri-list")) {
+                        if (self.takeDesktopFilePath(gpa, text)) |path| return path;
+                    }
+                    return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (utf16_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = services.clipboardUtf16BytesToUtf8(gpa, text) catch {
+                        return decodeClipboardBytes(gpa, text);
+                    };
+                    gpa.free(text);
+                    return decoded;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (html_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = decodeClipboardBytes(gpa, text) catch return text;
+                    const plain = services.htmlToPlainText(gpa, decoded) catch return decoded;
+                    gpa.free(decoded);
+                    return plain;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (extra_uri_list_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    if (self.takeDesktopFilePath(gpa, text)) |path| return path;
+                    return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (compound_text_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = services.compoundTextToUtf8(gpa, text) catch return text;
+                    gpa.free(text);
+                    return decoded;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (latin_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = services.decodePlainMime(gpa, mime, text) catch return text;
+                    gpa.free(text);
+                    return decoded;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (markdown_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (rtf_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = decodeClipboardBytes(gpa, text) catch return text;
+                    const plain = services.rtfToPlainText(gpa, decoded) catch return decoded;
+                    gpa.free(decoded);
+                    return plain;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        if (last_empty) |text| return decodeClipboardBytes(gpa, text);
+        return error.MissingDataOffer;
+    }
+
+    fn takeDesktopFilePath(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ?[]u8 {
+        var scratch: [1024]u8 = undefined;
+        const path = services.firstPathFromDesktopFiles(bytes, &scratch) orelse
+            services.firstPathFromUriList(bytes, &scratch) orelse return null;
+        const owned = gpa.dupe(u8, path) catch return null;
+        gpa.free(bytes);
+        return owned;
+    }
+
+    fn offerTextMimes(self: *Window, source_id: u32, opcode: u16) !void {
+        for (text_mime_types) |mime| {
+            try sendString(&self.conn, self.gpa, source_id, opcode, mime);
+        }
+    }
+
+    fn receiveMime(self: *Window, gpa: std.mem.Allocator, offer_id: u32, opcode: u16, mime: []const u8) ![]u8 {
+        var fds: [2]i32 = undefined;
+        switch (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
+            .SUCCESS => {},
+            else => return error.PipeFailed,
+        }
+        defer _ = linux.close(fds[0]);
+        try sendReceiveFd(&self.conn, offer_id, opcode, mime, fds[1]);
+        _ = linux.close(fds[1]);
+        try self.roundtrip();
+        return try readFdAll(gpa, fds[0], max_clipboard_bytes);
+    }
+
+    fn roundtrip(self: *Window) !void {
+        const callback = try self.conn.allocId();
+        try sendOneU32(&self.conn, wl_display, display_sync, callback);
+        while (true) {
+            const msg = try self.conn.readMessage(self.gpa);
+            defer msg.deinit(self.gpa);
+            if (msg.object == callback and msg.opcode == 0) return;
+            _ = try self.dispatch(msg);
+        }
+    }
+
+    fn dataDeviceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // data_offer
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                if (self.pending_offer_id != 0 and self.pending_offer_id != self.data_offer_id and self.pending_offer_id != self.dnd_offer_id) {
+                    sendEmpty(&self.conn, self.pending_offer_id, data_offer_destroy) catch {};
+                }
+                self.pending_offer_id = get32(body);
+                self.pending_offer_has_text = false;
+                self.pending_drop_mime = "";
+            },
+            1 => { // enter(serial, surface, x, y, id)
+                if (body.len != 20) return error.InvalidWaylandMessage;
+                self.noteSerial(get32(body[0..4]));
+                self.pointer_x = @divTrunc(getI32(body[8..12]), 256);
+                self.pointer_y = @divTrunc(getI32(body[12..16]), 256);
+                const id = get32(body[16..20]);
+                self.dnd_offer_id = id;
+                self.dnd_has_text = id != 0 and id == self.pending_offer_id and self.pending_offer_has_text;
+                self.dnd_mime = self.pending_drop_mime;
+                if (self.dnd_has_text) {
+                    self.acceptDrop(id, self.last_serial) catch {};
+                }
+                return .{ .pointer = .{ .kind = .move, .x = self.pointer_x, .y = self.pointer_y } };
+            },
+            2 => { // leave
+                self.clearDndOffer();
+                return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
+            },
+            3 => { // motion(time, x, y)
+                if (body.len != 12) return error.InvalidWaylandMessage;
+                self.pointer_x = @divTrunc(getI32(body[4..8]), 256);
+                self.pointer_y = @divTrunc(getI32(body[8..12]), 256);
+                return .{ .pointer = .{ .kind = .move, .x = self.pointer_x, .y = self.pointer_y } };
+            },
+            4 => { // drop
+                return self.takeDrop();
+            },
+            5 => { // selection
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                const id = get32(body);
+                if (self.data_offer_id != 0 and self.data_offer_id != id) {
+                    sendEmpty(&self.conn, self.data_offer_id, data_offer_destroy) catch {};
+                }
+                self.data_offer_id = id;
+                self.offer_has_text = id != 0 and id == self.pending_offer_id and self.pending_offer_has_text;
+                if (id == 0) self.offer_has_text = false;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn acceptDrop(self: *Window, offer_id: u32, serial: u32) !void {
+        const mime = if (self.dnd_mime.len != 0) self.dnd_mime else "text/plain;charset=utf-8";
+        try sendAccept(&self.conn, self.gpa, offer_id, data_offer_accept, serial, mime);
+        if (dataOfferHasV3(self.data_device_version)) {
+            sendTwoU32(&self.conn, offer_id, data_offer_set_actions, dnd_action_copy, dnd_action_copy) catch {};
+        }
+    }
+
+    fn takeDrop(self: *Window) ?Event {
+        const offer_id = self.dnd_offer_id;
+        if (offer_id == 0) return null;
+        defer {
+            if (shouldFinishDataOffer(offer_id, self.data_device_version)) {
+                self.finishDndOffer(offer_id);
+            } else {
+                self.clearDndOffer();
+            }
+        }
+        if (!self.dnd_has_text) return null;
+        const bytes = self.receiveOffer(self.gpa, offer_id, data_offer_receive) catch return null;
+        defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn finishDndOffer(self: *Window, offer_id: u32) void {
+        sendEmpty(&self.conn, offer_id, data_offer_finish) catch {};
+        self.clearDndOffer();
+    }
+
+    fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
+        const payload = try services.firstDropTextUtf8(self.gpa, bytes);
+        defer self.gpa.free(payload);
+        var view = try std.unicode.Utf8View.init(payload);
+        var iterator = view.iterator();
+        while (iterator.nextCodepoint()) |codepoint| {
+            if (self.committed_text.items.len - self.committed_text_offset >= 4096) break;
+            try self.committed_text.append(self.gpa, codepoint);
+        }
+        return self.takeCommittedKey();
+    }
+
+    fn clearDndOffer(self: *Window) void {
+        if (self.dnd_offer_id != 0 and self.dnd_offer_id != self.data_offer_id) {
+            sendEmpty(&self.conn, self.dnd_offer_id, data_offer_destroy) catch {};
+        }
+        self.dnd_offer_id = 0;
+        self.dnd_has_text = false;
+        self.dnd_mime = "";
+    }
+
+    fn dataSourceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            1 => { // send(mime, fd)
+                _ = try parseWireString(body);
+                if (self.conn.takePendingFd()) |fd_value| {
+                    defer _ = linux.close(fd_value);
+                    writeAllFd(fd_value, self.clipboard_text) catch {};
+                }
+            },
+            2 => { // cancelled
+                if (self.data_source_id != 0) {
+                    sendEmpty(&self.conn, self.data_source_id, data_source_destroy) catch {};
+                    self.data_source_id = 0;
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn dataOfferEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        if (opcode != 0) return null;
+        const mime = try parseWireString(body);
+        if (isPlainTextMime(mime)) {
+            if (self.pending_offer_id != 0) {
+                self.pending_offer_has_text = true;
+                if (knownTextMime(mime)) |known| {
+                    if (self.pending_drop_mime.len == 0 or textMimeRank(known) > textMimeRank(self.pending_drop_mime)) {
+                        self.pending_drop_mime = known;
+                    }
+                }
+            }
+            if (self.data_offer_id != 0) self.offer_has_text = true;
+            if (self.dnd_offer_id != 0 and self.dnd_offer_id == self.pending_offer_id) {
+                self.dnd_has_text = true;
+                if (knownTextMime(mime)) |known| {
+                    if (self.dnd_mime.len == 0 or textMimeRank(known) > textMimeRank(self.dnd_mime)) {
+                        self.dnd_mime = known;
+                    }
+                    self.acceptDrop(self.dnd_offer_id, self.last_serial) catch {};
+                }
+            }
+        }
+        return null;
+    }
+
+    fn primaryDeviceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // data_offer
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                if (self.pending_primary_offer_id != 0 and self.pending_primary_offer_id != self.primary_offer_id) {
+                    sendEmpty(&self.conn, self.pending_primary_offer_id, primary_offer_destroy) catch {};
+                }
+                self.pending_primary_offer_id = get32(body);
+                self.pending_primary_offer_has_text = false;
+            },
+            1 => { // selection
+                if (body.len != 4) return error.InvalidWaylandMessage;
+                const id = get32(body);
+                if (self.primary_offer_id != 0 and self.primary_offer_id != id) {
+                    sendEmpty(&self.conn, self.primary_offer_id, primary_offer_destroy) catch {};
+                }
+                self.primary_offer_id = id;
+                self.primary_offer_has_text = id != 0 and id == self.pending_primary_offer_id and self.pending_primary_offer_has_text;
+                if (id == 0) self.primary_offer_has_text = false;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn primarySourceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        switch (opcode) {
+            0 => { // send(mime, fd)
+                _ = try parseWireString(body);
+                if (self.conn.takePendingFd()) |fd_value| {
+                    defer _ = linux.close(fd_value);
+                    writeAllFd(fd_value, self.clipboard_text) catch {};
+                }
+            },
+            1 => { // cancelled
+                if (self.primary_source_id != 0) {
+                    sendEmpty(&self.conn, self.primary_source_id, primary_source_destroy) catch {};
+                    self.primary_source_id = 0;
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn primaryOfferEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
+        if (opcode != 0) return null;
+        const mime = try parseWireString(body);
+        if (isPlainTextMime(mime)) {
+            if (self.pending_primary_offer_id != 0) self.pending_primary_offer_has_text = true;
+            if (self.primary_offer_id != 0) self.primary_offer_has_text = true;
+        }
+        return null;
+    }
+
+    fn refreshFallbackCursor(self: *Window) void {
+        if (self.cursor_shape_device_id != 0) return;
+        if (self.cursor_buffer) |*buffer| {
+            sendEmpty(&self.conn, buffer.id, buffer_destroy) catch {};
+            buffer.deinit();
+            self.cursor_buffer = null;
+        }
+        self.applyPointerCursor();
+    }
+
+    fn fallbackCursorPixelSize(self: *const Window) u32 {
+        if (self.viewport_id != 0 and self.fractional_scale_120 != 0) {
+            return @min(64, @max(16, scale120(16, self.fractional_scale_120)));
+        }
+        return services.cursorPixelSize(self.output_scale, "", "");
+    }
+
+    fn applyPointerCursor(self: *Window) void {
+        if (self.pointer_id == 0 or self.last_serial == 0) return;
+        if (self.cursor_shape_device_id != 0) {
+            sendTwoU32(&self.conn, self.cursor_shape_device_id, cursor_shape_set_shape, self.last_serial, cursor_shape_default) catch {};
+            return;
+        }
+        self.ensureFallbackCursor() catch return;
+        sendSetCursor(&self.conn, self.pointer_id, self.last_serial, self.cursor_surface_id, self.cursor_hotspot_x, self.cursor_hotspot_y) catch {};
+    }
+
+    fn ensureFallbackCursor(self: *Window) !void {
+        if (self.cursor_surface_id != 0 and self.cursor_buffer != null) return;
+        const size: u32 = self.fallbackCursorPixelSize();
+        const count = try std.math.mul(usize, @as(usize, size), @as(usize, size));
+        const pixels = try self.gpa.alloc(u32, count);
+        defer self.gpa.free(pixels);
+        services.fillArrowCursor(pixels, size);
+        const buffer = try self.createBuffer(size, size);
+        const destination: []u32 = std.mem.bytesAsSlice(u32, buffer.memory);
+        @memcpy(destination[0..count], pixels);
+        if (self.cursor_surface_id == 0) {
+            self.cursor_surface_id = try self.conn.allocId();
+            try sendOneU32(&self.conn, self.compositor_id, compositor_create_surface, self.cursor_surface_id);
+        }
+        try sendAttach(&self.conn, self.cursor_surface_id, buffer.id);
+        try sendDamage(&self.conn, self.cursor_surface_id, surface_damage, size, size);
+        try sendEmpty(&self.conn, self.cursor_surface_id, surface_commit);
+        const hot = services.arrowHotspot(size);
+        self.cursor_hotspot_x = @intCast(hot.x);
+        self.cursor_hotspot_y = @intCast(hot.y);
+        self.cursor_buffer = buffer;
+    }
+
+    fn installToplevelIcon(self: *Window) !void {
+        if (self.toplevel_icon_manager_id == 0 or self.xdg_toplevel_id == 0) return;
+        if (self.toplevel_icon_id != 0) sendEmpty(&self.conn, self.toplevel_icon_id, 0) catch {};
+        if (self.icon_buffer) |*buffer| {
+            sendEmpty(&self.conn, buffer.id, buffer_destroy) catch {};
+            buffer.deinit();
+            self.icon_buffer = null;
+        }
+        if (self.icon_buffer_2x) |*buffer| {
+            sendEmpty(&self.conn, buffer.id, buffer_destroy) catch {};
+            buffer.deinit();
+            self.icon_buffer_2x = null;
+        }
+        self.toplevel_icon_id = try self.conn.allocId();
+        try sendOneU32(&self.conn, self.toplevel_icon_manager_id, toplevel_icon_create_icon, self.toplevel_icon_id);
+        try sendString(&self.conn, self.gpa, self.toplevel_icon_id, toplevel_icon_set_name, "applications-internet");
+        var pixels_1x: [32 * 32]u32 = undefined;
+        var pixels_2x: [64 * 64]u32 = undefined;
+        services.fillWindowMark(&pixels_1x, 32);
+        services.fillWindowMark(&pixels_2x, 64);
+        const buffer_1x = try self.createBuffer(32, 32);
+        const buffer_2x = try self.createBuffer(64, 64);
+        const dest_1x: []u32 = std.mem.bytesAsSlice(u32, buffer_1x.memory);
+        const dest_2x: []u32 = std.mem.bytesAsSlice(u32, buffer_2x.memory);
+        @memcpy(dest_1x[0 .. 32 * 32], &pixels_1x);
+        @memcpy(dest_2x[0 .. 64 * 64], &pixels_2x);
+        try sendTwoU32(&self.conn, self.toplevel_icon_id, toplevel_icon_add_buffer, buffer_1x.id, 1);
+        try sendTwoU32(&self.conn, self.toplevel_icon_id, toplevel_icon_add_buffer, buffer_2x.id, 2);
+        try sendTwoU32(&self.conn, self.toplevel_icon_manager_id, toplevel_icon_set_icon, self.xdg_toplevel_id, self.toplevel_icon_id);
+        self.icon_buffer = buffer_1x;
+        self.icon_buffer_2x = buffer_2x;
+    }
+
+    fn takeOutgoingActivationToken(self: *Window) ?[]u8 {
+        if (self.activation_id == 0 or self.surface_id == 0) return null;
+        const token_id = self.conn.allocId() catch return null;
+        sendOneU32(&self.conn, self.activation_id, xdg_activation_get_token, token_id) catch return null;
+        if (self.last_serial != 0 and self.seat_id != 0) {
+            sendTwoU32(&self.conn, token_id, activation_token_set_serial, self.last_serial, self.seat_id) catch {};
+        }
+        sendString(&self.conn, self.gpa, token_id, activation_token_set_app_id, "comicchat") catch {};
+        sendOneU32(&self.conn, token_id, activation_token_set_surface, self.surface_id) catch {};
+        sendEmpty(&self.conn, token_id, activation_token_commit) catch {
+            sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+            return null;
+        };
+        sendEmpty(&self.conn, self.surface_id, surface_commit) catch {};
+        const callback = self.conn.allocId() catch {
+            sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+            return null;
+        };
+        sendOneU32(&self.conn, wl_display, display_sync, callback) catch {
+            sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+            return null;
+        };
+        var token: ?[]u8 = null;
+        while (true) {
+            const msg = self.conn.readMessage(self.gpa) catch {
+                if (token) |bytes| self.gpa.free(bytes);
+                sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+                return null;
+            };
+            defer msg.deinit(self.gpa);
+            if (msg.object == token_id and msg.opcode == 0) {
+                if (parseWireString(msg.body)) |value| {
+                    if (value.len != 0 and token == null) token = self.gpa.dupe(u8, value) catch null;
+                } else |_| {}
+                continue;
+            }
+            if (msg.object == callback and msg.opcode == 0) {
+                sendEmpty(&self.conn, token_id, activation_token_destroy) catch {};
+                return token;
+            }
+            _ = self.dispatch(msg) catch {};
+        }
+    }
+
+    fn activateStartupToken(self: *Window) !void {
+        if (self.activation_id == 0 or self.surface_id == 0 or self.startup_token.len == 0) return;
+        try sendStringU32(&self.conn, self.gpa, self.activation_id, xdg_activation_activate, self.startup_token, self.surface_id);
+        self.gpa.free(self.startup_token);
+        self.startup_token = "";
     }
 
     fn createBuffer(self: *Window, w: u32, h: u32) !Buffer {
@@ -1030,8 +2604,32 @@ pub const Window = struct {
         if (self.keyboard_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.keyboard_id, keyboard_release);
         if (self.pointer_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.pointer_id, pointer_release);
         if (self.touch_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.touch_id, 0);
-        if (self.text_input_id != 0) try sendEmpty(&self.conn, self.text_input_id, 0);
+        if (self.data_source_id != 0) try sendEmpty(&self.conn, self.data_source_id, data_source_destroy);
+        if (self.data_offer_id != 0) try sendEmpty(&self.conn, self.data_offer_id, data_offer_destroy);
+        if (self.pending_offer_id != 0 and self.pending_offer_id != self.data_offer_id) try sendEmpty(&self.conn, self.pending_offer_id, data_offer_destroy);
+        if (self.data_device_id != 0 and self.seat_version >= 3) try sendEmpty(&self.conn, self.data_device_id, data_device_release);
+        if (self.primary_source_id != 0) try sendEmpty(&self.conn, self.primary_source_id, primary_source_destroy);
+        if (self.primary_offer_id != 0) try sendEmpty(&self.conn, self.primary_offer_id, primary_offer_destroy);
+        if (self.pending_primary_offer_id != 0 and self.pending_primary_offer_id != self.primary_offer_id) try sendEmpty(&self.conn, self.pending_primary_offer_id, primary_offer_destroy);
+        if (self.primary_device_id != 0) try sendEmpty(&self.conn, self.primary_device_id, primary_device_destroy);
+        if (self.viewport_id != 0) try sendEmpty(&self.conn, self.viewport_id, viewport_destroy);
+        if (self.fractional_scale_id != 0) try sendEmpty(&self.conn, self.fractional_scale_id, 0);
+        if (self.viewporter_id != 0) try sendEmpty(&self.conn, self.viewporter_id, 0);
+        if (self.fractional_manager_id != 0) try sendEmpty(&self.conn, self.fractional_manager_id, 0);
+        if (self.primary_manager_id != 0) try sendEmpty(&self.conn, self.primary_manager_id, 2);
+        if (self.text_input_id != 0) try sendEmpty(&self.conn, self.text_input_id, text_input_destroy);
         if (self.text_input_manager_id != 0) try sendEmpty(&self.conn, self.text_input_manager_id, 0);
+        if (self.cursor_shape_device_id != 0) try sendEmpty(&self.conn, self.cursor_shape_device_id, 0);
+        if (self.cursor_shape_manager_id != 0) try sendEmpty(&self.conn, self.cursor_shape_manager_id, 0);
+        if (self.cursor_surface_id != 0) try sendEmpty(&self.conn, self.cursor_surface_id, surface_destroy);
+        if (self.cursor_buffer) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
+        if (self.toplevel_icon_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_id, 0);
+        if (self.icon_buffer) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
+        if (self.icon_buffer_2x) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
+        if (self.toplevel_icon_manager_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_manager_id, 0);
+        if (self.decoration_id != 0) try sendEmpty(&self.conn, self.decoration_id, 0);
+        if (self.decoration_manager_id != 0) try sendEmpty(&self.conn, self.decoration_manager_id, 0);
+        if (self.activation_id != 0) try sendEmpty(&self.conn, self.activation_id, 0);
         if (self.xdg_toplevel_id != 0) try sendEmpty(&self.conn, self.xdg_toplevel_id, xdg_toplevel_destroy);
         if (self.xdg_surface_id != 0) try sendEmpty(&self.conn, self.xdg_surface_id, xdg_surface_destroy);
         if (self.surface_id != 0) try sendEmpty(&self.conn, self.surface_id, surface_destroy);
@@ -1067,9 +2665,20 @@ fn parseRegistryGlobal(body: []const u8) !RegistryGlobal {
 fn parseWireString(body: []const u8) ![]const u8 {
     if (body.len < 4) return error.InvalidWaylandMessage;
     const length: usize = @intCast(get32(body[0..4]));
-    if (length == 0) return "";
+    if (length == 0) {
+        if (body.len != 4) return error.InvalidWaylandMessage;
+        return "";
+    }
     if (length > body.len - 4 or body.len != 4 + pad4(length) or body[3 + length] != 0)
         return error.InvalidWaylandMessage;
+    return body[4 .. 3 + length];
+}
+
+fn parseLeadingString(body: []const u8) ![]const u8 {
+    if (body.len < 4) return error.InvalidWaylandMessage;
+    const length: usize = @intCast(get32(body[0..4]));
+    if (length == 0) return "";
+    if (length > body.len - 4 or body[3 + length] != 0) return error.InvalidWaylandMessage;
     return body[4 .. 3 + length];
 }
 
@@ -1096,6 +2705,49 @@ fn sendBind(
     try conn.writeAll(req);
 }
 
+fn sendReceiveFd(conn: *Connection, object: u32, opcode: u16, mime: []const u8, fd_value: i32) !void {
+    const string_size = try encodedStringSize(mime);
+    const total = try std.math.add(usize, 8, string_size);
+    if (total > 64) return error.WaylandMessageTooLarge;
+    var req: [64]u8 = @splat(0);
+    header(req[0..total], object, opcode);
+    encodeString(req[8 .. 8 + string_size], mime);
+    try conn.writeWithFd(req[0..total], fd_value);
+}
+
+fn writeAllFd(fd_value: i32, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = linux.write(fd_value, bytes[off..].ptr, bytes.len - off);
+        switch (linux.errno(n)) {
+            .SUCCESS => {
+                if (n == 0) return error.WriteZero;
+                off += @intCast(n);
+            },
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
+    }
+}
+
+fn readFdAll(gpa: std.mem.Allocator, fd_value: i32, limit: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var scratch: [4096]u8 = undefined;
+    while (out.items.len < limit) {
+        const n = linux.read(fd_value, &scratch, @min(scratch.len, limit - out.items.len));
+        switch (linux.errno(n)) {
+            .SUCCESS => {
+                if (n == 0) break;
+                try out.appendSlice(gpa, scratch[0..@intCast(n)]);
+            },
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 fn sendString(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u16, value: []const u8) !void {
     const string_size = try encodedStringSize(value);
     const total = try std.math.add(usize, 8, string_size);
@@ -1105,6 +2757,19 @@ fn sendString(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u1
     @memset(req, 0);
     header(req, object, opcode);
     encodeString(req[8..], value);
+    try conn.writeAll(req);
+}
+
+fn sendStringU32(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u16, value: []const u8, extra: u32) !void {
+    const string_size = try encodedStringSize(value);
+    const total = try std.math.add(usize, 12, string_size);
+    if (total > std.math.maxInt(u16)) return error.WaylandMessageTooLarge;
+    const req = try gpa.alloc(u8, total);
+    defer gpa.free(req);
+    @memset(req, 0);
+    header(req, object, opcode);
+    encodeString(req[8..], value);
+    put32(req[8 + string_size ..][0..4], extra);
     try conn.writeAll(req);
 }
 
@@ -1126,6 +2791,45 @@ fn sendTwoU32(conn: *Connection, object: u32, opcode: u16, a: u32, b: u32) !void
     header(&req, object, opcode);
     put32(req[8..12], a);
     put32(req[12..16], b);
+    try conn.writeAll(&req);
+}
+
+fn sendAccept(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u16, serial: u32, mime: []const u8) !void {
+    const string_size = try encodedStringSize(mime);
+    const total = try std.math.add(usize, 12, string_size);
+    if (total > std.math.maxInt(u16)) return error.WaylandMessageTooLarge;
+    const req = try gpa.alloc(u8, total);
+    defer gpa.free(req);
+    @memset(req, 0);
+    header(req, object, opcode);
+    put32(req[8..12], serial);
+    encodeString(req[12..], mime);
+    try conn.writeAll(req);
+}
+
+fn sendFourI32(conn: *Connection, object: u32, opcode: u16, a: i32, b: i32, c: i32, d: i32) !void {
+    var req: [24]u8 = @splat(0);
+    header(&req, object, opcode);
+    putI32(req[8..12], a);
+    putI32(req[12..16], b);
+    putI32(req[16..20], c);
+    putI32(req[20..24], d);
+    try conn.writeAll(&req);
+}
+
+fn decodeClipboardBytes(gpa: std.mem.Allocator, text: []u8) ![]u8 {
+    const decoded = services.clipboardBytesToUtf8(gpa, text) catch return text;
+    gpa.free(text);
+    return decoded;
+}
+
+fn sendSetCursor(conn: *Connection, pointer: u32, serial: u32, surface: u32, hotspot_x: i32, hotspot_y: i32) !void {
+    var req: [24]u8 = @splat(0);
+    header(&req, pointer, pointer_set_cursor);
+    put32(req[8..12], serial);
+    put32(req[12..16], surface);
+    putI32(req[16..20], hotspot_x);
+    putI32(req[20..24], hotspot_y);
     try conn.writeAll(&req);
 }
 
@@ -1183,7 +2887,167 @@ fn namedKeyToKey(named: xkb.NamedKey) Key {
     };
 }
 
-fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
+fn imeCursorRect(width: u32, height: u32) struct { x: i32, y: i32, w: i32, h: i32 } {
+    const margin = ime_cursor_margin;
+    const strip = ime_cursor_height;
+    const w: i32 = @intCast(width);
+    const h: i32 = @intCast(height);
+    const box_w = if (w > margin * 2) w - margin * 2 else w;
+    const box_h = if (h >= strip) strip else h;
+    const y = if (h > box_h) h - box_h else 0;
+    const x = if (w > box_w) margin else 0;
+    return .{ .x = x, .y = y, .w = box_w, .h = box_h };
+}
+
+fn shouldSuppressImeDuplicate(last: ?u21, key: Key) bool {
+    const committed = last orelse return false;
+    return switch (key) {
+        .char => |ch| ch == committed,
+        else => false,
+    };
+}
+
+fn decorationModeIsClientSide(mode: u32) bool {
+    return mode == decoration_mode_client_side;
+}
+
+fn capsLockFromLocked(locked: u32, current: bool, from_compositor: *bool) bool {
+    return lockFromLocked(locked, xkb_mod_lock, current, from_compositor);
+}
+
+fn lockFromLocked(locked: u32, bit: u32, current: bool, from_compositor: *bool) bool {
+    if (locked & bit != 0) {
+        from_compositor.* = true;
+        return true;
+    }
+    if (from_compositor.*) return false;
+    return current;
+}
+
+fn clampToBounds(value: i32, bound: i32) i32 {
+    if (value > 0 and bound > 0 and value > bound) return bound;
+    return value;
+}
+
+fn configureContainsState(bytes: []const u8, state: u32) bool {
+    var off: usize = 0;
+    while (off + 4 <= bytes.len) : (off += 4) {
+        if (get32(bytes[off..][0..4]) == state) return true;
+    }
+    return false;
+}
+
+fn dataOfferHasV3(version: u32) bool {
+    return version >= 3;
+}
+
+fn shouldFinishDataOffer(offer_id: u32, version: u32) bool {
+    return offer_id != 0 and dataOfferHasV3(version);
+}
+
+fn isPlainTextMime(mime: []const u8) bool {
+    return knownTextMime(mime) != null;
+}
+
+fn knownTextMime(mime: []const u8) ?[]const u8 {
+    for (text_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (utf16_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (html_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (extra_uri_list_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (rtf_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (desktop_file_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (compound_text_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (latin_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    for (markdown_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    if (services.isHtmlMime(mime)) return "text/html";
+    if (services.isUriListMime(mime)) return "text/uri-list";
+    if (services.isRtfMime(mime)) return "text/rtf";
+    if (services.isDesktopFileMime(mime)) return "x-special/gnome-copied-files";
+    if (services.isCompoundTextMime(mime)) return "COMPOUND_TEXT";
+    if (services.knownLatinPlainMime(mime)) |known| return known;
+    if (services.isMarkdownMime(mime)) return "text/markdown";
+    return null;
+}
+
+fn textMimeRank(mime: []const u8) u8 {
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf-8")) return 6;
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf8")) return 5;
+    if (std.mem.eql(u8, mime, "text/plain")) return 4;
+    if (std.mem.eql(u8, mime, "UTF8_STRING")) return 3;
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "text/plain;charset=utf16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
+    if (services.isLatinPlainMime(mime)) return 3;
+    if (services.isUriListMime(mime) or services.isDesktopFileMime(mime) or services.isMarkdownMime(mime)) return 2;
+    if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
+    if (services.isHtmlMime(mime) or services.isRtfMime(mime) or services.isCompoundTextMime(mime)) return 1;
+    return 0;
+}
+
+const HeldMods = struct {
+    shift: bool = false,
+    control: bool = false,
+    alt: bool = false,
+    super: bool = false,
+};
+
+fn heldModsFromKeyArray(keys: []const u8) HeldMods {
+    var mods: HeldMods = .{};
+    var off: usize = 0;
+    while (off + 4 <= keys.len) : (off += 4) {
+        switch (get32(keys[off..][0..4])) {
+            42, 54 => mods.shift = true,
+            29, 97 => mods.control = true,
+            56, 100 => mods.alt = true,
+            125, 126 => mods.super = true,
+            else => {},
+        }
+    }
+    return mods;
+}
+
+const evdev_insert: u32 = 110;
+const evdev_paste: u32 = 135;
+
+fn isClipboardPasteEvdev(code: u32, shift: bool, control: bool) bool {
+    if (control) return false;
+    if (code == evdev_paste) return true;
+    return shift and code == evdev_insert;
+}
+
+fn isModifierEvdev(code: u32) bool {
+    return switch (code) {
+        29, 42, 54, 56, 58, 69, 97, 100, 125, 126 => true,
+        else => false,
+    };
+}
+
+fn heldNonModifierFromKeyArray(keys: []const u8) ?u32 {
+    var off: usize = 0;
+    while (off + 4 <= keys.len) : (off += 4) {
+        const code = get32(keys[off..][0..4]);
+        if (!isModifierEvdev(code)) return code;
+    }
+    return null;
+}
+
+fn evdevToKey(code: u32, shift: bool, caps_lock: bool, num_lock: bool) Key {
     return switch (code) {
         1 => .escape,
         14 => .backspace,
@@ -1245,7 +3109,22 @@ fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
         51 => asciiPair(',', '<', shift),
         52 => asciiPair('.', '>', shift),
         53 => asciiPair('/', '?', shift),
+        55 => .{ .char = '*' },
         57 => .{ .char = ' ' },
+        71 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '7' } else .home,
+        72 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '8' } else .up,
+        73 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '9' } else .page_up,
+        74 => .{ .char = '-' },
+        75 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '4' } else .left,
+        76 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '5' } else .other,
+        77 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '6' } else .right,
+        78 => .{ .char = '+' },
+        79 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '1' } else .end,
+        80 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '2' } else .down,
+        81 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '3' } else .page_down,
+        82 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '0' } else .other,
+        83 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '.' } else .delete,
+        98 => .{ .char = '/' },
         else => .other,
     };
 }
@@ -1259,17 +3138,9 @@ fn asciiLetter(lower: u8, shift: bool, caps_lock: bool) Key {
 }
 
 fn waylandSocketPath(gpa: std.mem.Allocator) ![]u8 {
-    const fd_value = try openReadOnly("/proc/self/environ");
-    defer _ = linux.close(fd_value);
-    var env: std.ArrayList(u8) = .empty;
-    defer env.deinit(gpa);
-    var scratch: [4096]u8 = undefined;
-    while (true) {
-        const n = try readSomeFd(fd_value, &scratch);
-        if (n == 0) break;
-        try env.appendSlice(gpa, scratch[0..n]);
-    }
-    return socketPathFromEnvironment(gpa, env.items);
+    const env = try services.readEnviron(gpa);
+    defer gpa.free(env);
+    return socketPathFromEnvironment(gpa, env);
 }
 
 fn socketPathFromEnvironment(gpa: std.mem.Allocator, env: []const u8) ![]u8 {
@@ -1296,12 +3167,29 @@ fn environmentValue(env: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn openUnixSocket(io: std.Io, path: []const u8) !net.Stream {
-    const address = try net.UnixAddress.init(path);
-    return net.UnixAddress.connect(&address, io) catch |err| switch (err) {
-        error.FileNotFound => error.WaylandUnavailable,
-        error.AccessDenied, error.PermissionDenied => error.AccessDenied,
+    return services.connectUnixStream(io, path) catch |err| switch (err) {
+        error.ServerUnavailable => error.WaylandUnavailable,
+        error.AccessDenied => error.AccessDenied,
         else => err,
     };
+}
+
+fn scale120(logical: u32, scale: u32) u32 {
+    const value = (@as(u64, logical) * scale + 60) / 120;
+    return @intCast(@max(1, value));
+}
+
+fn scaleNearestTo(dst: []u32, src: []const u32, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) void {
+    if (src_w == 0 or src_h == 0 or dst_w == 0 or dst_h == 0) return;
+    var y: u32 = 0;
+    while (y < dst_h) : (y += 1) {
+        const sy = y * src_h / dst_h;
+        var x: u32 = 0;
+        while (x < dst_w) : (x += 1) {
+            const sx = x * src_w / dst_w;
+            dst[@as(usize, y) * dst_w + x] = src[@as(usize, sy) * src_w + sx];
+        }
+    }
 }
 
 fn truncateFd(fd_value: i32, length: i64) !void {
@@ -1414,14 +3302,31 @@ test "Wayland socket path honors absolute display and runtime directory" {
 }
 
 test "US evdev fallback maps text modifiers and navigation" {
-    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, false, false));
-    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, true, false));
-    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, false, true));
-    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, true, true));
-    try std.testing.expectEqual(Key{ .char = '!' }, evdevToKey(2, true, false));
-    try std.testing.expectEqual(Key.left, evdevToKey(105, false, false));
-    try std.testing.expectEqual(Key.delete, evdevToKey(111, false, false));
-    try std.testing.expectEqual(Key.other, evdevToKey(59, false, false));
+    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, false, false, false));
+    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, true, false, false));
+    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, false, true, false));
+    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, true, true, false));
+    try std.testing.expectEqual(Key{ .char = '!' }, evdevToKey(2, true, false, false));
+    try std.testing.expectEqual(Key.left, evdevToKey(105, false, false, false));
+    try std.testing.expectEqual(Key.delete, evdevToKey(111, false, false, false));
+    try std.testing.expectEqual(Key.other, evdevToKey(59, false, false, false));
+    try std.testing.expectEqual(Key.home, evdevToKey(71, false, false, false));
+    try std.testing.expectEqual(Key{ .char = '7' }, evdevToKey(71, false, false, true));
+    try std.testing.expectEqual(Key.home, evdevToKey(71, true, false, true));
+    try std.testing.expectEqual(Key{ .char = '7' }, evdevToKey(71, true, false, false));
+    try std.testing.expectEqual(Key{ .char = '.' }, evdevToKey(83, false, false, true));
+    try std.testing.expectEqual(Key.delete, evdevToKey(83, false, false, false));
+}
+
+test "compositor lock bits report CapsLock and NumLock" {
+    var from_caps = false;
+    try std.testing.expect(capsLockFromLocked(xkb_mod_lock, false, &from_caps));
+    try std.testing.expect(from_caps);
+    try std.testing.expect(!capsLockFromLocked(0, true, &from_caps));
+    var from_num = false;
+    try std.testing.expect(lockFromLocked(xkb_mod_num, xkb_mod_num, false, &from_num));
+    try std.testing.expect(from_num);
+    try std.testing.expect(!lockFromLocked(0, xkb_mod_num, true, &from_num));
 }
 
 test "SCM control alignment is sufficient for one fd" {
@@ -1742,5 +3647,315 @@ test "Wayland Window entry points compile without a compositor" {
     // The invalid size returns before environment/socket access, while making
     // Zig analyze the complete native backend call graph.
     try std.testing.expectError(error.InvalidWindowSize, show(std.testing.allocator, &.{}, 0, 1));
+}
+
+test "Wayland output scale follows the entered surface, then the max bound output" {
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = .{ .io = undefined, .stream = .{ .socket = .{ .handle = -1, .address = undefined } } },
+        .width = 1,
+        .height = 1,
+        .output_ids = .{ 10, 11, 0, 0, 0, 0, 0, 0 },
+        .output_scales = .{ 1, 2, 1, 1, 1, 1, 1, 1 },
+        .output_count = 2,
+    };
+    try std.testing.expectEqual(@as(u32, 2), window.currentOutputScale());
+    window.entered_outputs[0] = 10;
+    window.entered_count = 1;
+    try std.testing.expectEqual(@as(u32, 1), window.currentOutputScale());
+    window.entered_outputs[1] = 11;
+    window.entered_count = 2;
+    try std.testing.expectEqual(@as(u32, 2), window.currentOutputScale());
+    window.preferred_buffer_scale = 3;
+    try std.testing.expectEqual(@as(u32, 3), window.currentOutputScale());
+    window.preferred_buffer_scale = 0;
+    window.entered_count = 0;
+    window.output_have_scale[0] = false;
+    window.output_width_px[0] = 3840;
+    window.output_width_mm[0] = 600;
+    window.applyOutputMmScale(0);
+    try std.testing.expectEqual(@as(u32, 2), window.output_scales[0]);
+}
+
+test "Wayland discrete axis wins over continuous axis in the same frame" {
+    var sockets: [2]i32 = undefined;
+    const pair_rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(pair_rc));
+    defer _ = linux.close(sockets[1]);
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = .{ .io = threaded.io(), .stream = .{ .socket = .{ .handle = sockets[0], .address = undefined } } },
+        .pointer_id = 9,
+        .width = 1,
+        .height = 1,
+    };
+    defer _ = linux.close(sockets[0]);
+
+    var discrete: [16]u8 = @splat(0);
+    header(&discrete, window.pointer_id, 8);
+    put32(discrete[8..12], 0);
+    putI32(discrete[12..16], -1);
+    var wrote = linux.write(sockets[1], &discrete, discrete.len);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(wrote));
+    try std.testing.expectEqual(Event{ .pointer = .{ .kind = .wheel, .x = 0, .y = 0, .wheel_y = 1 } }, try window.nextEvent());
+
+    var axis: [20]u8 = @splat(0);
+    header(&axis, window.pointer_id, 4);
+    put32(axis[12..16], 0);
+    putI32(axis[16..20], 2560);
+    wrote = linux.write(sockets[1], &axis, axis.len);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(wrote));
+    try std.testing.expectEqual(Event.other, try window.nextEvent());
+}
+
+test "fractional scale 120ths rounds to the nearest buffer size" {
+    try std.testing.expectEqual(@as(u32, 100), scale120(100, 120));
+    try std.testing.expectEqual(@as(u32, 150), scale120(100, 180));
+    try std.testing.expectEqual(@as(u32, 200), scale120(100, 240));
+    try std.testing.expectEqual(@as(u32, 1), scale120(0, 180));
+}
+
+test "Wayland bufferDimensions prefers fractional viewport over integer output scale" {
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = undefined,
+        .width = 320,
+        .height = 240,
+        .output_scale = 2,
+        .viewport_id = 7,
+        .fractional_scale_120 = 180,
+    };
+    const dims = window.bufferDimensions(320, 240);
+    try std.testing.expect(dims.use_viewport);
+    try std.testing.expectEqual(@as(u32, 480), dims.w);
+    try std.testing.expectEqual(@as(u32, 360), dims.h);
+
+    window.fractional_scale_120 = 0;
+    const fallback = window.bufferDimensions(320, 240);
+    try std.testing.expect(!fallback.use_viewport);
+    try std.testing.expectEqual(@as(u32, 640), fallback.w);
+
+    window.fractional_scale_120 = 180;
+    try std.testing.expectEqual(@as(u32, 24), window.fallbackCursorPixelSize());
+    window.fractional_scale_120 = 0;
+    try std.testing.expectEqual(@as(u32, 32), window.fallbackCursorPixelSize());
+}
+
+test "Wayland drop finishes any nonzero offer and axis_stop clears the discrete latch" {
+    try std.testing.expect(shouldFinishDataOffer(7, 3));
+    try std.testing.expect(!shouldFinishDataOffer(7, 2));
+    try std.testing.expect(!shouldFinishDataOffer(7, 1));
+    try std.testing.expect(!shouldFinishDataOffer(0, 3));
+    try std.testing.expect(dataOfferHasV3(3));
+    try std.testing.expect(!dataOfferHasV3(2));
+    var window = Window{
+        .gpa = std.testing.allocator,
+        .threaded = undefined,
+        .conn = undefined,
+        .width = 320,
+        .height = 240,
+        .axis_have_discrete = true,
+    };
+    const stopped = try window.pointerEvent(7, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(?Event, null), stopped);
+    try std.testing.expect(!window.axis_have_discrete);
+}
+
+test "nearest-neighbor scale fills an arbitrary destination size" {
+    var out: [6]u32 = undefined;
+    scaleNearestTo(&out, &[_]u32{ 1, 2 }, 2, 1, 3, 2);
+    try std.testing.expectEqual(@as(u32, 1), out[0]);
+    try std.testing.expectEqual(@as(u32, 1), out[1]);
+    try std.testing.expectEqual(@as(u32, 2), out[2]);
+    try std.testing.expectEqual(@as(u32, 1), out[3]);
+    try std.testing.expectEqual(@as(u32, 1), out[4]);
+    try std.testing.expectEqual(@as(u32, 2), out[5]);
+}
+
+test "registry records fractional scale, viewporter, and primary selection" {
+    var globals: Globals = .{};
+    globals.record(3, "wp_viewporter", 1);
+    globals.record(4, "wp_fractional_scale_manager_v1", 1);
+    globals.record(5, "zwp_primary_selection_device_manager_v1", 1);
+    globals.record(6, "wp_cursor_shape_manager_v1", 1);
+    globals.record(7, "xdg_toplevel_icon_manager_v1", 1);
+    globals.record(8, "zxdg_decoration_manager_v1", 1);
+    globals.record(9, "xdg_activation_v1", 1);
+    try std.testing.expectEqual(@as(u32, 3), globals.viewporter.name);
+    try std.testing.expectEqual(@as(u32, 4), globals.fractional_manager.name);
+    try std.testing.expectEqual(@as(u32, 5), globals.primary_manager.name);
+    try std.testing.expectEqual(@as(u32, 6), globals.cursor_shape_manager.name);
+    try std.testing.expectEqual(@as(u32, 7), globals.toplevel_icon_manager.name);
+    try std.testing.expectEqual(@as(u32, 8), globals.decoration_manager.name);
+    try std.testing.expect(globals.decoration_zxdg);
+    try std.testing.expectEqual(@as(u32, 9), globals.activation.name);
+}
+
+test "plain-text MIME set covers UTF-8 and ICCCM names" {
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf-8"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf8"));
+    try std.testing.expect(isPlainTextMime("text/uri-list"));
+    try std.testing.expect(isPlainTextMime("TEXT"));
+    try std.testing.expect(isPlainTextMime("UTF8_STRING"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf-16"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf16"));
+    try std.testing.expect(isPlainTextMime("UTF16_STRING"));
+    try std.testing.expect(isPlainTextMime("text/html"));
+    try std.testing.expect(isPlainTextMime("text/html;charset=utf-8"));
+    try std.testing.expect(isPlainTextMime("x-special/gnome-copied-files"));
+    try std.testing.expect(isPlainTextMime("x-special/nautilus-clipboard"));
+    try std.testing.expect(isPlainTextMime("text/x-moz-url"));
+    try std.testing.expect(isPlainTextMime("application/x-moz-file"));
+    try std.testing.expect(isPlainTextMime("application/x-kde4-urilist"));
+    try std.testing.expect(isPlainTextMime("application/x-kde5-urilist"));
+    try std.testing.expect(isPlainTextMime("application/x-kde-suggestedfilename"));
+    try std.testing.expect(isPlainTextMime("text/x-moz-url-priv"));
+    try std.testing.expect(isPlainTextMime("text/x-uri-list"));
+    try std.testing.expect(isPlainTextMime("text/rtf"));
+    try std.testing.expect(isPlainTextMime("application/rtf"));
+    try std.testing.expect(isPlainTextMime("COMPOUND_TEXT"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-1"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=latin1"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=latin-2"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=cyrillic"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=greek"));
+    try std.testing.expectEqualStrings("text/plain;charset=latin-2", knownTextMime("text/plain;charset=latin-2").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-2", knownTextMime("text/plain;charset=iso8859-2").?);
+    try std.testing.expectEqualStrings("text/plain;charset=latin-9", knownTextMime("text/plain;charset=latin-9").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-15", knownTextMime("text/plain;charset=iso8859-15").?);
+    try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-15"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-9"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-5"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-7"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-3"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1252"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1251"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1250"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-13"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1253"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1254"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1255"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1256"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1257"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=KOI8-R"));
+    try std.testing.expect(isPlainTextMime("KOI8-R"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-8"));
+    try std.testing.expect(isPlainTextMime("text/markdown"));
+    try std.testing.expect(isPlainTextMime("text/x-markdown"));
+    try std.testing.expect(!isPlainTextMime("image/png"));
+    try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
+    try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));
+    try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("text/x-uri-list"));
+    try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("x-special/gnome-copied-files"));
+    try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("application/x-kde5-urilist"));
+    try std.testing.expectEqual(textMimeRank("text/html"), textMimeRank("text/rtf"));
+    try std.testing.expectEqual(textMimeRank("text/html"), textMimeRank("COMPOUND_TEXT"));
+    try std.testing.expectEqual(@as(u8, 3), textMimeRank("text/plain;charset=ISO-8859-1"));
+    try std.testing.expectEqual(@as(u8, 2), textMimeRank("text/markdown"));
+}
+
+test "keyboard-enter key array restores held modifiers" {
+    var keys: [8]u8 = undefined;
+    put32(keys[0..4], 42);
+    put32(keys[4..8], 29);
+    const mods = heldModsFromKeyArray(&keys);
+    try std.testing.expect(mods.shift);
+    try std.testing.expect(mods.control);
+    try std.testing.expect(!mods.alt);
+    try std.testing.expect(!mods.super);
+    try std.testing.expect(!heldModsFromKeyArray(&.{}).shift);
+    var mixed: [8]u8 = undefined;
+    put32(mixed[0..4], 42);
+    put32(mixed[4..8], 30);
+    try std.testing.expectEqual(@as(u32, 30), heldNonModifierFromKeyArray(&mixed).?);
+    try std.testing.expect(heldNonModifierFromKeyArray(keys[0..4]) == null);
+}
+
+test "Shift+Insert and XF86Paste evdev codes are clipboard paste keys" {
+    try std.testing.expect(isClipboardPasteEvdev(110, true, false));
+    try std.testing.expect(isClipboardPasteEvdev(135, false, false));
+    try std.testing.expect(!isClipboardPasteEvdev(110, false, false));
+    try std.testing.expect(!isClipboardPasteEvdev(110, true, true));
+    try std.testing.expect(!isClipboardPasteEvdev(135, false, true));
+}
+
+test "IME cursor rectangle sits on the bottom composer strip" {
+    const rect = imeCursorRect(640, 480);
+    try std.testing.expectEqual(@as(i32, 8), rect.x);
+    try std.testing.expectEqual(@as(i32, 456), rect.y);
+    try std.testing.expectEqual(@as(i32, 624), rect.w);
+    try std.testing.expectEqual(@as(i32, 24), rect.h);
+    const tiny = imeCursorRect(10, 10);
+    try std.testing.expectEqual(@as(i32, 0), tiny.y);
+    try std.testing.expectEqual(@as(i32, 10), tiny.h);
+}
+
+test "IME de-dupe swallows only the confirming committed character" {
+    try std.testing.expect(shouldSuppressImeDuplicate(0xe9, .{ .char = 0xe9 }));
+    try std.testing.expect(!shouldSuppressImeDuplicate(0xe9, .{ .char = 'e' }));
+    try std.testing.expect(!shouldSuppressImeDuplicate(0xe9, .enter));
+    try std.testing.expect(!shouldSuppressImeDuplicate(null, .{ .char = 'a' }));
+}
+
+test "xdg toplevel configure states include activated" {
+    var states: [8]u8 = undefined;
+    put32(states[0..4], 1);
+    put32(states[4..8], 4);
+    try std.testing.expect(configureContainsState(&states, xdg_state_activated));
+    try std.testing.expect(configureContainsState(&states, xdg_state_maximized));
+    try std.testing.expect(!configureContainsState(states[0..4], xdg_state_activated));
+    var fullscreen: [4]u8 = undefined;
+    put32(fullscreen[0..4], xdg_state_fullscreen);
+    try std.testing.expect(configureContainsState(&fullscreen, xdg_state_fullscreen));
+    try std.testing.expect(!configureContainsState(&fullscreen, xdg_state_maximized));
+    var tiled: [4]u8 = undefined;
+    put32(tiled[0..4], xdg_state_tiled_left);
+    try std.testing.expect(configureContainsState(&tiled, xdg_state_tiled_left));
+    var suspended: [4]u8 = undefined;
+    put32(suspended[0..4], xdg_state_suspended);
+    try std.testing.expect(configureContainsState(&suspended, xdg_state_suspended));
+}
+
+test "Wayland present defers a second commit until the frame callback" {
+    try std.testing.expect(!Window.shouldDeferPresent(0));
+    try std.testing.expect(Window.shouldDeferPresent(7));
+}
+
+test "decoration configure retries SSD only for client-side mode" {
+    try std.testing.expect(decorationModeIsClientSide(decoration_mode_client_side));
+    try std.testing.expect(!decorationModeIsClientSide(decoration_mode_server_side));
+    try std.testing.expect(!decorationModeIsClientSide(0));
+}
+
+test "Caps Lock follows compositor Lock bit once it has been seen" {
+    var from_compositor = false;
+    try std.testing.expect(!capsLockFromLocked(0, false, &from_compositor));
+    try std.testing.expect(!from_compositor);
+    try std.testing.expect(capsLockFromLocked(0, true, &from_compositor));
+    try std.testing.expect(capsLockFromLocked(xkb_mod_lock, false, &from_compositor));
+    try std.testing.expect(from_compositor);
+    try std.testing.expect(!capsLockFromLocked(0, true, &from_compositor));
+}
+
+test "xdg configure_bounds clamp only positive oversized sizes" {
+    try std.testing.expectEqual(@as(i32, 800), clampToBounds(1024, 800));
+    try std.testing.expectEqual(@as(i32, 640), clampToBounds(640, 800));
+    try std.testing.expectEqual(@as(i32, 0), clampToBounds(0, 800));
+    try std.testing.expectEqual(@as(i32, 1024), clampToBounds(1024, 0));
+}
+
+test "xdg wm_capabilities bits include maximize and fullscreen" {
+    var caps: [8]u8 = undefined;
+    put32(caps[0..4], xdg_wm_cap_maximize);
+    put32(caps[4..8], xdg_wm_cap_fullscreen);
+    try std.testing.expect(configureContainsState(&caps, xdg_wm_cap_maximize));
+    try std.testing.expect(configureContainsState(&caps, xdg_wm_cap_fullscreen));
+    try std.testing.expect(!configureContainsState(&caps, xdg_wm_cap_minimize));
 }
 const pointer_release: u16 = 1;

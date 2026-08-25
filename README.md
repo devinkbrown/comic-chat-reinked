@@ -63,7 +63,7 @@ zig build run -- app eshmaki.me your-nick '#root' \
 ## Releases
 
 Each `comicchat-portable-*` GitHub release contains a portable source archive,
-Windows x86_64 ZIP, Linux x86_64 tarball, FreeBSD x86_64 tarball, OpenBSD
+Windows x86_64 ZIP, Linux x86_64 and aarch64 tarballs, FreeBSD x86_64 tarball, OpenBSD
 x86_64 tarball, and a SHA-256 manifest. Download the archive for your
 platform, extract it, and run `reinked` (or `reinked.exe` on Windows).
 
@@ -124,8 +124,9 @@ conversations, transcript range selection/copy/delete, source page-break
 editing, printable PDF export/open/print, and bold/italic/underline composer
 controls. The multiline composer sends each entered line through the same
 bounded IRC path. Windows uses the Unicode clipboard and common file dialogs;
-Wayland/X11 use the installed desktop clipboard and picker services with the
-internal clipboard/path editor as a safe fallback.
+Wayland/X11 speak the native clipboard protocols (`wl_data_device` /
+ICCCM `CLIPBOARD`) and fall back to `wl-copy`/`xclip`/`xsel` plus the
+internal clipboard/path editor when the desktop helper is missing.
 
 The status bar and the first toolbar button both open a prefilled live
 Connection Setup dialog. Applying it stops the current connection, validates
@@ -216,9 +217,11 @@ faces is retained in `src/render/COMIC_NEUE_LICENSE.txt`.
 Cross-compile examples:
 
 ```sh
+zig build -Dtarget=x86_64-linux
+zig build -Dtarget=aarch64-linux
+zig build linux
 zig build -Dtarget=x86_64-windows
 zig build -Dtarget=aarch64-windows
-zig build -Dtarget=x86_64-linux
 ```
 
 Cross-compilation installs the Windows binary at
@@ -262,14 +265,67 @@ backdrops, face expressions, and fonts are embedded in the binaries.
 `comicchat app <nick>` defaults to the `eshmaki.me` server and `#root` channel;
 pass a host and/or channel to override either default.
 
-The direct Wayland client parses compositor XKB keymaps, implements configured
-key repeat, accepts committed compose/dead-key/IME text through text-input-v3,
-maps native touch contacts to the shared interaction contract, and allocates
-scaled buffers from `wl_output` scale. Win32 uses per-monitor-v2 DPI geometry,
-Unicode/IME input, the Unicode clipboard, and native common dialogs. Window
-creation, configure/resize, scaled presentation, keyboard/pointer input, IRC
-traffic, and clean close are implemented across Wayland, X11, Win32, FreeBSD,
-and OpenBSD.
+The direct Wayland client parses compositor XKB keymaps (base, Shift,
+AltGr/ISO Level3, and group 2 when listed), implements configured key repeat,
+composes bounded dead-key / Multi_key accents and optional XCompose locale
+tables, accepts committed IME text through text-input-v3 (multiline hint,
+composer-strip cursor rectangle, confirming-key de-dupe), restores held
+modifiers from the keyboard-enter keys array and Caps Lock from the
+conventional Lock modifier bit, honors XKB groups 3–4 with wrap, consumes `XDG_ACTIVATION_TOKEN` via
+`xdg_activation_v1` so a launcher-started window can take focus and requests a
+fresh token for `xdg-open`, maps native touch contacts to
+the shared interaction contract, tracks entered `wl_output` integer scale
+plus `wp_fractional_scale_v1` / `wp_viewporter` and
+`wl_surface.preferred_buffer_scale` when advertised, advertises xdg-shell
+min/max size, tracks maximized/fullscreen/tiled/suspended configure states
+plus `wm_capabilities` / `configure_bounds` when advertised,
+requests server-side decorations when advertised (retrying SSD once if
+the compositor configures client-side mode), coalesces `present()`
+commits behind `wl_surface.frame`, copies through
+`wl_data_device` and `zwp_primary_selection_v1` (including
+`text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
+decode including receive-only `text/plain;charset=utf-16`, `text/html`,
+`text/rtf`, `text/x-uri-list`, receive-only `COMPOUND_TEXT` (including ISO-8859-15 `ESC - b`, ISO-8859-5 `ESC - L`, ISO-8859-7 `ESC - F`, ISO-8859-3 `ESC - C`, ISO-8859-4 `ESC - D`, ISO-8859-6 `ESC - G`, ISO-8859-8 `ESC - H`), receive-only
+ISO-8859-1/2/3/4/5/6/7/8/9/13/15 (plus `latin1`/`latin9`/`latin5`/`latin2`/`cyrillic`/`greek`), Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R charset MIME and Markdown, and
+desktop file-list MIME including KDE5 / Mozilla-priv / KDE suggested-filename, and CR/LF
+normalized to LF; invalid UTF-8 bytes decode as Latin-1), skips `present()` while suspended and exposes when leaving
+that state or gaining activated, disables text-input when not activated, pastes PRIMARY on
+middle-click as typed keys (`wl-paste --primary` fallback), pastes CLIPBOARD on
+Shift+Insert / XF86Paste as typed keys (CLIPBOARD does not read PRIMARY, and local text is used only while this client owns the clipboard source), injects
+text/`file:` drops as typed keys with `data_offer.set_actions(copy)` and `data_offer.finish` on v3+ data devices (DnD motion updates hover; leave emits `.up` for a held button then clears it; `file://` localhost / `127.0.0.1` / `[::1]` / local nodename are local paths), shows
+a `wp_cursor_shape_v1` or scaled shm pointer (refreshed on integer and fractional scale changes), and sets
+`xdg_toplevel_icon_v1` (32@1 plus 64@2, refreshed on integer and fractional scale change) when advertised. NumLock XOR Shift selects keypad digits.
+Armenian, Georgian, Thai, extra
+Cyrillic (Ukrainian/Belarusian/Serbian/Macedonian), Latin-3, and
+Latin-4 keysyms type
+without an IME.
+X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
+TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
+`GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
+`RESOURCE_MANAGER` property changes, XSETTINGS `Gdk/WindowScalingFactor`
+(re-watching the owner after DestroyNotify or a scale refresh; only the toplevel DestroyNotify closes, and a destroyed `_NET_WM_USER_TIME_WINDOW` is recreated),
+XI2 touch→pointer, RANDR `ScreenChangeNotify`, cached
+per-output millimeters when the window moves, VisibilityNotify, and screen
+millimeter size, and reinstalling the scaled cursor plus physical WM size
+hints), owns ICCCM
+CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
+`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT` / ISO-8859-1/2/3/4/5/6/7/8/9/13/15 (`latin1`/`latin9`/`latin5`/`latin2`/`cyrillic`/`greek`) / Windows-1250/1251/1252/1253/1254/1255/1256/1257 / KOI8-R / Markdown, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla/KDE suggested-filename), `UTF16_STRING` / receive-only `text/plain;charset=utf-16` / `utf16`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
+TARGETS list and sending a user ConvertSelection timestamp; invalid UTF-8 paste decodes as Latin-1), accepts XDND text/`file:`
+drops as typed keys (TARGETS-first, drop timestamp, Position hover via TranslateCoordinates, Leave emits `.up` for a held button then clears hover; EnterNotify with Button1/Button3 already down emits `.down` then queues the hover; implicit-grab motion after leave does not restore hover and a later ButtonRelease is not a second `.up`; Latin-1 drop bytes decode to UTF-8), ignores extra mouse buttons 6–9 and wheel releases, ignores grab/ungrab Enter/Leave and pointer-only FocusIn/Out, pastes PRIMARY on
+middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste does not read PRIMARY and uses local text only while we own CLIPBOARD; PRIMARY paste uses local text only while we own PRIMARY), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden/shaded and
+ICCCM `WM_STATE` / `WM_CHANGE_STATE` (skipping `present()` while NET hidden, ICCCM iconic, unmapped, shaded, or
+fully obscured; MapWindow reads the initial `_NET_WM_STATE` / `WM_STATE`; becoming hidden/unmapped/shaded clears hover so MapNotify / leaving-hidden QueryPointer can seed it; FocusIn, leaving hidden, and gaining `_NET_WM_STATE_FOCUSED` expose), publishes `_NET_WM_USER_TIME` on a dedicated `_NET_WM_USER_TIME_WINDOW`, honors keyboard group bits, Mod3 Mode_switch, GetModifierMapping Caps/NumLock/AltGr/Super bits, and
+MappingNotify (keyboard and modifier) without dropping queued events, resets compose on FocusOut,
+installs a scaled core pointer, `_NET_WM_ICON` at 16/32/64/128, and an ICCCM `WM_HINTS` icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), raises urgency on
+`notify` until FocusIn or `_NET_WM_STATE_FOCUSED` (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
+present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
+`_NET_WM_USER_TIME`, `_NET_STARTUP_ID` plus a startup-notification remove
+after map, an outgoing `DESKTOP_STARTUP_ID` for `xdg-open`, EnterNotify cursor restore and pointer move (Button1/Button3 already down emit `.down` then queue the hover), `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
+replies to `_NET_WM_PING`.
+Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
+clipboard, and native common dialogs. Window creation, configure/resize,
+scaled presentation, keyboard/pointer input, IRC traffic, and clean close
+are implemented across Wayland, X11, Win32, FreeBSD, and OpenBSD.
 
 The portable lane has no SDL dependency. Native backends speak the Wayland/X11
 protocols or Win32 APIs directly, and all display the same software-rendered

@@ -1,24 +1,1940 @@
 //! Small native desktop-service bridge for pure-Zig Unix builds.
 //!
-//! The window backends remain direct protocol implementations. Clipboard,
-//! notifications, file selection, document opening, and printing use the
-//! desktop's standard command-line bridge when present. Every call is bounded
-//! and failure is non-fatal, so minimal BSD installations retain the internal
-//! application fallback.
+//! The window backends remain direct protocol implementations and now own the
+//! primary clipboard path. These helpers are the fallback when a compositor or
+//! X server cannot complete the native transfer (including `wl-paste --primary`
+//! / `xclip -selection primary` when PRIMARY is missing), plus notifications
+//! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
+//! printing. `xdg-open` can carry an outgoing activation / startup token.
+//! Incoming `file:` URIs treat localhost, `127.0.0.1`, `[::1]`, and the
+//! local `uname` nodename as this machine. Incoming desktop file-list MIME, receive-only RTF, receive-only
+//! COMPOUND_TEXT (including ISO-8859-2/3/4/5/6/7/8/9/15), ISO-8859 charset MIME
+//! (including ISO-8859-13), Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, Markdown,
+//! and invalid-UTF-8 Latin-1 fallback are parsed here. Every call is
+//! bounded and failure is non-fatal, so minimal installations retain the
+//! internal application fallback.
 
 const std = @import("std");
+const linux = std.os.linux;
 
 const max_clipboard_bytes = 1024 * 1024;
 const max_service_output = 1024 * 1024;
 
 pub const Desktop = enum { x11, wayland };
 
+/// Reads `/proc/self/environ` so Linux backends can inspect DISPLAY,
+/// WAYLAND_DISPLAY, XAUTHORITY, and toolkit scale variables without libc.
+pub fn readEnviron(gpa: std.mem.Allocator) ![]u8 {
+    const fd = try openReadOnly("/proc/self/environ");
+    defer _ = linux.close(fd);
+
+    var env: std.ArrayList(u8) = .empty;
+    errdefer env.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = try readSomeFd(fd, &buf);
+        if (n == 0) break;
+        try env.appendSlice(gpa, buf[0..n]);
+    }
+    return env.toOwnedSlice(gpa);
+}
+
+/// Desktop startup token used to take focus after a launcher/file-manager open.
+/// `XDG_ACTIVATION_TOKEN` wins; `DESKTOP_STARTUP_ID` is the older X11 name.
+/// NUL-terminated `remove: ID=<token>` body for X11 `_NET_STARTUP_INFO`.
+/// Spaces and backslashes in the token are escaped with a leading `\`.
+pub fn startupRemoveMessage(token: []const u8, buf: []u8) ?[]const u8 {
+    const prefix = "remove: ID=";
+    if (prefix.len >= buf.len) return null;
+    @memcpy(buf[0..prefix.len], prefix);
+    var n: usize = prefix.len;
+    for (token) |c| {
+        if ((c == ' ' or c == '\\') and n + 1 >= buf.len) return null;
+        if (c == ' ' or c == '\\') {
+            buf[n] = '\\';
+            n += 1;
+        }
+        if (n + 1 >= buf.len) return null;
+        buf[n] = c;
+        n += 1;
+    }
+    if (n >= buf.len) return null;
+    buf[n] = 0;
+    return buf[0 .. n + 1];
+}
+
+pub fn startupToken(env: []const u8) ?[]const u8 {
+    if (environValue(env, "XDG_ACTIVATION_TOKEN")) |token| {
+        if (token.len != 0) return token;
+    }
+    if (environValue(env, "DESKTOP_STARTUP_ID")) |token| {
+        if (token.len != 0) return token;
+    }
+    return null;
+}
+
+pub fn environValue(env: []const u8, name: []const u8) ?[]const u8 {
+    var start: usize = 0;
+    while (start < env.len) {
+        const rest = env[start..];
+        const item_len = std.mem.indexOfScalar(u8, rest, 0) orelse rest.len;
+        const item = rest[0..item_len];
+        if (item.len > name.len and item[name.len] == '=' and std.mem.eql(u8, item[0..name.len], name)) {
+            return item[name.len + 1 ..];
+        }
+        start += item_len + 1;
+    }
+    return null;
+}
+
+/// Integer framebuffer scale from toolkit environment variables.
+/// `GDK_SCALE` / `QT_SCALE_FACTOR` win because XWayland often leaves `Xft.dpi`
+/// at 96 while the desktop is already 2×.
+pub fn scaleFromEnvironment(env: []const u8) ?u32 {
+    if (gdkScaleProduct(env)) |scale| return scale;
+    if (environValue(env, "QT_SCALE_FACTOR")) |value| {
+        if (parsePositiveScale(value)) |scale| return scale;
+    }
+    if (environValue(env, "QT_SCREEN_SCALE_FACTORS")) |value| {
+        if (parseQtScreenScale(value)) |scale| return scale;
+    }
+    return null;
+}
+
+fn gdkScaleProduct(env: []const u8) ?u32 {
+    const gdk = environValue(env, "GDK_SCALE");
+    const dpi = environValue(env, "GDK_DPI_SCALE");
+    if (gdk == null and dpi == null) return null;
+    var product: f32 = 1;
+    var any = false;
+    if (gdk) |value| {
+        if (parseScaleFactor(value, 1, 8)) |scale| {
+            product *= scale;
+            any = true;
+        }
+    }
+    if (dpi) |value| {
+        if (parseScaleFactor(value, 0.25, 8)) |scale| {
+            product *= scale;
+            any = true;
+        }
+    }
+    if (!any) return null;
+    return clampScale(product);
+}
+
+fn parseQtScreenScale(value: []const u8) ?u32 {
+    var rest = std.mem.trim(u8, value, " \t");
+    if (std.mem.indexOfScalar(u8, rest, ';')) |semi| rest = rest[0..semi];
+    if (std.mem.lastIndexOfScalar(u8, rest, '=')) |eq| rest = rest[eq + 1 ..];
+    return parsePositiveScale(rest);
+}
+
+fn parseScaleFactor(value: []const u8, min: f32, max: f32) ?f32 {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.fmt.parseInt(u32, trimmed, 10)) |scale| {
+        const as_float: f32 = @floatFromInt(scale);
+        if (as_float < min or as_float > max) return null;
+        return as_float;
+    } else |_| {}
+    const parsed = std.fmt.parseFloat(f32, trimmed) catch return null;
+    if (parsed < min or parsed > max) return null;
+    return parsed;
+}
+
+fn clampScale(value: f32) ?u32 {
+    if (value < 1 or value > 8) return null;
+    const rounded: u32 = @intFromFloat(@round(value));
+    if (rounded < 1 or rounded > 8) return null;
+    return rounded;
+}
+
+pub fn scaleFromDpi(dpi: u32) u32 {
+    if (dpi < 1) return 1;
+    const rounded = (dpi + 48) / 96;
+    return @min(8, @max(1, rounded));
+}
+
+/// Integer scale from an X11 screen's pixel width and reported millimeter
+/// width. Ignores missing, ~96dpi, and implausible sizes so a bogus 1mm
+/// width cannot jump the framebuffer to 8×.
+pub fn scaleFromScreenMm(width_px: u32, width_mm: u32) ?u32 {
+    if (width_px == 0 or width_mm == 0) return null;
+    const dpi = (width_px * 254) / (width_mm * 10);
+    if (dpi < 144 or dpi > 480) return null;
+    return scaleFromDpi(dpi);
+}
+
+/// First usable payload from a drop: a `file:` URI or desktop file-list
+/// becomes a local path, otherwise the first non-empty line is text.
+pub fn firstDropText(text: []const u8, buf: []u8) ?[]const u8 {
+    if (firstPathFromDesktopFiles(text, buf)) |path| return path;
+    if (firstPathFromUriList(text, buf)) |path| return path;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const n = @min(line.len, buf.len);
+        if (n == 0) return null;
+        @memcpy(buf[0..n], line[0..n]);
+        return buf[0..n];
+    }
+    return null;
+}
+
+/// First drop line or URI path, decoded like clipboard bytes (Latin-1 fallback).
+pub fn firstDropTextUtf8(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var scratch: [1024]u8 = undefined;
+    const payload = firstDropText(text, &scratch) orelse text;
+    return clipboardBytesToUtf8(gpa, payload);
+}
+
+/// Receive-only desktop file-list MIME (Nautilus, Firefox). Not offered on copy.
+pub fn isDesktopFileMime(mime: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(mime, "x-special/gnome-copied-files") or
+        std.ascii.eqlIgnoreCase(mime, "x-special/nautilus-clipboard") or
+        std.ascii.eqlIgnoreCase(mime, "text/x-moz-url") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-moz-file") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-kde4-urilist") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-kde5-urilist") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-kde-suggestedfilename") or
+        std.ascii.eqlIgnoreCase(mime, "text/x-moz-url-priv");
+}
+
+/// Receive-only ICCCM `COMPOUND_TEXT` (xterm/Emacs). Not advertised on copy.
+pub fn isCompoundTextMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "COMPOUND_TEXT");
+}
+
+/// Receive-only URI list MIME, including the `text/x-uri-list` alias.
+pub fn isUriListMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "text/uri-list") or mimeTypeEquals(mime, "text/x-uri-list");
+}
+
+/// Receive-only RTF. Not advertised on copy.
+pub fn isRtfMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "text/rtf") or mimeTypeEquals(mime, "application/rtf");
+}
+
+fn mimeTypeEquals(mime: []const u8, prefix: []const u8) bool {
+    if (mime.len < prefix.len) return false;
+    if (!std.ascii.eqlIgnoreCase(mime[0..prefix.len], prefix)) return false;
+    return mime.len == prefix.len or mime[prefix.len] == ';';
+}
+
+/// First local path from `x-special/gnome-copied-files`, `text/x-moz-url`,
+/// KDE suggested-filename, a bare absolute path, or a `text/uri-list` body.
+pub fn firstPathFromDesktopFiles(text: []const u8, buf: []u8) ?[]const u8 {
+    var rest = text;
+    if (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+        const head = std.mem.trim(u8, rest[0..nl], " \t\r");
+        if (std.ascii.eqlIgnoreCase(head, "copy") or
+            std.ascii.eqlIgnoreCase(head, "cut") or
+            std.ascii.eqlIgnoreCase(head, "link"))
+        {
+            rest = rest[nl + 1 ..];
+        }
+    }
+    if (firstPathFromUriList(rest, buf)) |path| return path;
+    var lines = std.mem.splitScalar(u8, rest, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (line[0] != '/') continue;
+        const n = @min(line.len, buf.len);
+        if (n == 0) return null;
+        @memcpy(buf[0..n], line[0..n]);
+        return buf[0..n];
+    }
+    return null;
+}
+
+/// First `file:` path in a `text/uri-list` body. Other schemes are skipped.
+pub fn firstPathFromUriList(text: []const u8, buf: []u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (!std.mem.startsWith(u8, line, "file:")) continue;
+        return fileUrlToPath(line, buf);
+    }
+    return null;
+}
+
+fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
+    var rest = url["file:".len..];
+    if (std.mem.startsWith(u8, rest, "//")) {
+        rest = rest[2..];
+        if (std.mem.startsWith(u8, rest, "localhost")) {
+            rest = rest["localhost".len..];
+        } else if (rest.len != 0 and rest[0] != '/') {
+            const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+            if (!fileUrlHostIsLocal(rest[0..slash])) return null;
+            rest = rest[slash..];
+        }
+    }
+    if (std.mem.indexOfScalar(u8, rest, '?')) |q| rest = rest[0..q];
+    if (std.mem.indexOfScalar(u8, rest, '#')) |h| rest = rest[0..h];
+    if (rest.len == 0) return null;
+    return percentDecode(rest, buf);
+}
+
+fn fileUrlHostIsLocal(host: []const u8) bool {
+    if (host.len == 0) return true;
+    const bare = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
+    if (std.ascii.eqlIgnoreCase(bare, "localhost") or std.mem.eql(u8, bare, "127.0.0.1") or std.mem.eql(u8, bare, "::1")) return true;
+    var name_buf: [64]u8 = undefined;
+    const name = localNodename(&name_buf);
+    return name.len != 0 and std.ascii.eqlIgnoreCase(bare, name);
+}
+
+fn localNodename(buf: []u8) []const u8 {
+    var uts: linux.utsname = undefined;
+    if (linux.errno(linux.uname(&uts)) != .SUCCESS) return "";
+    const name = std.mem.sliceTo(&uts.nodename, 0);
+    const n = @min(buf.len, name.len);
+    @memcpy(buf[0..n], name[0..n]);
+    return buf[0..n];
+}
+
+/// True for `text/html` and `text/html;charset=...` (receive-only MIME).
+pub fn isHtmlMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "text/html");
+}
+
+/// Last-resort clipboard/drop payload: strip a bounded RTF document to text.
+/// Groups such as font/color tables and pictures are skipped. `\uN` and `\'hh`
+/// become Unicode / Latin-1 characters.
+pub fn rtfToPlainText(gpa: std.mem.Allocator, rtf: []const u8) ![]u8 {
+    const start = std.mem.indexOf(u8, rtf, "{\\rtf") orelse {
+        return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, rtf));
+    };
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = start;
+    var skip_depth: u8 = 0;
+    var group_depth: u8 = 0;
+    while (i < rtf.len) {
+        const c = rtf[i];
+        if (c == '{') {
+            group_depth +|= 1;
+            i += 1;
+            if (skip_depth != 0) {
+                skip_depth +|= 1;
+                continue;
+            }
+            if (rtfDestinationIsSkip(rtf[i..])) {
+                skip_depth = 1;
+            }
+            continue;
+        }
+        if (c == '}') {
+            if (group_depth != 0) group_depth -= 1;
+            if (skip_depth != 0) skip_depth -= 1;
+            i += 1;
+            continue;
+        }
+        if (c == '\\') {
+            const parsed = parseRtfControl(rtf[i..]);
+            i += parsed.consumed;
+            if (skip_depth != 0) continue;
+            switch (parsed.kind) {
+                .literal => try out.append(gpa, parsed.literal),
+                .newline => {
+                    if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
+                },
+                .tab => try out.append(gpa, '\t'),
+                .hex => try out.append(gpa, parsed.literal),
+                .unicode => {
+                    var encoded: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(parsed.codepoint, &encoded) catch continue;
+                    try out.appendSlice(gpa, encoded[0..n]);
+                    if (i < rtf.len and rtf[i] != '\\' and rtf[i] != '{' and rtf[i] != '}') i += 1;
+                },
+                .skip => {},
+            }
+            continue;
+        }
+        if (c == '\r' or c == '\n') {
+            i += 1;
+            continue;
+        }
+        if (skip_depth == 0) try out.append(gpa, c);
+        i += 1;
+    }
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+const RtfControl = struct {
+    kind: enum { literal, newline, tab, hex, unicode, skip },
+    literal: u8 = 0,
+    codepoint: u21 = 0,
+    consumed: usize,
+};
+
+fn parseRtfControl(text: []const u8) RtfControl {
+    if (text.len < 2) return .{ .kind = .skip, .consumed = text.len };
+    const next = text[1];
+    if (next == '\\' or next == '{' or next == '}') return .{ .kind = .literal, .literal = next, .consumed = 2 };
+    if (next == '\'') {
+        if (text.len < 4) return .{ .kind = .skip, .consumed = text.len };
+        const hi = hexNibble(text[2]) orelse return .{ .kind = .skip, .consumed = 2 };
+        const lo = hexNibble(text[3]) orelse return .{ .kind = .skip, .consumed = 2 };
+        return .{ .kind = .hex, .literal = @intCast((hi << 4) | lo), .consumed = 4 };
+    }
+    if (next == '~') return .{ .kind = .literal, .literal = ' ', .consumed = 2 };
+    if (next == '-' or next == '_') return .{ .kind = .literal, .literal = '-', .consumed = 2 };
+    var i: usize = 1;
+    while (i < text.len and std.ascii.isAlphabetic(text[i])) : (i += 1) {}
+    const name = text[1..i];
+    var signed: i32 = 0;
+    var have_num = false;
+    if (i < text.len and (text[i] == '-' or std.ascii.isDigit(text[i]))) {
+        have_num = true;
+        var neg = false;
+        if (text[i] == '-') {
+            neg = true;
+            i += 1;
+        }
+        var value: i32 = 0;
+        while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+            value = value * 10 + @as(i32, text[i] - '0');
+        }
+        signed = if (neg) -value else value;
+    }
+    if (i < text.len and text[i] == ' ') i += 1;
+    if (std.ascii.eqlIgnoreCase(name, "par") or std.ascii.eqlIgnoreCase(name, "line") or
+        std.ascii.eqlIgnoreCase(name, "page"))
+    {
+        return .{ .kind = .newline, .consumed = i };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "tab")) return .{ .kind = .tab, .consumed = i };
+    if (std.ascii.eqlIgnoreCase(name, "u") and have_num) {
+        const raw: i32 = if (signed < 0) signed + 65536 else signed;
+        const code: u21 = if (raw >= 0 and raw <= 0x10ffff) @intCast(raw) else 0xfffd;
+        return .{ .kind = .unicode, .codepoint = code, .consumed = i };
+    }
+    return .{ .kind = .skip, .consumed = i };
+}
+
+fn rtfDestinationIsSkip(rest: []const u8) bool {
+    var i: usize = 0;
+    while (i < rest.len and (rest[i] == ' ' or rest[i] == '\r' or rest[i] == '\n')) : (i += 1) {}
+    if (i >= rest.len or rest[i] != '\\') return false;
+    if (i + 1 < rest.len and rest[i + 1] == '*') return true;
+    i += 1;
+    var end = i;
+    while (end < rest.len and std.ascii.isAlphabetic(rest[end])) : (end += 1) {}
+    const name = rest[i..end];
+    return std.ascii.eqlIgnoreCase(name, "fonttbl") or
+        std.ascii.eqlIgnoreCase(name, "colortbl") or
+        std.ascii.eqlIgnoreCase(name, "stylesheet") or
+        std.ascii.eqlIgnoreCase(name, "info") or
+        std.ascii.eqlIgnoreCase(name, "pict") or
+        std.ascii.eqlIgnoreCase(name, "header") or
+        std.ascii.eqlIgnoreCase(name, "footer") or
+        std.ascii.eqlIgnoreCase(name, "object");
+}
+
+/// Last-resort clipboard/drop payload: strip tags from `text/html`.
+/// Leaves already-plain text unchanged. Script/style bodies are dropped.
+pub fn htmlToPlainText(gpa: std.mem.Allocator, html: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, html, '<') == null and std.mem.indexOfScalar(u8, html, '&') == null) {
+        return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, html));
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    var skip_depth: u8 = 0;
+    while (i < html.len) {
+        if (html[i] == '<') {
+            const end = std.mem.indexOfScalarPos(u8, html, i + 1, '>') orelse break;
+            const raw = html[i + 1 .. end];
+            const closing = raw.len != 0 and raw[0] == '/';
+            const inner = std.mem.trim(u8, raw, " \t\r\n/");
+            var name = inner;
+            if (std.mem.indexOfAny(u8, inner, " \t\r\n")) |sp| name = inner[0..sp];
+            if (isHtmlBreak(name)) {
+                if (skip_depth == 0 and !closing and out.items.len != 0) try out.append(gpa, '\n');
+            } else if (isHtmlSkip(name)) {
+                if (!closing) {
+                    skip_depth +|= 1;
+                } else if (skip_depth != 0) {
+                    skip_depth -= 1;
+                }
+            }
+            i = end + 1;
+            continue;
+        }
+        if (skip_depth != 0) {
+            i += 1;
+            continue;
+        }
+        if (html[i] == '&') {
+            const decoded = decodeHtmlEntity(html[i..]);
+            try out.appendSlice(gpa, decoded.bytes[0..decoded.len]);
+            i += decoded.consumed;
+            continue;
+        }
+        try out.append(gpa, html[i]);
+        i += 1;
+    }
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn isHtmlBreak(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "br") or
+        std.ascii.eqlIgnoreCase(name, "p") or
+        std.ascii.eqlIgnoreCase(name, "div") or
+        std.ascii.eqlIgnoreCase(name, "tr") or
+        std.ascii.eqlIgnoreCase(name, "li");
+}
+
+fn isHtmlSkip(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "script") or std.ascii.eqlIgnoreCase(name, "style");
+}
+
+fn decodeHtmlEntity(text: []const u8) struct { bytes: [4]u8, len: u8, consumed: usize } {
+    if (text.len >= 5 and std.mem.startsWith(u8, text, "&amp;")) return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 5 };
+    if (text.len >= 4 and std.mem.startsWith(u8, text, "&lt;")) return .{ .bytes = "<\x00\x00\x00".*, .len = 1, .consumed = 4 };
+    if (text.len >= 4 and std.mem.startsWith(u8, text, "&gt;")) return .{ .bytes = ">\x00\x00\x00".*, .len = 1, .consumed = 4 };
+    if (text.len >= 6 and std.mem.startsWith(u8, text, "&nbsp;")) return .{ .bytes = " \x00\x00\x00".*, .len = 1, .consumed = 6 };
+    if (text.len >= 4 and text[1] == '#') {
+        const semi = std.mem.indexOfScalarPos(u8, text, 2, ';') orelse return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+        const digits = text[2..semi];
+        const value = if (digits.len != 0 and (digits[0] == 'x' or digits[0] == 'X'))
+            std.fmt.parseInt(u21, digits[1..], 16) catch return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 }
+        else
+            std.fmt.parseInt(u21, digits, 10) catch return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+        var encoded: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(value, &encoded) catch return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+        var bytes: [4]u8 = @splat(0);
+        @memcpy(bytes[0..n], encoded[0..n]);
+        return .{ .bytes = bytes, .len = @intCast(n), .consumed = semi + 1 };
+    }
+    return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+}
+
+/// Clipboard bytes to UTF-8: strip a UTF-8 BOM or decode UTF-16 with BOM.
+pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, bytes, "\xEF\xBB\xBF")) {
+        return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes[3..]));
+    }
+    if (bytes.len >= 2 and bytes.len % 2 == 0) {
+        if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) {
+            return normalizeClipboardNewlinesOwned(gpa, try utf16ToUtf8(gpa, bytes[2..], .little));
+        }
+        if (std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
+            return normalizeClipboardNewlinesOwned(gpa, try utf16ToUtf8(gpa, bytes[2..], .big));
+        }
+    }
+    if (!std.unicode.utf8ValidateSlice(bytes)) return latin1ToUtf8(gpa, bytes);
+    return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
+}
+
+/// Receive-only `text/plain;charset=...` (ISO-8859-1/2/3/4/5/6/7/8/9/13/15,
+/// Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R). Other charsets
+/// fall back to `clipboardBytesToUtf8`.
+pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: []const u8) ![]u8 {
+    if (isUtf8Charset(charset) or isAsciiCharset(charset)) {
+        return clipboardBytesToUtf8(gpa, bytes);
+    }
+    if (isIso88591Charset(charset)) return latin1ToUtf8(gpa, bytes);
+    if (isIso885915Charset(charset)) return iso885915ToUtf8(gpa, bytes);
+    if (isIso88592Charset(charset)) return iso88592ToUtf8(gpa, bytes);
+    if (isIso88599Charset(charset)) return iso88599ToUtf8(gpa, bytes);
+    if (isIso88595Charset(charset)) return iso88595ToUtf8(gpa, bytes);
+    if (isIso88597Charset(charset)) return iso88597ToUtf8(gpa, bytes);
+    if (isIso88593Charset(charset)) return iso88593ToUtf8(gpa, bytes);
+    if (isIso88594Charset(charset)) return iso88594ToUtf8(gpa, bytes);
+    if (isIso88596Charset(charset)) return iso88596ToUtf8(gpa, bytes);
+    if (isIso88598Charset(charset)) return iso88598ToUtf8(gpa, bytes);
+    if (isWindows1252Charset(charset)) return windows1252ToUtf8(gpa, bytes);
+    if (isWindows1251Charset(charset)) return windows1251ToUtf8(gpa, bytes);
+    if (isWindows1250Charset(charset)) return windows1250ToUtf8(gpa, bytes);
+    if (isIso885913Charset(charset)) return iso885913ToUtf8(gpa, bytes);
+    if (isWindows1253Charset(charset)) return windows1253ToUtf8(gpa, bytes);
+    if (isWindows1254Charset(charset)) return windows1254ToUtf8(gpa, bytes);
+    if (isWindows1255Charset(charset)) return windows1255ToUtf8(gpa, bytes);
+    if (isWindows1256Charset(charset)) return windows1256ToUtf8(gpa, bytes);
+    if (isWindows1257Charset(charset)) return windows1257ToUtf8(gpa, bytes);
+    if (isKoi8rCharset(charset)) return koi8rToUtf8(gpa, bytes);
+    return clipboardBytesToUtf8(gpa, bytes);
+}
+
+pub fn mimeCharset(mime: []const u8) ?[]const u8 {
+    var rest = mime;
+    while (std.mem.indexOfScalar(u8, rest, ';')) |semi| {
+        rest = std.mem.trim(u8, rest[semi + 1 ..], " \t");
+        if (rest.len >= 8 and std.ascii.eqlIgnoreCase(rest[0..8], "charset=")) {
+            var value = rest[8..];
+            if (std.mem.indexOfScalar(u8, value, ';')) |end| value = value[0..end];
+            return std.mem.trim(u8, value, " \t\"'");
+        }
+    }
+    return null;
+}
+
+pub fn isMarkdownMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "text/markdown") or mimeTypeEquals(mime, "text/x-markdown");
+}
+
+/// Interned receive-only MIME for a recognized 8-bit `text/plain;charset=...`.
+/// Never returns the incoming slice.
+pub fn knownLatinPlainMime(mime: []const u8) ?[]const u8 {
+    if (isKoi8rCharset(mime)) return "KOI8-R";
+    const charset = mimeCharset(mime) orelse return null;
+    if (isIso88591Charset(charset)) return "text/plain;charset=ISO-8859-1";
+    if (isIso885915Charset(charset)) return "text/plain;charset=ISO-8859-15";
+    if (isIso88592Charset(charset)) return "text/plain;charset=ISO-8859-2";
+    if (isIso88599Charset(charset)) return "text/plain;charset=ISO-8859-9";
+    if (isIso88595Charset(charset)) return "text/plain;charset=ISO-8859-5";
+    if (isIso88597Charset(charset)) return "text/plain;charset=ISO-8859-7";
+    if (isIso88593Charset(charset)) return "text/plain;charset=ISO-8859-3";
+    if (isIso88594Charset(charset)) return "text/plain;charset=ISO-8859-4";
+    if (isIso88596Charset(charset)) return "text/plain;charset=ISO-8859-6";
+    if (isIso88598Charset(charset)) return "text/plain;charset=ISO-8859-8";
+    if (isIso885913Charset(charset)) return "text/plain;charset=ISO-8859-13";
+    if (isWindows1252Charset(charset)) return "text/plain;charset=windows-1252";
+    if (isWindows1251Charset(charset)) return "text/plain;charset=windows-1251";
+    if (isWindows1250Charset(charset)) return "text/plain;charset=windows-1250";
+    if (isWindows1253Charset(charset)) return "text/plain;charset=windows-1253";
+    if (isWindows1254Charset(charset)) return "text/plain;charset=windows-1254";
+    if (isWindows1255Charset(charset)) return "text/plain;charset=windows-1255";
+    if (isWindows1256Charset(charset)) return "text/plain;charset=windows-1256";
+    if (isWindows1257Charset(charset)) return "text/plain;charset=windows-1257";
+    if (isKoi8rCharset(charset)) return "KOI8-R";
+    return null;
+}
+
+pub fn isLatinPlainMime(mime: []const u8) bool {
+    return knownLatinPlainMime(mime) != null;
+}
+
+pub fn decodePlainMime(gpa: std.mem.Allocator, mime: []const u8, bytes: []const u8) ![]u8 {
+    if (isMarkdownMime(mime)) return clipboardBytesToUtf8(gpa, bytes);
+    if (isKoi8rCharset(mime)) return koi8rToUtf8(gpa, bytes);
+    if (mimeCharset(mime)) |charset| return decodePlainByCharset(gpa, bytes, charset);
+    return clipboardBytesToUtf8(gpa, bytes);
+}
+
+fn isUtf8Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "utf-8") or std.ascii.eqlIgnoreCase(charset, "utf8");
+}
+
+fn isAsciiCharset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "us-ascii") or std.ascii.eqlIgnoreCase(charset, "ascii");
+}
+
+fn isIso88591Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-1") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-1") or
+        std.ascii.eqlIgnoreCase(charset, "latin1") or
+        std.ascii.eqlIgnoreCase(charset, "latin-1");
+}
+
+fn isIso885915Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-15") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-15") or
+        std.ascii.eqlIgnoreCase(charset, "latin9") or
+        std.ascii.eqlIgnoreCase(charset, "latin-9");
+}
+
+fn isIso88592Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-2") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-2") or
+        std.ascii.eqlIgnoreCase(charset, "latin2") or
+        std.ascii.eqlIgnoreCase(charset, "latin-2");
+}
+
+fn isIso88599Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-9") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-9") or
+        std.ascii.eqlIgnoreCase(charset, "latin5") or
+        std.ascii.eqlIgnoreCase(charset, "latin-5");
+}
+
+fn isIso88595Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-5") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-5") or
+        std.ascii.eqlIgnoreCase(charset, "cyrillic");
+}
+
+fn isIso88597Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-7") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-7") or
+        std.ascii.eqlIgnoreCase(charset, "greek");
+}
+
+fn isIso88593Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-3") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-3") or
+        std.ascii.eqlIgnoreCase(charset, "latin3") or
+        std.ascii.eqlIgnoreCase(charset, "latin-3");
+}
+
+fn isIso88594Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-4") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-4") or
+        std.ascii.eqlIgnoreCase(charset, "latin4") or
+        std.ascii.eqlIgnoreCase(charset, "latin-4");
+}
+
+fn isIso88596Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-6") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-6") or
+        std.ascii.eqlIgnoreCase(charset, "arabic");
+}
+
+fn isIso88598Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-8") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-8") or
+        std.ascii.eqlIgnoreCase(charset, "hebrew");
+}
+
+fn isWindows1252Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1252") or
+        std.ascii.eqlIgnoreCase(charset, "windows1252") or
+        std.ascii.eqlIgnoreCase(charset, "cp1252") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1252");
+}
+
+fn isWindows1251Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1251") or
+        std.ascii.eqlIgnoreCase(charset, "windows1251") or
+        std.ascii.eqlIgnoreCase(charset, "cp1251") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1251");
+}
+
+fn isWindows1250Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1250") or
+        std.ascii.eqlIgnoreCase(charset, "windows1250") or
+        std.ascii.eqlIgnoreCase(charset, "cp1250") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1250");
+}
+
+fn isIso885913Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "iso-8859-13") or
+        std.ascii.eqlIgnoreCase(charset, "iso8859-13") or
+        std.ascii.eqlIgnoreCase(charset, "latin7") or
+        std.ascii.eqlIgnoreCase(charset, "latin-7");
+}
+
+fn isWindows1253Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1253") or
+        std.ascii.eqlIgnoreCase(charset, "windows1253") or
+        std.ascii.eqlIgnoreCase(charset, "cp1253") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1253");
+}
+
+fn isWindows1254Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1254") or
+        std.ascii.eqlIgnoreCase(charset, "windows1254") or
+        std.ascii.eqlIgnoreCase(charset, "cp1254") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1254");
+}
+
+fn isWindows1255Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1255") or
+        std.ascii.eqlIgnoreCase(charset, "windows1255") or
+        std.ascii.eqlIgnoreCase(charset, "cp1255") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1255");
+}
+
+fn isWindows1256Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1256") or
+        std.ascii.eqlIgnoreCase(charset, "windows1256") or
+        std.ascii.eqlIgnoreCase(charset, "cp1256") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1256");
+}
+
+fn isWindows1257Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1257") or
+        std.ascii.eqlIgnoreCase(charset, "windows1257") or
+        std.ascii.eqlIgnoreCase(charset, "cp1257") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1257");
+}
+
+fn isKoi8rCharset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "koi8-r") or
+        std.ascii.eqlIgnoreCase(charset, "koi8r") or
+        std.ascii.eqlIgnoreCase(charset, "koi8_r") or
+        std.ascii.eqlIgnoreCase(charset, "cskoi8r");
+}
+
+/// Receive-only ICCCM COMPOUND_TEXT. Default charset is ISO-8859-1. `ESC % G`
+/// / `ESC %/G` switch to UTF-8; `ESC ( B` is ASCII; unknown 94^n sets are
+/// skipped until the next ESC. A body with no ESC that is already valid
+/// UTF-8 is kept as UTF-8.
+pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, bytes, 0x1b) == null) {
+        if (std.unicode.utf8ValidateSlice(bytes)) {
+            return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
+        }
+        return latin1ToUtf8(gpa, bytes);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var cset: CompoundCharset = .latin1;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (bytes[i] == 0x1b) {
+            const esc = parseCompoundEscape(bytes[i..]);
+            i += esc.consumed;
+            if (esc.skip) {
+                while (i < bytes.len and bytes[i] != 0x1b) : (i += 1) {}
+            } else {
+                cset = esc.cset;
+            }
+            continue;
+        }
+        switch (cset) {
+            .ascii => {
+                if (bytes[i] < 0x80) try out.append(gpa, bytes[i]);
+                i += 1;
+            },
+            .latin1 => {
+                try appendLatin1(&out, gpa, bytes[i]);
+                i += 1;
+            },
+            .latin2 => {
+                try appendCodepoint(&out, gpa, iso88592Codepoint(bytes[i]));
+                i += 1;
+            },
+            .latin9 => {
+                try appendCodepoint(&out, gpa, iso885915Codepoint(bytes[i]));
+                i += 1;
+            },
+            .latin5 => {
+                try appendCodepoint(&out, gpa, iso88599Codepoint(bytes[i]));
+                i += 1;
+            },
+            .cyrillic => {
+                try appendCodepoint(&out, gpa, iso88595Codepoint(bytes[i]));
+                i += 1;
+            },
+            .greek => {
+                try appendCodepoint(&out, gpa, iso88597Codepoint(bytes[i]));
+                i += 1;
+            },
+            .latin3 => {
+                try appendCodepoint(&out, gpa, iso88593Codepoint(bytes[i]));
+                i += 1;
+            },
+            .latin4 => {
+                try appendCodepoint(&out, gpa, iso88594Codepoint(bytes[i]));
+                i += 1;
+            },
+            .arabic => {
+                try appendCodepoint(&out, gpa, iso88596Codepoint(bytes[i]));
+                i += 1;
+            },
+            .hebrew => {
+                try appendCodepoint(&out, gpa, iso88598Codepoint(bytes[i]));
+                i += 1;
+            },
+            .utf8 => {
+                const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
+                if (i + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[i .. i + n])) {
+                    try out.appendSlice(gpa, bytes[i .. i + n]);
+                    i += n;
+                } else {
+                    try out.append(gpa, '?');
+                    i += 1;
+                }
+            },
+        }
+    }
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+const CompoundCharset = enum { latin1, latin2, latin3, latin4, latin9, latin5, cyrillic, greek, arabic, hebrew, utf8, ascii };
+
+const CompoundEscape = struct {
+    consumed: usize,
+    cset: CompoundCharset,
+    skip: bool,
+};
+
+fn parseCompoundEscape(text: []const u8) CompoundEscape {
+    if (text.len < 2) return .{ .consumed = 1, .cset = .latin1, .skip = false };
+    if (text.len >= 3 and text[1] == '%' and text[2] == 'G') {
+        return .{ .consumed = 3, .cset = .utf8, .skip = false };
+    }
+    if (text.len >= 4 and text[1] == '%' and text[2] == '/' and text[3] == 'G') {
+        return .{ .consumed = 4, .cset = .utf8, .skip = false };
+    }
+    if (text[1] == '(' or text[1] == ')') {
+        if (text.len < 3) return .{ .consumed = 2, .cset = .ascii, .skip = false };
+        if (text[2] == 'B' or text[2] == 'J' or text[2] == '0') {
+            return .{ .consumed = 3, .cset = .ascii, .skip = false };
+        }
+        return .{ .consumed = 3, .cset = .latin1, .skip = false };
+    }
+    if (text[1] == '-' and text.len >= 3) {
+        return .{
+            .consumed = 3,
+            .cset = switch (text[2]) {
+                'B' => .latin2,
+                'C' => .latin3,
+                'D' => .latin4,
+                'b' => .latin9,
+                'M' => .latin5,
+                'L' => .cyrillic,
+                'F' => .greek,
+                'G' => .arabic,
+                'H' => .hebrew,
+                else => .latin1,
+            },
+            .skip = false,
+        };
+    }
+    if (text[1] == '$') {
+        var n: usize = 2;
+        if (n < text.len and (text[n] == '(' or text[n] == ')' or text[n] == '-' or text[n] == '.')) n += 1;
+        if (n < text.len) n += 1;
+        return .{ .consumed = n, .cset = .latin1, .skip = true };
+    }
+    return .{ .consumed = 2, .cset = .latin1, .skip = false };
+}
+
+fn latin1ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendLatin1(&out, gpa, c);
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88592ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88592Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso885915ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso885915Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88599ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88599Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88595ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88595Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88597ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88597Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88593ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88593Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88594ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88594Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88596ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88596Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso88598ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso88598Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1252ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1252Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1251ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1251Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1250ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1250Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn iso885913ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, iso885913Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1253ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1253Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1254ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1254Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1255ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1255Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1256ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1256Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn windows1257ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1257Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn koi8rToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, koi8rCodepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn appendLatin1(out: *std.ArrayList(u8), gpa: std.mem.Allocator, c: u8) !void {
+    try appendCodepoint(out, gpa, c);
+}
+
+fn appendCodepoint(out: *std.ArrayList(u8), gpa: std.mem.Allocator, c: u21) !void {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(c, &buf) catch {
+        try out.append(gpa, '?');
+        return;
+    };
+    try out.appendSlice(gpa, buf[0..n]);
+}
+
+fn iso88599Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xd0 => 0x011e,
+        0xdd => 0x0130,
+        0xde => 0x015e,
+        0xf0 => 0x011f,
+        0xfd => 0x0131,
+        0xfe => 0x015f,
+        else => c,
+    };
+}
+
+fn iso885915Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xa4 => 0x20ac,
+        0xa6 => 0x0160,
+        0xa8 => 0x0161,
+        0xb4 => 0x017d,
+        0xb8 => 0x017e,
+        0xbc => 0x0152,
+        0xbd => 0x0153,
+        0xbe => 0x0178,
+        else => c,
+    };
+}
+
+fn iso88592Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso88592_a0[c - 0xa0];
+}
+
+fn iso88595Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xa0 => 0x00a0,
+        0xa1...0xac => 0x0401 + @as(u21, c - 0xa1),
+        0xad => 0x00ad,
+        0xae => 0x040e,
+        0xaf => 0x040f,
+        0xb0...0xcf => 0x0410 + @as(u21, c - 0xb0),
+        0xd0...0xef => 0x0430 + @as(u21, c - 0xd0),
+        0xf0 => 0x2116,
+        0xf1...0xfc => 0x0451 + @as(u21, c - 0xf1),
+        0xfd => 0x00a7,
+        0xfe => 0x045e,
+        0xff => 0x045f,
+        else => c,
+    };
+}
+
+fn iso88597Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso88597_a0[c - 0xa0];
+}
+
+fn iso88593Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso88593_a0[c - 0xa0];
+}
+
+fn iso88594Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso88594_a0[c - 0xa0];
+}
+
+fn iso88596Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xa0 => 0x00a0,
+        0xa4 => 0x00a4,
+        0xac => 0x060c,
+        0xad => 0x00ad,
+        0xbb => 0x061b,
+        0xbf => 0x061f,
+        0xc1...0xda => 0x0621 + @as(u21, c - 0xc1),
+        0xe0...0xf2 => 0x0640 + @as(u21, c - 0xe0),
+        0x00...0x9f => c,
+        else => 0xfffd,
+    };
+}
+
+fn iso88598Codepoint(c: u8) u21 {
+    return switch (c) {
+        0xa0 => 0x00a0,
+        0xa2...0xa9 => c,
+        0xaa => 0x00d7,
+        0xab...0xb9 => c,
+        0xba => 0x00f7,
+        0xbb...0xbe => c,
+        0xdf => 0x2017,
+        0xe0...0xfa => 0x05d0 + @as(u21, c - 0xe0),
+        0xfd => 0x200e,
+        0xfe => 0x200f,
+        0x00...0x9f => c,
+        else => 0xfffd,
+    };
+}
+
+fn windows1250Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1250_80[c - 0x80];
+}
+
+const windows1250_80 = [_]u21{
+    0x20ac, 0x0081, 0x201a, 0x0083, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x0088, 0x2030, 0x0160, 0x2039, 0x015a, 0x0164, 0x017d, 0x0179,
+    0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x0098, 0x2122, 0x0161, 0x203a, 0x015b, 0x0165, 0x017e, 0x017a,
+    0x00a0, 0x02c7, 0x02d8, 0x0141, 0x00a4, 0x0104, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x015e, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x017b,
+    0x00b0, 0x00b1, 0x02db, 0x0142, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x0105, 0x015f, 0x00bb, 0x013d, 0x02dd, 0x013e, 0x017c,
+    0x0154, 0x00c1, 0x00c2, 0x0102, 0x00c4, 0x0139, 0x0106, 0x00c7,
+    0x010c, 0x00c9, 0x0118, 0x00cb, 0x011a, 0x00cd, 0x00ce, 0x010e,
+    0x0110, 0x0143, 0x0147, 0x00d3, 0x00d4, 0x0150, 0x00d6, 0x00d7,
+    0x0158, 0x016e, 0x00da, 0x0170, 0x00dc, 0x00dd, 0x0162, 0x00df,
+    0x0155, 0x00e1, 0x00e2, 0x0103, 0x00e4, 0x013a, 0x0107, 0x00e7,
+    0x010d, 0x00e9, 0x0119, 0x00eb, 0x011b, 0x00ed, 0x00ee, 0x010f,
+    0x0111, 0x0144, 0x0148, 0x00f3, 0x00f4, 0x0151, 0x00f6, 0x00f7,
+    0x0159, 0x016f, 0x00fa, 0x0171, 0x00fc, 0x00fd, 0x0163, 0x02d9,
+};
+
+fn iso885913Codepoint(c: u8) u21 {
+    if (c < 0xa0) return c;
+    return iso885913_a0[c - 0xa0];
+}
+
+fn windows1253Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1253_80[c - 0x80];
+}
+
+fn windows1254Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1254_80[c - 0x80];
+}
+
+fn windows1255Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1255_80[c - 0x80];
+}
+
+fn windows1256Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1256_80[c - 0x80];
+}
+
+fn windows1257Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1257_80[c - 0x80];
+}
+
+fn koi8rCodepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return koi8r_80[c - 0x80];
+}
+
+const iso885913_a0 = [_]u21{
+    0x00a0, 0x201d, 0x00a2, 0x00a3, 0x00a4, 0x201e, 0x00a6, 0x00a7,
+    0x00d8, 0x00a9, 0x0156, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00c6,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x201c, 0x00b5, 0x00b6, 0x00b7,
+    0x00f8, 0x00b9, 0x0157, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00e6,
+    0x0104, 0x012e, 0x0100, 0x0106, 0x00c4, 0x00c5, 0x0118, 0x0112,
+    0x010c, 0x00c9, 0x0179, 0x0116, 0x0122, 0x0136, 0x012a, 0x013b,
+    0x0160, 0x0143, 0x0145, 0x00d3, 0x014c, 0x00d5, 0x00d6, 0x00d7,
+    0x0172, 0x0141, 0x015a, 0x016a, 0x00dc, 0x017b, 0x017d, 0x00df,
+    0x0105, 0x012f, 0x0101, 0x0107, 0x00e4, 0x00e5, 0x0119, 0x0113,
+    0x010d, 0x00e9, 0x017a, 0x0117, 0x0123, 0x0137, 0x012b, 0x013c,
+    0x0161, 0x0144, 0x0146, 0x00f3, 0x014d, 0x00f5, 0x00f6, 0x00f7,
+    0x0173, 0x0142, 0x015b, 0x016b, 0x00fc, 0x017c, 0x017e, 0x2019,
+};
+
+const windows1253_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0xfffd, 0x2030, 0xfffd, 0x2039, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0xfffd, 0x2122, 0xfffd, 0x203a, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0x00a0, 0x0385, 0x0386, 0x00a3, 0x00a4, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0xfffd, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x2015,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x0384, 0x00b5, 0x00b6, 0x00b7,
+    0x0388, 0x0389, 0x038a, 0x00bb, 0x038c, 0x00bd, 0x038e, 0x038f,
+    0x0390, 0x0391, 0x0392, 0x0393, 0x0394, 0x0395, 0x0396, 0x0397,
+    0x0398, 0x0399, 0x039a, 0x039b, 0x039c, 0x039d, 0x039e, 0x039f,
+    0x03a0, 0x03a1, 0xfffd, 0x03a3, 0x03a4, 0x03a5, 0x03a6, 0x03a7,
+    0x03a8, 0x03a9, 0x03aa, 0x03ab, 0x03ac, 0x03ad, 0x03ae, 0x03af,
+    0x03b0, 0x03b1, 0x03b2, 0x03b3, 0x03b4, 0x03b5, 0x03b6, 0x03b7,
+    0x03b8, 0x03b9, 0x03ba, 0x03bb, 0x03bc, 0x03bd, 0x03be, 0x03bf,
+    0x03c0, 0x03c1, 0x03c2, 0x03c3, 0x03c4, 0x03c5, 0x03c6, 0x03c7,
+    0x03c8, 0x03c9, 0x03ca, 0x03cb, 0x03cc, 0x03cd, 0x03ce, 0xfffd,
+};
+
+const windows1254_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0xfffd, 0xfffd, 0xfffd,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0xfffd, 0xfffd, 0x0178,
+    0x00a0, 0x00a1, 0x00a2, 0x00a3, 0x00a4, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x00aa, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00af,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x00b9, 0x00ba, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00bf,
+    0x00c0, 0x00c1, 0x00c2, 0x00c3, 0x00c4, 0x00c5, 0x00c6, 0x00c7,
+    0x00c8, 0x00c9, 0x00ca, 0x00cb, 0x00cc, 0x00cd, 0x00ce, 0x00cf,
+    0x011e, 0x00d1, 0x00d2, 0x00d3, 0x00d4, 0x00d5, 0x00d6, 0x00d7,
+    0x00d8, 0x00d9, 0x00da, 0x00db, 0x00dc, 0x0130, 0x015e, 0x00df,
+    0x00e0, 0x00e1, 0x00e2, 0x00e3, 0x00e4, 0x00e5, 0x00e6, 0x00e7,
+    0x00e8, 0x00e9, 0x00ea, 0x00eb, 0x00ec, 0x00ed, 0x00ee, 0x00ef,
+    0x011f, 0x00f1, 0x00f2, 0x00f3, 0x00f4, 0x00f5, 0x00f6, 0x00f7,
+    0x00f8, 0x00f9, 0x00fa, 0x00fb, 0x00fc, 0x0131, 0x015f, 0x00ff,
+};
+
+const windows1255_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x02c6, 0x2030, 0xfffd, 0x2039, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x02dc, 0x2122, 0xfffd, 0x203a, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0x00a0, 0x00a1, 0x00a2, 0x00a3, 0x20aa, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x00d7, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00af,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x00b9, 0x00f7, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00bf,
+    0x05b0, 0x05b1, 0x05b2, 0x05b3, 0x05b4, 0x05b5, 0x05b6, 0x05b7,
+    0x05b8, 0x05b9, 0xfffd, 0x05bb, 0x05bc, 0x05bd, 0x05be, 0x05bf,
+    0x05c0, 0x05c1, 0x05c2, 0x05c3, 0x05f0, 0x05f1, 0x05f2, 0x05f3,
+    0x05f4, 0xfffd, 0xfffd, 0xfffd, 0xfffd, 0xfffd, 0xfffd, 0xfffd,
+    0x05d0, 0x05d1, 0x05d2, 0x05d3, 0x05d4, 0x05d5, 0x05d6, 0x05d7,
+    0x05d8, 0x05d9, 0x05da, 0x05db, 0x05dc, 0x05dd, 0x05de, 0x05df,
+    0x05e0, 0x05e1, 0x05e2, 0x05e3, 0x05e4, 0x05e5, 0x05e6, 0x05e7,
+    0x05e8, 0x05e9, 0x05ea, 0xfffd, 0xfffd, 0x200e, 0x200f, 0xfffd,
+};
+
+const windows1256_80 = [_]u21{
+    0x20ac, 0x067e, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x02c6, 0x2030, 0x0679, 0x2039, 0x0152, 0x0686, 0x0698, 0x0688,
+    0x06af, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x06a9, 0x2122, 0x0691, 0x203a, 0x0153, 0x200c, 0x200d, 0x06ba,
+    0x00a0, 0x060c, 0x00a2, 0x00a3, 0x00a4, 0x00a5, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x06be, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00af,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x00b9, 0x061b, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x061f,
+    0x06c1, 0x0621, 0x0622, 0x0623, 0x0624, 0x0625, 0x0626, 0x0627,
+    0x0628, 0x0629, 0x062a, 0x062b, 0x062c, 0x062d, 0x062e, 0x062f,
+    0x0630, 0x0631, 0x0632, 0x0633, 0x0634, 0x0635, 0x0636, 0x00d7,
+    0x0637, 0x0638, 0x0639, 0x063a, 0x0640, 0x0641, 0x0642, 0x0643,
+    0x00e0, 0x0644, 0x00e2, 0x0645, 0x0646, 0x0647, 0x0648, 0x00e7,
+    0x00e8, 0x00e9, 0x00ea, 0x00eb, 0x0649, 0x064a, 0x00ee, 0x00ef,
+    0x064b, 0x064c, 0x064d, 0x064e, 0x00f4, 0x064f, 0x0650, 0x00f7,
+    0x0651, 0x00f9, 0x0652, 0x00fb, 0x00fc, 0x200e, 0x200f, 0x06d2,
+};
+
+const windows1257_80 = [_]u21{
+    0x20ac, 0xfffd, 0x201a, 0xfffd, 0x201e, 0x2026, 0x2020, 0x2021,
+    0xfffd, 0x2030, 0xfffd, 0x2039, 0xfffd, 0x00a8, 0x02c7, 0x00b8,
+    0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0xfffd, 0x2122, 0xfffd, 0x203a, 0xfffd, 0x00af, 0x02db, 0xfffd,
+    0x00a0, 0xfffd, 0x00a2, 0x00a3, 0x00a4, 0xfffd, 0x00a6, 0x00a7,
+    0x00d8, 0x00a9, 0x0156, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x00c6,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00f8, 0x00b9, 0x0157, 0x00bb, 0x00bc, 0x00bd, 0x00be, 0x00e6,
+    0x0104, 0x012e, 0x0100, 0x0106, 0x00c4, 0x00c5, 0x0118, 0x0112,
+    0x010c, 0x00c9, 0x0179, 0x0116, 0x0122, 0x0136, 0x012a, 0x013b,
+    0x0160, 0x0143, 0x0145, 0x00d3, 0x014c, 0x00d5, 0x00d6, 0x00d7,
+    0x0172, 0x0141, 0x015a, 0x016a, 0x00dc, 0x017b, 0x017d, 0x00df,
+    0x0105, 0x012f, 0x0101, 0x0107, 0x00e4, 0x00e5, 0x0119, 0x0113,
+    0x010d, 0x00e9, 0x017a, 0x0117, 0x0123, 0x0137, 0x012b, 0x013c,
+    0x0161, 0x0144, 0x0146, 0x00f3, 0x014d, 0x00f5, 0x00f6, 0x00f7,
+    0x0173, 0x0142, 0x015b, 0x016b, 0x00fc, 0x017c, 0x017e, 0x02d9,
+};
+
+const koi8r_80 = [_]u21{
+    0x2500, 0x2502, 0x250c, 0x2510, 0x2514, 0x2518, 0x251c, 0x2524,
+    0x252c, 0x2534, 0x253c, 0x2580, 0x2584, 0x2588, 0x258c, 0x2590,
+    0x2591, 0x2592, 0x2593, 0x2320, 0x25a0, 0x2219, 0x221a, 0x2248,
+    0x2264, 0x2265, 0x00a0, 0x2321, 0x00b0, 0x00b2, 0x00b7, 0x00f7,
+    0x2550, 0x2551, 0x2552, 0x0451, 0x2553, 0x2554, 0x2555, 0x2556,
+    0x2557, 0x2558, 0x2559, 0x255a, 0x255b, 0x255c, 0x255d, 0x255e,
+    0x255f, 0x2560, 0x2561, 0x0401, 0x2562, 0x2563, 0x2564, 0x2565,
+    0x2566, 0x2567, 0x2568, 0x2569, 0x256a, 0x256b, 0x256c, 0x00a9,
+    0x044e, 0x0430, 0x0431, 0x0446, 0x0434, 0x0435, 0x0444, 0x0433,
+    0x0445, 0x0438, 0x0439, 0x043a, 0x043b, 0x043c, 0x043d, 0x043e,
+    0x043f, 0x044f, 0x0440, 0x0441, 0x0442, 0x0443, 0x0436, 0x0432,
+    0x044c, 0x044b, 0x0437, 0x0448, 0x044d, 0x0449, 0x0447, 0x044a,
+    0x042e, 0x0410, 0x0411, 0x0426, 0x0414, 0x0415, 0x0424, 0x0413,
+    0x0425, 0x0418, 0x0419, 0x041a, 0x041b, 0x041c, 0x041d, 0x041e,
+    0x041f, 0x042f, 0x0420, 0x0421, 0x0422, 0x0423, 0x0416, 0x0412,
+    0x042c, 0x042b, 0x0417, 0x0428, 0x042d, 0x0429, 0x0427, 0x042a,
+};
+
+fn windows1251Codepoint(c: u8) u21 {
+    if (c >= 0xc0) return 0x0410 + @as(u21, c - 0xc0);
+    return switch (c) {
+        0x80 => 0x0402,
+        0x81 => 0x0403,
+        0x82 => 0x201a,
+        0x83 => 0x0453,
+        0x84 => 0x201e,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x20ac,
+        0x89 => 0x2030,
+        0x8a => 0x0409,
+        0x8b => 0x2039,
+        0x8c => 0x040a,
+        0x8d => 0x040c,
+        0x8e => 0x040b,
+        0x8f => 0x040f,
+        0x90 => 0x0452,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201c,
+        0x94 => 0x201d,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x99 => 0x2122,
+        0x9a => 0x0459,
+        0x9b => 0x203a,
+        0x9c => 0x045a,
+        0x9d => 0x045c,
+        0x9e => 0x045b,
+        0x9f => 0x045f,
+        0xa1 => 0x040e,
+        0xa2 => 0x045e,
+        0xa3 => 0x0408,
+        0xa5 => 0x0490,
+        0xa8 => 0x0401,
+        0xaa => 0x0404,
+        0xaf => 0x0407,
+        0xb2 => 0x0406,
+        0xb3 => 0x0456,
+        0xb4 => 0x0491,
+        0xb8 => 0x0451,
+        0xb9 => 0x2116,
+        0xba => 0x0454,
+        0xbc => 0x0458,
+        0xbd => 0x0405,
+        0xbe => 0x0455,
+        0xbf => 0x0457,
+        else => c,
+    };
+}
+
+fn windows1252Codepoint(c: u8) u21 {
+    return switch (c) {
+        0x80 => 0x20ac,
+        0x82 => 0x201a,
+        0x83 => 0x0192,
+        0x84 => 0x201e,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x02c6,
+        0x89 => 0x2030,
+        0x8a => 0x0160,
+        0x8b => 0x2039,
+        0x8c => 0x0152,
+        0x8e => 0x017d,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201c,
+        0x94 => 0x201d,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x98 => 0x02dc,
+        0x99 => 0x2122,
+        0x9a => 0x0161,
+        0x9b => 0x203a,
+        0x9c => 0x0153,
+        0x9e => 0x017e,
+        0x9f => 0x0178,
+        else => c,
+    };
+}
+
+const iso88592_a0 = [_]u21{
+    0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
+    0x00a8, 0x0160, 0x015e, 0x0164, 0x0179, 0x00ad, 0x017d, 0x017b,
+    0x00b0, 0x0105, 0x02db, 0x0142, 0x00b4, 0x013e, 0x015b, 0x02c7,
+    0x00b8, 0x0161, 0x015f, 0x0165, 0x017a, 0x02dd, 0x017e, 0x017c,
+    0x0154, 0x00c1, 0x00c2, 0x0102, 0x00c4, 0x0139, 0x0106, 0x00c7,
+    0x010c, 0x00c9, 0x0118, 0x00cb, 0x011a, 0x00cd, 0x00ce, 0x010e,
+    0x0110, 0x0143, 0x0147, 0x00d3, 0x00d4, 0x0150, 0x00d6, 0x00d7,
+    0x0158, 0x016e, 0x00da, 0x0170, 0x00dc, 0x00dd, 0x0162, 0x00df,
+    0x0155, 0x00e1, 0x00e2, 0x0103, 0x00e4, 0x013a, 0x0107, 0x00e7,
+    0x010d, 0x00e9, 0x0119, 0x00eb, 0x011b, 0x00ed, 0x00ee, 0x010f,
+    0x0111, 0x0144, 0x0148, 0x00f3, 0x00f4, 0x0151, 0x00f6, 0x00f7,
+    0x0159, 0x016f, 0x00fa, 0x0171, 0x00fc, 0x00fd, 0x0163, 0x02d9,
+};
+
+const iso88597_a0 = [_]u21{
+    0x00a0, 0x2018, 0x2019, 0x00a3, 0x20ac, 0x20af, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x037a, 0x00ab, 0x00ac, 0x00ad, 0xfffd, 0x2015,
+    0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x0384, 0x0385, 0x0386, 0x00b7,
+    0x0388, 0x0389, 0x038a, 0x00bb, 0x038c, 0x00bd, 0x038e, 0x038f,
+    0x0390, 0x0391, 0x0392, 0x0393, 0x0394, 0x0395, 0x0396, 0x0397,
+    0x0398, 0x0399, 0x039a, 0x039b, 0x039c, 0x039d, 0x039e, 0x039f,
+    0x03a0, 0x03a1, 0xfffd, 0x03a3, 0x03a4, 0x03a5, 0x03a6, 0x03a7,
+    0x03a8, 0x03a9, 0x03aa, 0x03ab, 0x03ac, 0x03ad, 0x03ae, 0x03af,
+    0x03b0, 0x03b1, 0x03b2, 0x03b3, 0x03b4, 0x03b5, 0x03b6, 0x03b7,
+    0x03b8, 0x03b9, 0x03ba, 0x03bb, 0x03bc, 0x03bd, 0x03be, 0x03bf,
+    0x03c0, 0x03c1, 0x03c2, 0x03c3, 0x03c4, 0x03c5, 0x03c6, 0x03c7,
+    0x03c8, 0x03c9, 0x03ca, 0x03cb, 0x03cc, 0x03cd, 0x03ce, 0xfffd,
+};
+
+const iso88593_a0 = [_]u21{
+    0x00a0, 0x0126, 0x02d8, 0x00a3, 0x00a4, 0xfffd, 0x0124, 0x00a7,
+    0x00a8, 0x0130, 0x015e, 0x011e, 0x0134, 0x00ad, 0xfffd, 0x017b,
+    0x00b0, 0x0127, 0x00b2, 0x00b3, 0x00b4, 0x00b5, 0x0125, 0x00b7,
+    0x00b8, 0x0131, 0x015f, 0x011f, 0x0135, 0x00bd, 0xfffd, 0x017c,
+    0x00c0, 0x00c1, 0x00c2, 0xfffd, 0x00c4, 0x010a, 0x0108, 0x00c7,
+    0x00c8, 0x00c9, 0x00ca, 0x00cb, 0x00cc, 0x00cd, 0x00ce, 0x00cf,
+    0xfffd, 0x00d1, 0x00d2, 0x00d3, 0x00d4, 0x0120, 0x00d6, 0x00d7,
+    0x011c, 0x00d9, 0x00da, 0x00db, 0x00dc, 0x016c, 0x015c, 0x00df,
+    0x00e0, 0x00e1, 0x00e2, 0xfffd, 0x00e4, 0x010b, 0x0109, 0x00e7,
+    0x00e8, 0x00e9, 0x00ea, 0x00eb, 0x00ec, 0x00ed, 0x00ee, 0x00ef,
+    0xfffd, 0x00f1, 0x00f2, 0x00f3, 0x00f4, 0x0121, 0x00f6, 0x00f7,
+    0x011d, 0x00f9, 0x00fa, 0x00fb, 0x00fc, 0x016d, 0x015d, 0x02d9,
+};
+
+const iso88594_a0 = [_]u21{
+    0x00a0, 0x0104, 0x0138, 0x0156, 0x00a4, 0x0128, 0x013b, 0x00a7,
+    0x00a8, 0x0160, 0x0112, 0x0122, 0x0166, 0x00ad, 0x017d, 0x00af,
+    0x00b0, 0x0105, 0x02db, 0x0157, 0x00b4, 0x0129, 0x013c, 0x02c7,
+    0x00b8, 0x0161, 0x0113, 0x0123, 0x0167, 0x014a, 0x017e, 0x014b,
+    0x0100, 0x00c1, 0x00c2, 0x00c3, 0x00c4, 0x00c5, 0x00c6, 0x012e,
+    0x010c, 0x00c9, 0x0118, 0x00cb, 0x0116, 0x00cd, 0x00ce, 0x012a,
+    0x0110, 0x0145, 0x014c, 0x0136, 0x00d4, 0x00d5, 0x00d6, 0x00d7,
+    0x00d8, 0x0172, 0x00da, 0x00db, 0x00dc, 0x0168, 0x016a, 0x00df,
+    0x0101, 0x00e1, 0x00e2, 0x00e3, 0x00e4, 0x00e5, 0x00e6, 0x012f,
+    0x010d, 0x00e9, 0x0119, 0x00eb, 0x0117, 0x00ed, 0x00ee, 0x012b,
+    0x0111, 0x0146, 0x014d, 0x0137, 0x00f4, 0x00f5, 0x00f6, 0x00f7,
+    0x00f8, 0x0173, 0x00fa, 0x00fb, 0x00fc, 0x0169, 0x016b, 0x02d9,
+};
+
+/// Decode `UTF16_STRING` / UTF-16 clipboard bytes. Honors a BOM when present,
+/// otherwise assumes little-endian (the usual X11/Windows convention).
+pub fn clipboardUtf16BytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const decoded = blk: {
+        if (bytes.len >= 2) {
+            if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) {
+                break :blk try utf16ToUtf8(gpa, bytes[2..], .little);
+            }
+            if (std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
+                break :blk try utf16ToUtf8(gpa, bytes[2..], .big);
+            }
+        }
+        break :blk try utf16ToUtf8(gpa, bytes, .little);
+    };
+    return normalizeClipboardNewlinesOwned(gpa, decoded);
+}
+
+/// Collapse CR/LF and lone CR to LF so Windows and some GTK pastes match Unix.
+pub fn normalizeClipboardNewlines(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, text, '\r') == null) return gpa.dupe(u8, text);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\r') {
+            try out.append(gpa, '\n');
+            if (i + 1 < text.len and text[i + 1] == '\n') {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        try out.append(gpa, text[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+fn normalizeClipboardNewlinesOwned(gpa: std.mem.Allocator, owned: []u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, owned, '\r') == null) return owned;
+    const next = try normalizeClipboardNewlines(gpa, owned);
+    gpa.free(owned);
+    return next;
+}
+
+fn utf16ToUtf8(gpa: std.mem.Allocator, bytes: []const u8, endian: std.builtin.Endian) ![]u8 {
+    if (bytes.len % 2 != 0) return error.TruncatedUtf16;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i + 1 < bytes.len) {
+        const unit = std.mem.readInt(u16, bytes[i..][0..2], endian);
+        i += 2;
+        var codepoint: u21 = unit;
+        if (unit >= 0xD800 and unit <= 0xDBFF) {
+            if (i + 1 >= bytes.len) return error.TruncatedUtf16;
+            const low = std.mem.readInt(u16, bytes[i..][0..2], endian);
+            i += 2;
+            if (low < 0xDC00 or low > 0xDFFF) return error.InvalidUtf16;
+            codepoint = 0x10000 + (((@as(u21, unit) - 0xD800) << 10) | (low - 0xDC00));
+        } else if (unit >= 0xDC00 and unit <= 0xDFFF) {
+            return error.InvalidUtf16;
+        }
+        var buf: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(codepoint, &buf) catch return error.InvalidUtf16;
+        try out.appendSlice(gpa, buf[0..n]);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+fn percentDecode(src: []const u8, buf: []u8) ?[]const u8 {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        if (out >= buf.len) return null;
+        if (src[i] == '%' and i + 2 < src.len) {
+            const hi = hexNibble(src[i + 1]) orelse return null;
+            const lo = hexNibble(src[i + 2]) orelse return null;
+            buf[out] = (hi << 4) | lo;
+            out += 1;
+            i += 3;
+            continue;
+        }
+        buf[out] = if (src[i] == '+') ' ' else src[i];
+        out += 1;
+        i += 1;
+    }
+    return buf[0..out];
+}
+
+fn hexNibble(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Integer framebuffer scale from an XSETTINGS blob (`_XSETTINGS_SETTINGS`).
+/// Prefers `Gdk/WindowScalingFactor`, then `Xft/DPI` (1024ths of a point).
+pub fn parseXsettingsScale(bytes: []const u8) ?u32 {
+    const parsed = parseXsettings(bytes) orelse return null;
+    if (parsed.gdk_scale) |scale| return scale;
+    if (parsed.xft_dpi) |dpi| return scaleFromDpi(dpi);
+    return null;
+}
+
+const XsettingsValues = struct {
+    gdk_scale: ?u32 = null,
+    xft_dpi: ?u32 = null,
+};
+
+fn parseXsettings(bytes: []const u8) ?XsettingsValues {
+    if (bytes.len < 12) return null;
+    const order = bytes[0];
+    if (order != 'l' and order != 'B') return null;
+    const count = xsettingsGet32(order, bytes[8..12]) orelse return null;
+    var off: usize = 12;
+    var values = XsettingsValues{};
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        if (off + 4 > bytes.len) return null;
+        const typ = bytes[off];
+        const name_len = xsettingsGet16(order, bytes[off + 2 .. off + 4]) orelse return null;
+        off += 4;
+        if (off + name_len > bytes.len) return null;
+        const name = bytes[off .. off + name_len];
+        off += name_len;
+        off = std.mem.alignForward(usize, off, 4);
+        if (off + 4 > bytes.len) return null;
+        off += 4; // last-change-serial
+        switch (typ) {
+            0 => { // integer
+                if (off + 4 > bytes.len) return null;
+                const raw = xsettingsGet32(order, bytes[off .. off + 4]) orelse return null;
+                off += 4;
+                if (std.mem.eql(u8, name, "Gdk/WindowScalingFactor")) {
+                    if (raw >= 1 and raw <= 8) values.gdk_scale = raw;
+                } else if (std.mem.eql(u8, name, "Xft/DPI")) {
+                    const dpi = raw / 1024;
+                    if (dpi >= 1 and dpi <= 768) values.xft_dpi = dpi;
+                }
+            },
+            1 => { // string
+                if (off + 4 > bytes.len) return null;
+                const str_len = xsettingsGet32(order, bytes[off .. off + 4]) orelse return null;
+                off += 4;
+                if (off + str_len > bytes.len) return null;
+                off += str_len;
+                off = std.mem.alignForward(usize, off, 4);
+            },
+            2 => { // color
+                if (off + 8 > bytes.len) return null;
+                off += 8;
+            },
+            else => return null,
+        }
+    }
+    return values;
+}
+
+fn xsettingsGet16(order: u8, bytes: []const u8) ?u16 {
+    if (bytes.len < 2) return null;
+    return switch (order) {
+        'l' => @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8),
+        'B' => (@as(u16, bytes[0]) << 8) | @as(u16, bytes[1]),
+        else => null,
+    };
+}
+
+fn xsettingsGet32(order: u8, bytes: []const u8) ?u32 {
+    if (bytes.len < 4) return null;
+    return switch (order) {
+        'l' => @as(u32, bytes[0]) | (@as(u32, bytes[1]) << 8) | (@as(u32, bytes[2]) << 16) | (@as(u32, bytes[3]) << 24),
+        'B' => (@as(u32, bytes[0]) << 24) | (@as(u32, bytes[1]) << 16) | (@as(u32, bytes[2]) << 8) | @as(u32, bytes[3]),
+        else => null,
+    };
+}
+
+pub fn parseXftDpi(resources: []const u8) ?u32 {
+    var lines = std.mem.splitScalar(u8, resources, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, "Xft.dpi")) continue;
+        const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
+        const value = std.mem.trim(u8, trimmed[colon + 1 ..], " \t");
+        if (value.len == 0) continue;
+        if (std.fmt.parseInt(u32, value, 10)) |dpi| {
+            if (dpi >= 1 and dpi <= 768) return dpi;
+        } else |_| {}
+        const parsed = std.fmt.parseFloat(f32, value) catch continue;
+        if (parsed >= 1 and parsed <= 768) return @intFromFloat(@round(parsed));
+    }
+    return null;
+}
+
+pub fn parseXcursorSize(resources: []const u8) ?u32 {
+    var lines = std.mem.splitScalar(u8, resources, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, "Xcursor.size")) continue;
+        const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
+        const value = std.mem.trim(u8, trimmed[colon + 1 ..], " \t");
+        return parseCursorPx(value);
+    }
+    return null;
+}
+
+pub fn cursorPixelSize(scale: u32, env: []const u8, resources: []const u8) u32 {
+    if (environValue(env, "XCURSOR_SIZE")) |value| {
+        if (parseCursorPx(value)) |size| return size;
+    }
+    if (parseXcursorSize(resources)) |size| return size;
+    return @min(64, @max(16, 16 * @max(scale, 1)));
+}
+
+fn parseCursorPx(value: []const u8) ?u32 {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+    const parsed = std.fmt.parseInt(u32, trimmed, 10) catch return null;
+    if (parsed < 8 or parsed > 128) return null;
+    return parsed;
+}
+
+/// Geometric taskbar mark: navy tile, cream balloon. Not comic artwork.
+pub fn fillWindowMark(dst: []u32, size: u32) void {
+    if (size == 0 or dst.len < @as(usize, size) * @as(usize, size)) return;
+    const navy: u32 = 0xff16324f;
+    const cream: u32 = 0xfff4e6c8;
+    const ink: u32 = 0xff2b1d12;
+    @memset(dst[0 .. @as(usize, size) * @as(usize, size)], 0);
+    const margin = @max(1, size / 8);
+    var y: u32 = 0;
+    while (y < size) : (y += 1) {
+        var x: u32 = 0;
+        while (x < size) : (x += 1) {
+            const edge = x < margin or y < margin or x + margin >= size or y + margin >= size;
+            dst[@as(usize, y) * size + x] = if (edge) ink else navy;
+        }
+    }
+    const balloon_x0 = size / 4;
+    const balloon_x1 = size - size / 6;
+    const balloon_y0 = size / 5;
+    const balloon_y1 = size - size / 3;
+    var by = balloon_y0;
+    while (by < balloon_y1) : (by += 1) {
+        var bx = balloon_x0;
+        while (bx < balloon_x1) : (bx += 1) {
+            dst[@as(usize, by) * size + bx] = cream;
+        }
+    }
+    var tail: u32 = 0;
+    while (tail < size / 5) : (tail += 1) {
+        const tx = balloon_x0 + tail;
+        const ty = balloon_y1 + tail / 2;
+        if (tx < size and ty < size) dst[@as(usize, ty) * size + tx] = cream;
+    }
+}
+
+/// Classic left-pointing arrow with a white outline. `size` is the pixmap edge.
+pub fn fillArrowCursor(dst: []u32, size: u32) void {
+    if (size == 0 or dst.len < @as(usize, size) * @as(usize, size)) return;
+    @memset(dst[0 .. @as(usize, size) * @as(usize, size)], 0);
+    const src_w: u32 = 12;
+    const src_h: u32 = 16;
+    const outline = [_]u16{
+        0b100000000000,
+        0b110000000000,
+        0b111000000000,
+        0b111100000000,
+        0b111110000000,
+        0b111111000000,
+        0b111111100000,
+        0b111111110000,
+        0b111111111000,
+        0b111111000000,
+        0b110111000000,
+        0b100011100000,
+        0b000011100000,
+        0b000001110000,
+        0b000001110000,
+        0b000000110000,
+    };
+    const fill = [_]u16{
+        0b000000000000,
+        0b010000000000,
+        0b011000000000,
+        0b011100000000,
+        0b011110000000,
+        0b011111000000,
+        0b011111100000,
+        0b011111110000,
+        0b011110000000,
+        0b010110000000,
+        0b000011000000,
+        0b000011000000,
+        0b000001100000,
+        0b000001100000,
+        0b000000100000,
+        0b000000000000,
+    };
+    var y: u32 = 0;
+    while (y < size) : (y += 1) {
+        const sy = @min(src_h - 1, (y * src_h) / size);
+        var x: u32 = 0;
+        while (x < size) : (x += 1) {
+            const sx = @min(src_w - 1, (x * src_w) / size);
+            const bit: u16 = @as(u16, 1) << @intCast(src_w - 1 - sx);
+            if (outline[sy] & bit == 0) continue;
+            dst[@as(usize, y) * size + x] = if (fill[sy] & bit != 0) 0xff000000 else 0xffffffff;
+        }
+    }
+}
+
+pub fn arrowHotspot(size: u32) struct { x: u32, y: u32 } {
+    const edge = @max(size, 1);
+    return .{ .x = @max(1, edge / 16), .y = @max(1, edge / 16) };
+}
+
+pub fn packNetWmIcon(gpa: std.mem.Allocator, sizes: []const u32) ![]u32 {
+    var total: usize = 0;
+    for (sizes) |size| {
+        if (size == 0 or size > 128) return error.InvalidIconSize;
+        total = try std.math.add(usize, total, 2 + @as(usize, size) * @as(usize, size));
+    }
+    const out = try gpa.alloc(u32, total);
+    errdefer gpa.free(out);
+    var off: usize = 0;
+    for (sizes) |size| {
+        out[off] = size;
+        out[off + 1] = size;
+        fillWindowMark(out[off + 2 .. off + 2 + @as(usize, size) * @as(usize, size)], size);
+        off += 2 + @as(usize, size) * @as(usize, size);
+    }
+    return out;
+}
+
+pub fn bitmapStride(width: u32) usize {
+    return ((@as(usize, width) + 31) / 32) * 4;
+}
+
+/// `source_fill` writes only the black arrow body; otherwise every opaque pixel.
+pub fn encodeBitmapPlane(dst: []u8, pixels: []const u32, width: u32, height: u32, source_fill: bool) void {
+    const stride = bitmapStride(width);
+    @memset(dst, 0);
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < width) : (x += 1) {
+            const px = pixels[@as(usize, y) * width + x];
+            if (px >> 24 < 0x80) continue;
+            if (source_fill and (px & 0x00ffffff) != 0) continue;
+            const bit: u3 = @intCast(x & 7);
+            dst[@as(usize, y) * stride + x / 8] |= @as(u8, 1) << bit;
+        }
+    }
+}
+
+fn parsePositiveScale(value: []const u8) ?u32 {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.fmt.parseInt(u32, trimmed, 10)) |scale| {
+        if (scale >= 1 and scale <= 8) return scale;
+        return null;
+    } else |_| {}
+    const parsed = std.fmt.parseFloat(f32, trimmed) catch return null;
+    if (parsed < 1 or parsed > 8) return null;
+    const rounded: u32 = @intFromFloat(@round(parsed));
+    if (rounded < 1 or rounded > 8) return null;
+    return rounded;
+}
+
+/// Connects a UNIX-domain stream without going through `std.Io.net.UnixAddress`.
+/// Abstract-namespace misses return `ECONNREFUSED` (111); Zig's helper treats
+/// that as `Unexpected` and dumps a stack. Map the usual "no server" errnos
+/// here so a missing X11/Wayland socket is a clean `ServerUnavailable`.
+pub fn connectUnixStream(io: std.Io, path: []const u8) !std.Io.net.Stream {
+    _ = io;
+    const fd = try connectUnixFd(path);
+    return .{ .socket = .{
+        .handle = fd,
+        .address = .{ .ip4 = .loopback(0) },
+    } };
+}
+
+fn connectUnixFd(path: []const u8) !i32 {
+    const max_path = @sizeOf(linux.sockaddr.un) - @sizeOf(linux.sa_family_t);
+    if (path.len >= max_path) return error.NameTooLong;
+    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .NFILE, .MFILE, .NOBUFS, .NOMEM => return error.SystemResources,
+        .AFNOSUPPORT, .PROTONOSUPPORT => return error.AddressFamilyUnsupported,
+        else => return error.Unexpected,
+    }
+    const fd: i32 = @intCast(rc);
+
+    var addr = std.mem.zeroes(linux.sockaddr.un);
+    addr.family = linux.AF.UNIX;
+    @memcpy(addr.path[0..path.len], path);
+    // Pathname sockets include a trailing NUL in the address length.
+    // Abstract sockets (`path[0] == 0`) use the exact byte count, no extra NUL.
+    const addr_len: u32 = if (path.len > 0 and path[0] == 0)
+        @intCast(@sizeOf(linux.sa_family_t) + path.len)
+    else
+        @intCast(@sizeOf(linux.sa_family_t) + path.len + 1);
+
+    const connect_rc = linux.connect(fd, &addr, addr_len);
+    switch (linux.errno(connect_rc)) {
+        .SUCCESS => return fd,
+        .NOENT, .CONNREFUSED, .AGAIN, .TIMEDOUT, .NETUNREACH, .HOSTUNREACH, .ADDRNOTAVAIL, .NOTCONN => {
+            _ = linux.close(fd);
+            return error.ServerUnavailable;
+        },
+        .ACCES, .PERM => {
+            _ = linux.close(fd);
+            return error.AccessDenied;
+        },
+        else => {
+            _ = linux.close(fd);
+            return error.Unexpected;
+        },
+    }
+}
+
 pub fn writeClipboard(io: std.Io, desktop: Desktop, text: []const u8) !void {
     if (text.len > max_clipboard_bytes) return error.ClipboardTooLarge;
-    const argv: []const []const u8 = switch (desktop) {
-        .wayland => &.{ "wl-copy", "--type", "text/plain;charset=utf-8" },
-        .x11 => &.{ "xclip", "-selection", "clipboard", "-in" },
+    const argv_groups: []const []const []const u8 = switch (desktop) {
+        .wayland => &.{
+            &.{ "wl-copy", "--type", "text/plain;charset=utf-8" },
+            &.{"wl-copy"},
+        },
+        .x11 => &.{
+            &.{ "xclip", "-selection", "clipboard", "-in" },
+            &.{ "xsel", "--clipboard", "--input" },
+        },
     };
+    var last_err: anyerror = error.DesktopServiceFailed;
+    for (argv_groups) |argv| {
+        writeClipboardArgv(io, text, argv) catch |err| {
+            last_err = err;
+            continue;
+        };
+        return;
+    }
+    return last_err;
+}
+
+fn writeClipboardArgv(io: std.Io, text: []const u8, argv: []const []const u8) !void {
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .stdin = .pipe,
@@ -35,10 +1951,48 @@ pub fn writeClipboard(io: std.Io, desktop: Desktop, text: []const u8) !void {
 }
 
 pub fn readClipboard(gpa: std.mem.Allocator, io: std.Io, desktop: Desktop) !?[]u8 {
-    const argv: []const []const u8 = switch (desktop) {
-        .wayland => &.{ "wl-paste", "--no-newline", "--type", "text" },
-        .x11 => &.{ "xclip", "-selection", "clipboard", "-out" },
+    return readSelection(gpa, io, desktop, .clipboard);
+}
+
+/// PRIMARY / mouse-selection paste when the native protocol is missing.
+pub fn readPrimary(gpa: std.mem.Allocator, io: std.Io, desktop: Desktop) !?[]u8 {
+    return readSelection(gpa, io, desktop, .primary);
+}
+
+const SelectionKind = enum { clipboard, primary };
+
+fn readSelection(gpa: std.mem.Allocator, io: std.Io, desktop: Desktop, kind: SelectionKind) !?[]u8 {
+    const argv_groups: []const []const []const u8 = switch (desktop) {
+        .wayland => switch (kind) {
+            .clipboard => &.{
+                &.{ "wl-paste", "--no-newline", "--type", "text" },
+                &.{ "wl-paste", "--no-newline" },
+            },
+            .primary => &.{
+                &.{ "wl-paste", "--primary", "--no-newline", "--type", "text" },
+                &.{ "wl-paste", "--primary", "--no-newline" },
+            },
+        },
+        .x11 => switch (kind) {
+            .clipboard => &.{
+                &.{ "xclip", "-selection", "clipboard", "-out" },
+                &.{ "xsel", "--clipboard", "--output" },
+            },
+            .primary => &.{
+                &.{ "xclip", "-selection", "primary", "-out" },
+                &.{ "xsel", "--primary", "--output" },
+            },
+        },
     };
+    for (argv_groups) |argv| {
+        if (readClipboardArgv(gpa, io, argv)) |text| {
+            return text;
+        } else |_| continue;
+    }
+    return null;
+}
+
+fn readClipboardArgv(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !?[]u8 {
     var result = try std.process.run(gpa, io, .{
         .argv = argv,
         .stdout_limit = .limited(max_clipboard_bytes),
@@ -87,10 +2041,13 @@ fn chooseFileKdialog(gpa: std.mem.Allocator, io: std.Io, save: bool, title: []co
     return trimOwnedResult(gpa, result.stdout);
 }
 
+const notify_urgency_flag = "--urgency=normal";
+const notify_icon_flag = "--icon=applications-internet";
+
 pub fn notify(gpa: std.mem.Allocator, io: std.Io, title: []const u8, body: []const u8) !void {
     if (title.len > 256 or body.len > 4096) return error.NotificationTooLarge;
     var result = try std.process.run(gpa, io, .{
-        .argv = &.{ "notify-send", "--app-name=Comic Chat", title, body },
+        .argv = &.{ "notify-send", notify_urgency_flag, notify_icon_flag, "--app-name=Comic Chat", title, body },
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
     });
@@ -100,7 +2057,38 @@ pub fn notify(gpa: std.mem.Allocator, io: std.Io, title: []const u8, body: []con
 }
 
 pub fn openPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    return openPathActivated(gpa, io, path, null);
+}
+
+/// Opens a path/URL with `xdg-open`, exporting an activation token so the
+/// launched window can take focus. `token` becomes both
+/// `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`.
+pub fn openPathActivated(gpa: std.mem.Allocator, io: std.Io, path: []const u8, token: ?[]const u8) !void {
+    if (token) |value| {
+        var act_buf: [576]u8 = undefined;
+        var start_buf: [576]u8 = undefined;
+        if (activationEnvArgs(value, &act_buf, &start_buf)) |env| {
+            return runNoOutput(gpa, io, &.{ "env", env.activation, env.startup, "xdg-open", path });
+        }
+    }
     return runNoOutput(gpa, io, &.{ "xdg-open", path });
+}
+
+pub fn generatedStartupId(buf: []u8) ?[]const u8 {
+    return generatedStartupIdTimed(buf, 1);
+}
+
+pub fn generatedStartupIdTimed(buf: []u8, time: u32) ?[]const u8 {
+    const pid: u32 = @intCast(@max(0, linux.getpid()));
+    return std.fmt.bufPrint(buf, "reinked-{d}-{d}", .{ pid, time }) catch null;
+}
+
+pub fn activationEnvArgs(token: []const u8, act_buf: []u8, start_buf: []u8) ?struct { activation: []const u8, startup: []const u8 } {
+    if (token.len == 0 or token.len >= 512) return null;
+    if (std.mem.indexOfScalar(u8, token, 0) != null) return null;
+    const activation = std.fmt.bufPrint(act_buf, "XDG_ACTIVATION_TOKEN={s}", .{token}) catch return null;
+    const startup = std.fmt.bufPrint(start_buf, "DESKTOP_STARTUP_ID={s}", .{token}) catch return null;
+    return .{ .activation = activation, .startup = startup };
 }
 
 pub fn printPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
@@ -130,10 +2118,436 @@ fn trimOwnedResult(gpa: std.mem.Allocator, owned: []u8) !?[]u8 {
     return result;
 }
 
+fn openReadOnly(path: [*:0]const u8) !i32 {
+    const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .NOENT => return error.FileNotFound,
+        .ACCES, .PERM => return error.AccessDenied,
+        else => return error.OpenFailed,
+    }
+}
+
+fn readSomeFd(fd: i32, dst: []u8) !usize {
+    while (true) {
+        const rc = linux.read(fd, dst.ptr, dst.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            else => return error.ReadFailed,
+        }
+    }
+}
+
 test "desktop service output trimming preserves an owned result" {
     const gpa = std.testing.allocator;
     const raw = try gpa.dupe(u8, "/tmp/chat.ccr\r\n");
     const trimmed = (try trimOwnedResult(gpa, raw)).?;
     defer gpa.free(trimmed);
     try std.testing.expectEqualStrings("/tmp/chat.ccr", trimmed);
+}
+
+test "environValue reads NUL-separated assignments" {
+    try std.testing.expectEqualStrings("unix:0", environValue("HOME=/home/dev\x00DISPLAY=unix:0\x00", "DISPLAY").?);
+    try std.testing.expect(environValue("HOME=/home/dev\x00", "DISPLAY") == null);
+}
+
+test "startupToken prefers XDG_ACTIVATION_TOKEN then DESKTOP_STARTUP_ID" {
+    try std.testing.expectEqualStrings(
+        "tok-1",
+        startupToken("WAYLAND_DISPLAY=wayland-0\x00XDG_ACTIVATION_TOKEN=tok-1\x00DESKTOP_STARTUP_ID=old\x00").?,
+    );
+    try std.testing.expectEqualStrings("start/0", startupToken("DESKTOP_STARTUP_ID=start/0\x00").?);
+    try std.testing.expect(startupToken("DISPLAY=:0\x00XDG_ACTIVATION_TOKEN=\x00") == null);
+}
+
+test "startupRemoveMessage encodes a NUL-terminated remove ID" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("remove: ID=tok-1\x00", startupRemoveMessage("tok-1", &buf).?);
+    try std.testing.expectEqualStrings("remove: ID=foo\\ bar\x00", startupRemoveMessage("foo bar", &buf).?);
+    try std.testing.expect(startupRemoveMessage("tok-1", buf[0..8]) == null);
+}
+
+test "integer scale comes from toolkit env, then rounded DPI" {
+    try std.testing.expectEqual(@as(u32, 2), scaleFromEnvironment("QT_SCALE_FACTOR=1\x00GDK_SCALE=2\x00").?);
+    try std.testing.expectEqual(@as(u32, 3), scaleFromEnvironment("QT_SCALE_FACTOR=2.6\x00").?);
+    try std.testing.expect(scaleFromEnvironment("GDK_SCALE=0\x00") == null);
+    try std.testing.expectEqual(@as(u32, 1), scaleFromEnvironment("GDK_SCALE=2\x00GDK_DPI_SCALE=0.5\x00").?);
+    try std.testing.expectEqual(@as(u32, 2), scaleFromEnvironment("QT_SCREEN_SCALE_FACTORS=DP-1=2;HDMI-1=1\x00").?);
+    try std.testing.expectEqual(@as(u32, 1), scaleFromDpi(96));
+    try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(144));
+    try std.testing.expectEqual(@as(u32, 2), scaleFromDpi(192));
+    try std.testing.expectEqual(@as(u32, 1), scaleFromDpi(120));
+    try std.testing.expectEqual(@as(u32, 2), scaleFromScreenMm(3840, 600).?);
+    try std.testing.expect(scaleFromScreenMm(1920, 508) == null);
+    try std.testing.expect(scaleFromScreenMm(1920, 0) == null);
+}
+
+test "unix connect maps a missing pathname socket to ServerUnavailable" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.ServerUnavailable,
+        connectUnixStream(threaded.io(), "/tmp/.comicchat-missing-unix-socket-test"),
+    );
+}
+
+test "uri-list drop prefers a local file path and skips comments" {
+    var buf: [128]u8 = undefined;
+    const path = firstPathFromUriList("# comment\r\nhttps://example.test/a\r\nfile:///tmp/chat%20room.ccc\r\n", &buf).?;
+    try std.testing.expectEqualStrings("/tmp/chat room.ccc", path);
+    try std.testing.expectEqualStrings("/tmp/a.ccc", firstPathFromUriList("file://localhost/tmp/a.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/loop.ccc", firstPathFromUriList("file://127.0.0.1/tmp/loop.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/loop6.ccc", firstPathFromUriList("file://[::1]/tmp/loop6.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/b.ccc", firstPathFromUriList("file:/tmp/b.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/c.ccc", firstPathFromUriList("file:///tmp/c.ccc?download=1#top\n", &buf).?);
+    try std.testing.expect(firstPathFromUriList("file://remote.example/tmp/a.ccc\n", &buf) == null);
+    var host_buf: [64]u8 = undefined;
+    const host = localNodename(&host_buf);
+    if (host.len != 0) {
+        var url_buf: [160]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "file://{s}/tmp/host.ccc\n", .{host}) catch "";
+        if (url.len != 0) {
+            try std.testing.expectEqualStrings("/tmp/host.ccc", firstPathFromUriList(url, &buf).?);
+        }
+    }
+    try std.testing.expect(firstPathFromUriList("https://example.test/a\n", &buf) == null);
+    try std.testing.expectEqualStrings("hello", firstDropText("hello\n", &buf).?);
+    const latin = try firstDropTextUtf8(std.testing.allocator, "caf\xe9\n");
+    defer std.testing.allocator.free(latin);
+    try std.testing.expectEqualStrings("café", latin);
+}
+
+test "desktop file-list MIME yields a local path and skips copy/cut headers" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(isDesktopFileMime("x-special/gnome-copied-files"));
+    try std.testing.expect(isDesktopFileMime("x-special/nautilus-clipboard"));
+    try std.testing.expect(isDesktopFileMime("text/x-moz-url"));
+    try std.testing.expect(isDesktopFileMime("application/x-moz-file"));
+    try std.testing.expect(isDesktopFileMime("application/x-kde4-urilist"));
+    try std.testing.expect(isDesktopFileMime("application/x-kde5-urilist"));
+    try std.testing.expect(isDesktopFileMime("application/x-kde-suggestedfilename"));
+    try std.testing.expect(isDesktopFileMime("text/x-moz-url-priv"));
+    try std.testing.expect(isCompoundTextMime("COMPOUND_TEXT"));
+    try std.testing.expect(isCompoundTextMime("compound_text"));
+    try std.testing.expect(!isDesktopFileMime("text/uri-list"));
+    try std.testing.expect(isUriListMime("text/uri-list"));
+    try std.testing.expect(isUriListMime("text/x-uri-list"));
+    try std.testing.expect(isUriListMime("text/x-uri-list;charset=utf-8"));
+    try std.testing.expect(!isUriListMime("text/plain"));
+    try std.testing.expect(isRtfMime("text/rtf"));
+    try std.testing.expect(isRtfMime("application/rtf"));
+    try std.testing.expect(isRtfMime("text/rtf;charset=utf-8"));
+    try std.testing.expect(!isRtfMime("text/html"));
+    try std.testing.expectEqualStrings(
+        "/tmp/chat room.ccc",
+        firstPathFromDesktopFiles("copy\nfile:///tmp/chat%20room.ccc\n", &buf).?,
+    );
+    try std.testing.expectEqualStrings("/tmp/a.ccc", firstPathFromDesktopFiles("cut\n/tmp/a.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/b.ccc", firstDropText("copy\nfile:///tmp/b.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings(
+        "/tmp/photo.png",
+        firstPathFromDesktopFiles("file:///tmp/photo.png\nPhoto title\n", &buf).?,
+    );
+    try std.testing.expect(firstPathFromDesktopFiles("copy\nhttps://example.test/a\n", &buf) == null);
+    try std.testing.expectEqualStrings("/tmp/name.png", firstPathFromDesktopFiles("/tmp/name.png\n", &buf).?);
+    try std.testing.expect(firstPathFromDesktopFiles("name.png\n", &buf) == null);
+}
+
+test "XSETTINGS prefers Gdk/WindowScalingFactor then Xft/DPI" {
+    const scale2 = [_]u8{
+        'l', 0,   0,   0,
+        0,   0,   0,   0,
+        1,   0,   0,   0,
+        0,   0,   23,  0,
+        'G', 'd', 'k', '/',
+        'W', 'i', 'n', 'd',
+        'o', 'w', 'S', 'c',
+        'a', 'l', 'i', 'n',
+        'g', 'F', 'a', 'c',
+        't', 'o', 'r', 0,
+        0,   0,   0,   0,
+        2,   0,   0,   0,
+    };
+    try std.testing.expectEqual(@as(u32, 2), parseXsettingsScale(&scale2).?);
+
+    const dpi192 = [_]u8{
+        'B', 0,   0,   0,
+        0,   0,   0,   0,
+        0,   0,   0,   1,
+        0,   0,   0,   7,
+        'X', 'f', 't', '/',
+        'D', 'P', 'I', 0,
+        0,   0,   0,   0,
+        0, 3, 0, 0, // 196608 = 192 * 1024
+    };
+    try std.testing.expectEqual(@as(u32, 2), parseXsettingsScale(&dpi192).?);
+    try std.testing.expect(parseXsettingsScale("not-xsettings") == null);
+}
+
+test "Xft.dpi parser accepts integer and fractional resource lines" {
+    try std.testing.expectEqual(@as(u32, 192), parseXftDpi("Xft.antialias: 1\nXft.dpi: 192\n").?);
+    try std.testing.expectEqual(@as(u32, 144), parseXftDpi("Xft.dpi:\t143.7\r\n").?);
+    try std.testing.expect(parseXftDpi("Xcursor.size: 24\n") == null);
+}
+
+test "cursor size prefers XCURSOR_SIZE then Xcursor.size then framebuffer scale" {
+    try std.testing.expectEqual(@as(u32, 48), parseXcursorSize("Xcursor.theme: Adwaita\nXcursor.size: 48\n").?);
+    try std.testing.expectEqual(@as(u32, 32), cursorPixelSize(1, "XCURSOR_SIZE=32\x00", "Xcursor.size: 24\n"));
+    try std.testing.expectEqual(@as(u32, 24), cursorPixelSize(2, "", "Xcursor.size: 24\n"));
+    try std.testing.expectEqual(@as(u32, 32), cursorPixelSize(2, "", ""));
+    try std.testing.expectEqual(@as(u32, 16), cursorPixelSize(1, "", ""));
+}
+
+test "window mark and arrow cursor produce opaque pixels" {
+    var mark: [16 * 16]u32 = undefined;
+    fillWindowMark(&mark, 16);
+    try std.testing.expectEqual(@as(u32, 0xfff4e6c8), mark[16 * 8 + 8]);
+    try std.testing.expectEqual(@as(u32, 0xff2b1d12), mark[0]);
+    try std.testing.expectEqual(@as(u32, 0xff16324f), mark[16 * 2 + 2]);
+    var arrow: [16 * 16]u32 = undefined;
+    fillArrowCursor(&arrow, 16);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), arrow[0]);
+    try std.testing.expectEqual(@as(u32, 0xff000000), arrow[16 * 2 + 2]);
+    const hot = arrowHotspot(32);
+    try std.testing.expectEqual(@as(u32, 2), hot.x);
+    const packed_icon = try packNetWmIcon(std.testing.allocator, &.{ 16, 32, 64, 128 });
+    defer std.testing.allocator.free(packed_icon);
+    try std.testing.expectEqual(@as(u32, 16), packed_icon[0]);
+    try std.testing.expectEqual(@as(u32, 32), packed_icon[2 + 16 * 16]);
+    try std.testing.expectEqual(@as(u32, 64), packed_icon[2 + 16 * 16 + 2 + 32 * 32]);
+    var bits: [64]u8 = undefined;
+    encodeBitmapPlane(&bits, &arrow, 16, 16, false);
+    try std.testing.expect(bits[0] & 1 != 0);
+}
+
+test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
+    const gpa = std.testing.allocator;
+    const stripped = try clipboardBytesToUtf8(gpa, "\xEF\xBB\xBFhello");
+    defer gpa.free(stripped);
+    try std.testing.expectEqualStrings("hello", stripped);
+    const le = try clipboardBytesToUtf8(gpa, "\xFF\xFE" ++ "h\x00i\x00");
+    defer gpa.free(le);
+    try std.testing.expectEqualStrings("hi", le);
+    const be = try clipboardBytesToUtf8(gpa, "\xFE\xFF" ++ "\x00h\x00i");
+    defer gpa.free(be);
+    try std.testing.expectEqualStrings("hi", be);
+    const raw_le = try clipboardUtf16BytesToUtf8(gpa, "h\x00i\x00");
+    defer gpa.free(raw_le);
+    try std.testing.expectEqualStrings("hi", raw_le);
+    const crlf = try clipboardBytesToUtf8(gpa, "a\r\nb\rc");
+    defer gpa.free(crlf);
+    try std.testing.expectEqualStrings("a\nb\nc", crlf);
+    const latin = try clipboardBytesToUtf8(gpa, "caf\xe9");
+    defer gpa.free(latin);
+    try std.testing.expectEqualStrings("café", latin);
+    try std.testing.expectEqualStrings("ISO-8859-1", mimeCharset("text/plain;charset=ISO-8859-1").?);
+    try std.testing.expect(isMarkdownMime("text/markdown"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=iso-8859-15"));
+    try std.testing.expect(!isLatinPlainMime("text/plain;charset=utf-8"));
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-1", knownLatinPlainMime("text/plain;charset=latin1").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-15", knownLatinPlainMime("text/plain;charset=latin-9").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-2", knownLatinPlainMime("text/plain;charset=latin-2").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-9", knownLatinPlainMime("text/plain;charset=latin5").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-5", knownLatinPlainMime("text/plain;charset=cyrillic").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-7", knownLatinPlainMime("text/plain;charset=greek").?);
+    try std.testing.expect(knownLatinPlainMime("text/plain;charset=utf-8") == null);
+    const euro = try decodePlainByCharset(gpa, "\xa4", "ISO-8859-15");
+    defer gpa.free(euro);
+    try std.testing.expectEqualStrings("€", euro);
+    const ogonek = try decodePlainByCharset(gpa, "\xb1", "iso-8859-2");
+    defer gpa.free(ogonek);
+    try std.testing.expectEqualStrings("ą", ogonek);
+    const dotted = try decodePlainByCharset(gpa, "\xdd", "ISO-8859-9");
+    defer gpa.free(dotted);
+    try std.testing.expectEqualStrings("İ", dotted);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=latin5"));
+    const a_cyr = try decodePlainByCharset(gpa, "\xb0", "ISO-8859-5");
+    defer gpa.free(a_cyr);
+    try std.testing.expectEqualStrings("А", a_cyr);
+    const a_cyr_lc = try decodePlainByCharset(gpa, "\xb0", "iso-8859-5");
+    defer gpa.free(a_cyr_lc);
+    try std.testing.expectEqualStrings("А", a_cyr_lc);
+    const alpha = try decodePlainByCharset(gpa, "\xc1", "ISO-8859-7");
+    defer gpa.free(alpha);
+    try std.testing.expectEqualStrings("Α", alpha);
+    const alpha_lc = try decodePlainByCharset(gpa, "\xc1", "iso-8859-7");
+    defer gpa.free(alpha_lc);
+    try std.testing.expectEqualStrings("Α", alpha_lc);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=ISO-8859-5"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cyrillic"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=greek"));
+    const euro1252 = try decodePlainByCharset(gpa, "\x80", "windows-1252");
+    defer gpa.free(euro1252);
+    try std.testing.expectEqualStrings("€", euro1252);
+    const euro_cp = try decodePlainByCharset(gpa, "\x80", "cp1252");
+    defer gpa.free(euro_cp);
+    try std.testing.expectEqualStrings("€", euro_cp);
+    const hbar = try decodePlainByCharset(gpa, "\xa1", "ISO-8859-3");
+    defer gpa.free(hbar);
+    try std.testing.expectEqualStrings("Ħ", hbar);
+    const ogonek4 = try decodePlainByCharset(gpa, "\xa1", "iso-8859-4");
+    defer gpa.free(ogonek4);
+    try std.testing.expectEqualStrings("Ą", ogonek4);
+    const hamza = try decodePlainByCharset(gpa, "\xc1", "ISO-8859-6");
+    defer gpa.free(hamza);
+    try std.testing.expectEqualStrings("ء", hamza);
+    const alef = try decodePlainByCharset(gpa, "\xe0", "ISO-8859-8");
+    defer gpa.free(alef);
+    try std.testing.expectEqualStrings("א", alef);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=windows-1252"));
+    const a_1251 = try decodePlainByCharset(gpa, "\xc0", "windows-1251");
+    defer gpa.free(a_1251);
+    try std.testing.expectEqualStrings("А", a_1251);
+    const yo_1251 = try decodePlainByCharset(gpa, "\xa8", "cp1251");
+    defer gpa.free(yo_1251);
+    try std.testing.expectEqualStrings("Ё", yo_1251);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=windows-1251"));
+    const caron = try decodePlainByCharset(gpa, "\x8a", "windows-1250");
+    defer gpa.free(caron);
+    try std.testing.expectEqualStrings("Š", caron);
+    const caron_cp = try decodePlainByCharset(gpa, "\x8a", "cp1250");
+    defer gpa.free(caron_cp);
+    try std.testing.expectEqualStrings("Š", caron_cp);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=windows-1250"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=latin3"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=arabic"));
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=hebrew"));
+    const ogonek13 = try decodePlainByCharset(gpa, "\xc0", "ISO-8859-13");
+    defer gpa.free(ogonek13);
+    try std.testing.expectEqualStrings("Ą", ogonek13);
+    const ogonek13_lc = try decodePlainByCharset(gpa, "\xc0", "latin7");
+    defer gpa.free(ogonek13_lc);
+    try std.testing.expectEqualStrings("Ą", ogonek13_lc);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=iso-8859-13"));
+    const alpha1253 = try decodePlainByCharset(gpa, "\xc1", "windows-1253");
+    defer gpa.free(alpha1253);
+    try std.testing.expectEqualStrings("Α", alpha1253);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1253"));
+    const gbreve = try decodePlainByCharset(gpa, "\xd0", "windows-1254");
+    defer gpa.free(gbreve);
+    try std.testing.expectEqualStrings("Ğ", gbreve);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1254"));
+    const alef1255 = try decodePlainByCharset(gpa, "\xe0", "windows-1255");
+    defer gpa.free(alef1255);
+    try std.testing.expectEqualStrings("א", alef1255);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1255"));
+    const alef1256 = try decodePlainByCharset(gpa, "\xc7", "windows-1256");
+    defer gpa.free(alef1256);
+    try std.testing.expectEqualStrings("ا", alef1256);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1256"));
+    const ogonek1257 = try decodePlainByCharset(gpa, "\xc0", "windows-1257");
+    defer gpa.free(ogonek1257);
+    try std.testing.expectEqualStrings("Ą", ogonek1257);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=cp1257"));
+    const a_koi8 = try decodePlainByCharset(gpa, "\xe1", "KOI8-R");
+    defer gpa.free(a_koi8);
+    try std.testing.expectEqualStrings("А", a_koi8);
+    const a_koi8_lc = try decodePlainByCharset(gpa, "\xe1", "koi8r");
+    defer gpa.free(a_koi8_lc);
+    try std.testing.expectEqualStrings("А", a_koi8_lc);
+    const a_koi8_bare = try decodePlainMime(gpa, "KOI8-R", "\xe1");
+    defer gpa.free(a_koi8_bare);
+    try std.testing.expectEqualStrings("А", a_koi8_bare);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=KOI8-R"));
+    try std.testing.expect(isLatinPlainMime("KOI8-R"));
+}
+
+test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n sets" {
+    const gpa = std.testing.allocator;
+    const latin = try compoundTextToUtf8(gpa, "caf\xe9");
+    defer gpa.free(latin);
+    try std.testing.expectEqualStrings("café", latin);
+    const utf8 = try compoundTextToUtf8(gpa, "\x1b%Gкафе");
+    defer gpa.free(utf8);
+    try std.testing.expectEqualStrings("кафе", utf8);
+    const already = try compoundTextToUtf8(gpa, "hello");
+    defer gpa.free(already);
+    try std.testing.expectEqualStrings("hello", already);
+    const skipped = try compoundTextToUtf8(gpa, "a\x1b$(Bignored\x1b(B" ++ "b");
+    defer gpa.free(skipped);
+    try std.testing.expectEqualStrings("ab", skipped);
+    const latin2 = try compoundTextToUtf8(gpa, "\x1b-B" ++ "\xb1");
+    defer gpa.free(latin2);
+    try std.testing.expectEqualStrings("ą", latin2);
+    const latin9 = try compoundTextToUtf8(gpa, "\x1b-b" ++ "\xa4");
+    defer gpa.free(latin9);
+    try std.testing.expectEqualStrings("€", latin9);
+    const latin5 = try compoundTextToUtf8(gpa, "\x1b-M" ++ "\xdd");
+    defer gpa.free(latin5);
+    try std.testing.expectEqualStrings("İ", latin5);
+    const cyrillic = try compoundTextToUtf8(gpa, "\x1b-L" ++ "\xb0");
+    defer gpa.free(cyrillic);
+    try std.testing.expectEqualStrings("А", cyrillic);
+    const greek = try compoundTextToUtf8(gpa, "\x1b-F" ++ "\xc1");
+    defer gpa.free(greek);
+    try std.testing.expectEqualStrings("Α", greek);
+    const latin3 = try compoundTextToUtf8(gpa, "\x1b-C" ++ "\xa1");
+    defer gpa.free(latin3);
+    try std.testing.expectEqualStrings("Ħ", latin3);
+    const latin4 = try compoundTextToUtf8(gpa, "\x1b-D" ++ "\xa1");
+    defer gpa.free(latin4);
+    try std.testing.expectEqualStrings("Ą", latin4);
+    const arabic = try compoundTextToUtf8(gpa, "\x1b-G" ++ "\xc1");
+    defer gpa.free(arabic);
+    try std.testing.expectEqualStrings("ء", arabic);
+    const hebrew = try compoundTextToUtf8(gpa, "\x1b-H" ++ "\xe0");
+    defer gpa.free(hebrew);
+    try std.testing.expectEqualStrings("א", hebrew);
+}
+
+test "notify-send uses a normal urgency hint" {
+    try std.testing.expectEqualStrings("--urgency=normal", notify_urgency_flag);
+    try std.testing.expectEqualStrings("--icon=applications-internet", notify_icon_flag);
+}
+
+test "activation env args export both token names and reject empty or huge tokens" {
+    var act: [576]u8 = undefined;
+    var start: [576]u8 = undefined;
+    const env = activationEnvArgs("focus-1", &act, &start).?;
+    try std.testing.expectEqualStrings("XDG_ACTIVATION_TOKEN=focus-1", env.activation);
+    try std.testing.expectEqualStrings("DESKTOP_STARTUP_ID=focus-1", env.startup);
+    try std.testing.expect(activationEnvArgs("", &act, &start) == null);
+    try std.testing.expect(activationEnvArgs("bad\x00token", &act, &start) == null);
+    var id_buf: [80]u8 = undefined;
+    const generated = generatedStartupIdTimed(&id_buf, 9).?;
+    try std.testing.expect(std.mem.startsWith(u8, generated, "reinked-"));
+    try std.testing.expect(std.mem.endsWith(u8, generated, "-9"));
+}
+
+test "isHtmlMime accepts charset parameters" {
+    try std.testing.expect(isHtmlMime("text/html"));
+    try std.testing.expect(isHtmlMime("text/html;charset=utf-8"));
+    try std.testing.expect(isHtmlMime("TEXT/HTML;charset=UTF-8"));
+    try std.testing.expect(!isHtmlMime("text/htmlx"));
+    try std.testing.expect(!isHtmlMime("text/plain"));
+}
+
+test "rtfToPlainText extracts Unicode and skips destination groups" {
+    const gpa = std.testing.allocator;
+    const plain = try rtfToPlainText(gpa, "{\\rtf1\\ansi{\\fonttbl\\f0 Arial;}hello \\u8364? world\\par}");
+    defer gpa.free(plain);
+    try std.testing.expectEqualStrings("hello € world\n", plain);
+    const hex = try rtfToPlainText(gpa, "{\\rtf1\\'41\\'62}");
+    defer gpa.free(hex);
+    try std.testing.expectEqualStrings("Ab", hex);
+    const already = try rtfToPlainText(gpa, "already plain");
+    defer gpa.free(already);
+    try std.testing.expectEqualStrings("already plain", already);
+}
+
+test "htmlToPlainText strips tags and decodes common entities" {
+    const gpa = std.testing.allocator;
+    const plain = try htmlToPlainText(gpa, "already plain");
+    defer gpa.free(plain);
+    try std.testing.expectEqualStrings("already plain", plain);
+    const html = try htmlToPlainText(gpa, "<p>Hello&nbsp;&amp;&lt;world&gt;</p><script>x()</script>done");
+    defer gpa.free(html);
+    try std.testing.expectEqual(@as(usize, 18), html.len);
+    try std.testing.expectEqualStrings("Hello &<world>done", html);
+    const numeric = try htmlToPlainText(gpa, "&#x20ac;&#32;ok");
+    defer gpa.free(numeric);
+    try std.testing.expectEqualStrings("€ ok", numeric);
 }
