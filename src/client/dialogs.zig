@@ -172,7 +172,7 @@ pub fn prompt(id: Id) ?[]const u8 {
 
 pub fn fields(id: Id) []const Field {
     return switch (id) {
-        .setup, .servers => &.{ .{ .label = "Server", .hint = "Host name or address" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "Security", .hint = "Verified TLS", .kind = .choice } },
+        .setup, .servers => &.{ .{ .label = "Server", .hint = "Host name or address" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "TLS", .hint = "Verified TLS", .kind = .choice } },
         .settings => &.{
             .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
             .{ .label = "Accent", .hint = "Vermillion, violet, or forest", .kind = .choice },
@@ -183,7 +183,7 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "CAST layout", .hint = "Portraits or compact list", .kind = .choice },
             .{ .label = "Status details", .hint = "Activity panel density", .kind = .choice },
         },
-        .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Display name", .hint = "Visible sign-in name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
+        .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Sign-in name", .hint = "Visible sign-in name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
         .character => &.{
             .{ .label = "Character", .kind = .choice },
             .{ .label = "Expression preview", .kind = .choice },
@@ -238,7 +238,7 @@ pub fn fields(id: Id) []const Field {
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
         .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Filter", .hint = "Optional; one word" } },
         .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Compatibility", .hint = "Portable secure-link invitation", .kind = .readonly } },
-        .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Result", .hint = "Profile is shown in the conversation", .kind = .readonly } },
+        .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Profile", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
 }
 
@@ -317,7 +317,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             &.{},
         .rule_sets => if (index == 0) &.{ "Create", "Rename", "Assign rule", "Advanced limits", "Advanced matching", "Import", "Export" } else &.{},
         .advanced_rule_settings => if (index == 1 or index == 2) &.{ "Yes", "No" } else &.{},
-        .recent_files => if (index == 1) &.{ "Open", "Remove from list" } else &.{},
+        .recent_files => if (index == 1) &.{ "Open", "Remove" } else &.{},
         .favorite_rooms => if (index == 1) &.{ "Join", "Add current room", "Remove" } else &.{},
         .print_preview => if (index == 1) &.{ "Save PDF", "Save PDF and open", "Save PDF and print" } else &.{},
         else => &.{},
@@ -466,6 +466,12 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Save conversation", primaryLabel(.save_conversation));
     try std.testing.expectEqualStrings("Export Sunday page", primaryLabel(.export_image));
     try std.testing.expectEqualStrings("Page view", fields(.settings)[3].label);
+    try std.testing.expectEqualStrings("TLS", fields(.setup)[2].label);
+    try std.testing.expectEqualStrings("Sign-in name", fields(.personal)[1].label);
+    try std.testing.expectEqualStrings("Homepage", fields(.personal)[2].label);
+    try std.testing.expectEqualStrings("Email", fields(.personal)[3].label);
+    try std.testing.expectEqualStrings("Profile", fields(.member_profile)[1].label);
+    try std.testing.expectEqualStrings("Remove", choiceOptions(.recent_files, 1)[1]);
     try std.testing.expectEqualStrings("Open or remove", fields(.recent_files)[1].label);
     try std.testing.expectEqualStrings("Join or save", fields(.favorite_rooms)[1].label);
     try std.testing.expectEqualStrings("Save how", fields(.print_preview)[1].label);

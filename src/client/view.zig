@@ -272,7 +272,8 @@ pub const View = struct {
                     self.shell.focus = .navigation;
                     return .none;
                 },
-                else => return null,
+                .tab, .page_up, .page_down => return null,
+                else => return .none,
             },
             .say_actions => switch (key) {
                 .left, .up => self.focused_say_action = nextEnabledSayAction(self.focused_say_action, false, self.wire_live),
@@ -285,7 +286,8 @@ pub const View = struct {
                     self.shell.focus = .composer;
                     return .none;
                 },
-                else => return null,
+                .tab, .page_up, .page_down => return null,
+                else => return .none,
             },
             .status => switch (key) {
                 .enter => return self.activateFocusedStatus(),
@@ -318,17 +320,20 @@ pub const View = struct {
                     self.shell.focus = .navigation;
                     return .none;
                 },
-                else => return null,
+                .tab => return null,
+                else => return .none,
             },
             .members => switch (key) {
                 .enter => return self.activateFocusedMember(),
                 .char => |code| if (code == ' ') return self.activateFocusedMember() else return .none,
-                else => return null,
+                .up, .down, .left, .right, .home, .end, .page_up, .page_down, .escape, .tab => return null,
+                else => return .none,
             },
             .emotion => switch (key) {
                 .enter => return .send_expression,
                 .char => |code| if (code == ' ') return .send_expression else return .none,
-                else => return null,
+                .left, .right, .up, .down, .home, .escape, .tab, .page_up, .page_down => return null,
+                else => return .none,
             },
             else => return null,
         }
@@ -440,24 +445,25 @@ pub const View = struct {
                         return .{ .room_tab = self.room_tab_first + viewport.capacity };
                     if (key == .left and self.room_tab_first > 0)
                         return .{ .room_tab = self.room_tab_first - 1 };
-                    return null;
+                    return .none;
                 },
-                .home => if (self.room_tab_count > 0) return .{ .room_tab = 0 } else return null,
-                .end => if (self.room_tab_count > 0) return .{ .room_tab = self.room_tab_count - 1 } else return null,
-                .page_up => if (self.room_tab_first > 0) return .{ .room_tab = self.room_tab_first - 1 } else return null,
+                .home => if (self.room_tab_count > 0) return .{ .room_tab = 0 } else return .none,
+                .end => if (self.room_tab_count > 0) return .{ .room_tab = self.room_tab_count - 1 } else return .none,
+                .page_up => if (self.room_tab_first > 0) return .{ .room_tab = self.room_tab_first - 1 } else return .none,
                 .page_down => {
                     const comic_mode = self.shell.content_mode == .comic;
                     const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
                     const viewport = tabViewport(layout, comic_mode);
                     if (self.room_tab_first + viewport.capacity < self.room_tab_count)
                         return .{ .room_tab = self.room_tab_first + viewport.capacity };
-                    return null;
+                    return .none;
                 },
                 .escape => {
                     self.shell.focus = .composer;
                     return .none;
                 },
-                else => return null,
+                .tab => return null,
+                else => return .none,
             }
         };
         switch (key) {
@@ -2110,7 +2116,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             3 => "Save conversation",
             4 => "Export Sunday page",
             5 => "Sunday PDF",
-            else => "Exit",
+            else => "Quit",
         },
         1 => switch (item) {
             0 => "Copy selected lines",
@@ -2540,7 +2546,7 @@ fn toolbarHint(index: u8) []const u8 {
         13 => "Say",
         17 => "Type",
         18 => "Ink",
-        else => "Tool",
+        else => "Sunday",
     };
 }
 
@@ -3095,7 +3101,7 @@ fn statusTabLabel(status: []const u8) []const u8 {
     if (tone == .failure) return "Fail";
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Name";
     if (isOfflineStatus(status)) return "Off";
-    return "Wait";
+    return "Hold";
 }
 
 fn statusPanelHeading(status: []const u8) []const u8 {
@@ -3889,6 +3895,17 @@ test "focused chrome leftover keys do not leak into the composer" {
     view.shell.focus = .navigation;
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.{ .char = 'x' }).?);
     try std.testing.expect(view.active_menu == null);
+    view.shell.focus = .toolbar;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.backspace).?);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.delete).?);
+    try std.testing.expect(view.handleFocusedActionKey(.page_up) == null);
+    try std.testing.expect(view.handleFocusedActionKey(.tab) == null);
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action.none, view.handleMenuKey(.backspace).?);
+    try std.testing.expect(view.handleMenuKey(.tab) == null);
+    view.shell.focus = .members;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.backspace).?);
+    try std.testing.expect(view.handleFocusedActionKey(.up) == null);
 }
 
 test "open context menu consumes leftover keys and blocks Alt accelerators" {
@@ -4600,7 +4617,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
     try std.testing.expectEqualStrings("Live", statusTabLabel("connected"));
     try std.testing.expectEqualStrings("Off", statusTabLabel("offline"));
-    try std.testing.expectEqualStrings("Wait", statusTabLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Hold", statusTabLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Hold", statusTabLabel("connecting"));
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Connection failed - click for settings"));
     try std.testing.expectEqualStrings("Wire failed - open Wire setup", statusBarLabel("Wire failed - open Wire setup"));
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Wire failed (refused) - open Wire setup"));
@@ -4663,6 +4681,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 10, true));
     try std.testing.expectEqualStrings("Insert symbol", toolbarLabel(23));
     try std.testing.expectEqualStrings("Sunday tool", toolbarLabel(24));
+    try std.testing.expectEqualStrings("Sunday", toolbarHint(24));
+    try std.testing.expectEqualStrings("Quit", menuItemLabel(0, 6));
     try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));

@@ -3018,7 +3018,7 @@ fn applyDialogAction(
             try preferences.saveFile(io, network.runtime.preferences_path);
         },
         .recent_files => {
-            if (std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Remove from list")) {
+            if (cc.client.dialogs.matchesAny(view.dialogValueAt(1), &.{ "Remove", "Remove from list" })) {
                 _ = preferences.removeRecentFile(value);
                 try preferences.saveFile(io, network.runtime.preferences_path);
             } else {
