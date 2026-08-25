@@ -24,7 +24,8 @@
 //! `wp_viewporter` when advertised, otherwise `wl_surface.preferred_buffer_scale`
 //! (compositor v6) or the entered `wl_output` integer scale; the fallback
 //! shm cursor is refreshed when that scale changes. Keyboard enter restores
-//! held Shift/Ctrl/Alt/Super from the keys array. Clipboard uses
+//! held Shift/Ctrl/Alt/Super from the keys array and Caps Lock from the
+//! conventional Lock modifier bit when the compositor reports it. Clipboard uses
 //! `wl_data_device` and `zwp_primary_selection_v1` when present, including
 //! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
 //! UTF-16 decode (including `text/plain;charset=utf-16` / `UTF16_STRING`
@@ -35,7 +36,8 @@
 //! when advertised. When a decoration manager is advertised, the client
 //! requests server-side decorations (`zxdg` or `xdg`) and re-requests SSD
 //! once if the compositor configures client-side mode. xdg-shell records
-//! maximized/fullscreen/tiled/suspended configure states and advertises
+//! maximized/fullscreen/tiled/suspended configure states, records
+//! `wm_capabilities` / `configure_bounds` when xdg-shell is v5+, and advertises
 //! the same min/max size as the X11 WM hints. `present()` attaches a
 //! `wl_surface.frame` callback and coalesces later commits until it fires.
 //! High-resolution
@@ -130,6 +132,11 @@ const xdg_state_tiled_right: u32 = 6;
 const xdg_state_tiled_top: u32 = 7;
 const xdg_state_tiled_bottom: u32 = 8;
 const xdg_state_suspended: u32 = 9;
+const xdg_wm_cap_window_menu: u32 = 1;
+const xdg_wm_cap_maximize: u32 = 2;
+const xdg_wm_cap_fullscreen: u32 = 3;
+const xdg_wm_cap_minimize: u32 = 4;
+const xkb_mod_lock: u32 = 1 << 1;
 const data_offer_accept: u16 = 0;
 const data_offer_finish: u16 = 3;
 const data_offer_set_actions: u16 = 4;
@@ -490,6 +497,13 @@ pub const Window = struct {
     toplevel_fullscreen: bool = false,
     toplevel_tiled: bool = false,
     toplevel_suspended: bool = false,
+    bounds_width: i32 = 0,
+    bounds_height: i32 = 0,
+    wm_can_window_menu: bool = false,
+    wm_can_maximize: bool = false,
+    wm_can_fullscreen: bool = false,
+    wm_can_minimize: bool = false,
+    caps_from_compositor: bool = false,
     cursor_shape_manager_id: u32 = 0,
     cursor_shape_device_id: u32 = 0,
     cursor_surface_id: u32 = 0,
@@ -599,7 +613,7 @@ pub const Window = struct {
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.seat, "wl_seat", self.seat_version, self.seat_id);
 
         self.xdg_wm_base_id = try self.conn.allocId();
-        try sendBind(&self.conn, self.gpa, self.registry_id, globals.xdg_wm_base, "xdg_wm_base", 1, self.xdg_wm_base_id);
+        try sendBind(&self.conn, self.gpa, self.registry_id, globals.xdg_wm_base, "xdg_wm_base", @min(globals.xdg_wm_base.version, 6), self.xdg_wm_base_id);
 
         var output_i: u8 = 0;
         while (output_i < globals.output_count) : (output_i += 1) {
@@ -1055,8 +1069,8 @@ pub const Window = struct {
             switch (msg.opcode) {
                 0 => {
                     if (msg.body.len < 12) return error.InvalidWaylandMessage;
-                    self.pending_width = getI32(msg.body[0..4]);
-                    self.pending_height = getI32(msg.body[4..8]);
+                    self.pending_width = clampToBounds(getI32(msg.body[0..4]), self.bounds_width);
+                    self.pending_height = clampToBounds(getI32(msg.body[4..8]), self.bounds_height);
                     const array_len: usize = @intCast(get32(msg.body[8..12]));
                     if (array_len > msg.body.len - 12) return error.InvalidWaylandMessage;
                     if (12 + pad4(array_len) != msg.body.len) return error.InvalidWaylandMessage;
@@ -1074,6 +1088,24 @@ pub const Window = struct {
                     return null;
                 },
                 1 => return Event.close,
+                2 => { // configure_bounds(width, height), xdg-shell v4
+                    if (msg.body.len < 8) return error.InvalidWaylandMessage;
+                    self.bounds_width = getI32(msg.body[0..4]);
+                    self.bounds_height = getI32(msg.body[4..8]);
+                    return null;
+                },
+                3 => { // wm_capabilities(array), xdg-shell v5
+                    if (msg.body.len < 4) return error.InvalidWaylandMessage;
+                    const array_len: usize = @intCast(get32(msg.body[0..4]));
+                    if (array_len > msg.body.len - 4) return error.InvalidWaylandMessage;
+                    if (4 + pad4(array_len) != msg.body.len) return error.InvalidWaylandMessage;
+                    const caps = msg.body[4 .. 4 + array_len];
+                    self.wm_can_window_menu = configureContainsState(caps, xdg_wm_cap_window_menu);
+                    self.wm_can_maximize = configureContainsState(caps, xdg_wm_cap_maximize);
+                    self.wm_can_fullscreen = configureContainsState(caps, xdg_wm_cap_fullscreen);
+                    self.wm_can_minimize = configureContainsState(caps, xdg_wm_cap_minimize);
+                    return null;
+                },
                 else => return null,
             }
         }
@@ -1459,12 +1491,14 @@ pub const Window = struct {
             },
             4 => { // modifiers(serial, depressed, latched, locked, group)
                 if (body.len != 20) return error.InvalidWaylandMessage;
-                // Modifier bit positions are defined by the compositor's XKB
-                // keymap. This dependency-free backend intentionally ignores
-                // those bits, so retain the physical evdev key state above
-                // instead of guessing Shift/Caps indices. The group index is
-                // the layout slot and is used when the keymap published two
-                // keysym lists.
+                // Depressed Shift/Ctrl/Alt/Super stay on the evdev key bits
+                // because those indices are not stable across keymaps. Caps
+                // Lock is the conventional Lock modifier (bit 1) in virtually
+                // every XKB map; when the compositor reports it, prefer that
+                // over the local evdev toggle so a lock already held at
+                // keyboard enter is not missed. Group is the layout slot.
+                const locked = get32(body[12..16]);
+                self.caps_lock = capsLockFromLocked(locked, self.caps_lock, &self.caps_from_compositor);
                 self.xkb_group = get32(body[16..20]);
                 return null;
             },
@@ -2372,6 +2406,20 @@ fn decorationModeIsClientSide(mode: u32) bool {
     return mode == decoration_mode_client_side;
 }
 
+fn capsLockFromLocked(locked: u32, current: bool, from_compositor: *bool) bool {
+    if (locked & xkb_mod_lock != 0) {
+        from_compositor.* = true;
+        return true;
+    }
+    if (from_compositor.*) return false;
+    return current;
+}
+
+fn clampToBounds(value: i32, bound: i32) i32 {
+    if (value > 0 and bound > 0 and value > bound) return bound;
+    return value;
+}
+
 fn configureContainsState(bytes: []const u8, state: u32) bool {
     var off: usize = 0;
     while (off + 4 <= bytes.len) : (off += 4) {
@@ -3210,5 +3258,31 @@ test "decoration configure retries SSD only for client-side mode" {
     try std.testing.expect(decorationModeIsClientSide(decoration_mode_client_side));
     try std.testing.expect(!decorationModeIsClientSide(decoration_mode_server_side));
     try std.testing.expect(!decorationModeIsClientSide(0));
+}
+
+test "Caps Lock follows compositor Lock bit once it has been seen" {
+    var from_compositor = false;
+    try std.testing.expect(!capsLockFromLocked(0, false, &from_compositor));
+    try std.testing.expect(!from_compositor);
+    try std.testing.expect(capsLockFromLocked(0, true, &from_compositor));
+    try std.testing.expect(capsLockFromLocked(xkb_mod_lock, false, &from_compositor));
+    try std.testing.expect(from_compositor);
+    try std.testing.expect(!capsLockFromLocked(0, true, &from_compositor));
+}
+
+test "xdg configure_bounds clamp only positive oversized sizes" {
+    try std.testing.expectEqual(@as(i32, 800), clampToBounds(1024, 800));
+    try std.testing.expectEqual(@as(i32, 640), clampToBounds(640, 800));
+    try std.testing.expectEqual(@as(i32, 0), clampToBounds(0, 800));
+    try std.testing.expectEqual(@as(i32, 1024), clampToBounds(1024, 0));
+}
+
+test "xdg wm_capabilities bits include maximize and fullscreen" {
+    var caps: [8]u8 = undefined;
+    put32(caps[0..4], xdg_wm_cap_maximize);
+    put32(caps[4..8], xdg_wm_cap_fullscreen);
+    try std.testing.expect(configureContainsState(&caps, xdg_wm_cap_maximize));
+    try std.testing.expect(configureContainsState(&caps, xdg_wm_cap_fullscreen));
+    try std.testing.expect(!configureContainsState(&caps, xdg_wm_cap_minimize));
 }
 const pointer_release: u16 = 1;

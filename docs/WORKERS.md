@@ -86,7 +86,9 @@ hash.
   rectangle. X11 claims focus via `WM_TAKE_FOCUS` / FocusIn, resets compose
   on FocusOut, honors group bits 13–14, and refreshes GetKeyboardMapping on
   MappingNotify without dropping queued events. Wayland restores held
-  Shift/Ctrl/Alt/Super from the keyboard-enter keys array. It does not
+  Shift/Ctrl/Alt/Super from the keyboard-enter keys array and Caps Lock
+  from the conventional Lock modifier bit when the compositor reports it.
+  It does not
   speak XIM. Text and `file:` drops use XDND / `wl_data_device` and are
   injected as existing key events (no new Event variant); Wayland sends
   `data_offer.set_actions` copy when accepting a drop. Clipboard MIME
@@ -94,7 +96,8 @@ hash.
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
   strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
   stashes events that arrive during GetProperty. Clipboard text normalizes
-  CR/LF to LF. Central European Latin-2, Greek, Hebrew, and named keysyms type
+  CR/LF to LF. Central European Latin-2, Latin-9, Greek, Hebrew, Arabic,
+  and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair
   requests. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
   property changes, listens for RANDR `ScreenChangeNotify`, caches
@@ -107,7 +110,8 @@ hash.
   arms client-side repeat for a held non-modifier key. Both backends track maximized/fullscreen
   window state; X11 also tracks `_NET_WM_STATE_HIDDEN` and ICCCM
   `WM_STATE` / `WM_CHANGE_STATE`, and Wayland records tiled/suspended xdg
-  states. When advertised, Wayland requests server-side decorations and
+  states plus `wm_capabilities` / `configure_bounds` when xdg-shell is v5+.
+  When advertised, Wayland requests server-side decorations and
   re-requests SSD once if the compositor configures client-side mode.
   `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON`, and
   `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.

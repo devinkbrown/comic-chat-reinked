@@ -14,7 +14,8 @@
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
 //! group-2 character of a non-US or dual-layout keymap actually correct.
 //! Named Central European letters, X11 Latin-2 keysyms (`0x01a0`–`0x01ff`),
-//! Greek letters, and Hebrew letters resolve to characters without an IME. A
+//! Latin-9 OE/Ydiaeresis, Greek, Hebrew, and Arabic letters resolve to
+//! characters without an IME. A
 //! bounded dead-key / Multi_key composer plus optional XCompose locale
 //! tables (`~/.XCompose`,
 //! `XCOMPOSEFILE`, `%L`) cover European accents (see `Compose`). A
@@ -654,6 +655,9 @@ const named_latin_ext_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Scommaaccent", 0x0218 },
     .{ "tcommaaccent", 0x021b },
     .{ "Tcommaaccent", 0x021a },
+    .{ "OE", 0x0152 },
+    .{ "oe", 0x0153 },
+    .{ "Ydiaeresis", 0x0178 },
 });
 
 const named_greek_keysyms = std.StaticStringMap(u21).initComptime(.{
@@ -777,6 +781,57 @@ const named_hebrew_keysyms = std.StaticStringMap(u21).initComptime(.{
     .{ "Hebrew_taw", 0x05ea },
 });
 
+const named_arabic_keysyms = std.StaticStringMap(u21).initComptime(.{
+    .{ "Arabic_comma", 0x060c },
+    .{ "Arabic_semicolon", 0x061b },
+    .{ "Arabic_question_mark", 0x061f },
+    .{ "Arabic_hamza", 0x0621 },
+    .{ "Arabic_maddaonalef", 0x0622 },
+    .{ "Arabic_hamzaonalef", 0x0623 },
+    .{ "Arabic_hamzaonwaw", 0x0624 },
+    .{ "Arabic_hamzaunderalef", 0x0625 },
+    .{ "Arabic_hamzaonyeh", 0x0626 },
+    .{ "Arabic_alef", 0x0627 },
+    .{ "Arabic_beh", 0x0628 },
+    .{ "Arabic_tehmarbuta", 0x0629 },
+    .{ "Arabic_teh", 0x062a },
+    .{ "Arabic_theh", 0x062b },
+    .{ "Arabic_jeem", 0x062c },
+    .{ "Arabic_hah", 0x062d },
+    .{ "Arabic_khah", 0x062e },
+    .{ "Arabic_dal", 0x062f },
+    .{ "Arabic_thal", 0x0630 },
+    .{ "Arabic_ra", 0x0631 },
+    .{ "Arabic_zain", 0x0632 },
+    .{ "Arabic_seen", 0x0633 },
+    .{ "Arabic_sheen", 0x0634 },
+    .{ "Arabic_sad", 0x0635 },
+    .{ "Arabic_dad", 0x0636 },
+    .{ "Arabic_tah", 0x0637 },
+    .{ "Arabic_zah", 0x0638 },
+    .{ "Arabic_ain", 0x0639 },
+    .{ "Arabic_ghain", 0x063a },
+    .{ "Arabic_tatweel", 0x0640 },
+    .{ "Arabic_feh", 0x0641 },
+    .{ "Arabic_qaf", 0x0642 },
+    .{ "Arabic_kaf", 0x0643 },
+    .{ "Arabic_lam", 0x0644 },
+    .{ "Arabic_meem", 0x0645 },
+    .{ "Arabic_noon", 0x0646 },
+    .{ "Arabic_heh", 0x0647 },
+    .{ "Arabic_waw", 0x0648 },
+    .{ "Arabic_alefmaksura", 0x0649 },
+    .{ "Arabic_yeh", 0x064a },
+    .{ "Arabic_fathatan", 0x064b },
+    .{ "Arabic_dammatan", 0x064c },
+    .{ "Arabic_kasratan", 0x064d },
+    .{ "Arabic_fatha", 0x064e },
+    .{ "Arabic_damma", 0x064f },
+    .{ "Arabic_kasra", 0x0650 },
+    .{ "Arabic_shadda", 0x0651 },
+    .{ "Arabic_sukun", 0x0652 },
+});
+
 /// ISO-8859-2 codepoints for X11 Latin-2 keysyms `0x01a0`–`0x01ff`.
 const latin2_01a0 = [_]u21{
     0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
@@ -805,6 +860,7 @@ pub fn charForKeysym(name: []const u8) ?u21 {
     if (named_latin_ext_keysyms.get(name)) |character| return character;
     if (named_greek_keysyms.get(name)) |character| return character;
     if (named_hebrew_keysyms.get(name)) |character| return character;
+    if (named_arabic_keysyms.get(name)) |character| return character;
     if (name.len >= 5 and name.len <= 7 and name[0] == 'U') {
         const value = std.fmt.parseInt(u21, name[1..], 16) catch return null;
         if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return null;
@@ -846,6 +902,28 @@ pub fn charForX11Hebrew(sym: u32) ?u21 {
     if (sym == 0x0cdf) return 0x2017;
     if (sym >= 0x0ce0 and sym <= 0x0cfa) return @intCast(0x05d0 + (sym - 0x0ce0));
     return null;
+}
+
+/// Legacy X11 Arabic keysyms. `0x05c1`–`0x05f2` sit 0x60 below U+0621–U+0652.
+pub fn charForX11Arabic(sym: u32) ?u21 {
+    return switch (sym) {
+        0x05ac => 0x060c,
+        0x05bb => 0x061b,
+        0x05bf => 0x061f,
+        0x05c1...0x05da => @intCast(sym + 0x60),
+        0x05e0...0x05f2 => @intCast(sym + 0x60),
+        else => null,
+    };
+}
+
+/// ISO-8859-15 leftovers used by Western European layouts (OE, Ydiaeresis).
+pub fn charForX11Latin9(sym: u32) ?u21 {
+    return switch (sym) {
+        0x13bc => 0x0152,
+        0x13bd => 0x0153,
+        0x13be => 0x0178,
+        else => null,
+    };
 }
 
 /// Resolves a keysym name to a named (non-character) key, if it is one.
@@ -1437,6 +1515,14 @@ test "charForKeysym and namedKeyForKeysym cover the documented tables" {
     try std.testing.expectEqual(@as(u21, 0x05da), charForX11Hebrew(0x0cea).?);
     try std.testing.expectEqual(@as(u21, 0x05ea), charForX11Hebrew(0x0cfa).?);
     try std.testing.expectEqual(@as(u21, 0x2017), charForX11Hebrew(0x0cdf).?);
+    try std.testing.expectEqual(@as(u21, 0x0627), charForKeysym("Arabic_alef").?);
+    try std.testing.expectEqual(@as(u21, 0x064a), charForKeysym("Arabic_yeh").?);
+    try std.testing.expectEqual(@as(u21, 0x0627), charForX11Arabic(0x05c7).?);
+    try std.testing.expectEqual(@as(u21, 0x064a), charForX11Arabic(0x05ea).?);
+    try std.testing.expectEqual(@as(u21, 0x0652), charForX11Arabic(0x05f2).?);
+    try std.testing.expectEqual(@as(u21, 0x0152), charForKeysym("OE").?);
+    try std.testing.expectEqual(@as(u21, 0x0153), charForX11Latin9(0x13bd).?);
+    try std.testing.expectEqual(@as(u21, 0x0178), charForX11Latin9(0x13be).?);
     try std.testing.expectEqual(NamedKey.backspace, namedKeyForKeysym("BackSpace").?);
     try std.testing.expectEqual(NamedKey.page_up, namedKeyForKeysym("Prior").?);
     try std.testing.expectEqual(@as(?NamedKey, null), namedKeyForKeysym("nonexistent_keysym_name"));

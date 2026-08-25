@@ -270,6 +270,8 @@ pub fn keysymToKey(sym: u32) Key {
     if (xkb.charForX11Latin2(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Greek(sym)) |ch| return .{ .char = ch };
     if (xkb.charForX11Hebrew(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Arabic(sym)) |ch| return .{ .char = ch };
+    if (xkb.charForX11Latin9(sym)) |ch| return .{ .char = ch };
     return switch (sym) {
         0xff08 => .backspace,
         0xff09 => .tab,
@@ -3067,6 +3069,10 @@ test "Keymap.translate uses group bits 13-14 without reading the next key" {
     try std.testing.expectEqual(Key{ .char = 0x03a9 }, keysymToKey(0x07d8));
     try std.testing.expectEqual(Key{ .char = 0x05d0 }, keysymToKey(0x0ce0));
     try std.testing.expectEqual(Key{ .char = 0x05ea }, keysymToKey(0x0cfa));
+    try std.testing.expectEqual(Key{ .char = 0x0627 }, keysymToKey(0x05c7));
+    try std.testing.expectEqual(Key{ .char = 0x064a }, keysymToKey(0x05ea));
+    try std.testing.expectEqual(Key{ .char = 0x0153 }, keysymToKey(0x13bd));
+    try std.testing.expectEqual(Key{ .char = 0x0178 }, keysymToKey(0x13be));
 
     var pair = [_]u32{ 'a', 'A', 'b', 'B' };
     const km2 = Keymap{ .syms = &pair, .per = 2, .min = 8 };

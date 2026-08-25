@@ -270,11 +270,13 @@ AltGr/ISO Level3, and group 2 when listed), implements configured key repeat,
 composes bounded dead-key / Multi_key accents and optional XCompose locale
 tables, accepts committed IME text through text-input-v3 (multiline hint,
 composer-strip cursor rectangle, confirming-key de-dupe), restores held
-modifiers from the keyboard-enter keys array, maps native touch contacts to
+modifiers from the keyboard-enter keys array and Caps Lock from the
+conventional Lock modifier bit, maps native touch contacts to
 the shared interaction contract, tracks entered `wl_output` integer scale
 plus `wp_fractional_scale_v1` / `wp_viewporter` and
 `wl_surface.preferred_buffer_scale` when advertised, advertises xdg-shell
-min/max size, tracks maximized/fullscreen/tiled/suspended configure states,
+min/max size, tracks maximized/fullscreen/tiled/suspended configure states
+plus `wm_capabilities` / `configure_bounds` when advertised,
 requests server-side decorations when advertised (retrying SSD once if
 the compositor configures client-side mode), coalesces `present()`
 commits behind `wl_surface.frame`, copies through
