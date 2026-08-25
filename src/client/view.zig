@@ -388,6 +388,15 @@ pub const View = struct {
                 },
                 .home => if (self.room_tab_count > 0) return .{ .room_tab = 0 } else return null,
                 .end => if (self.room_tab_count > 0) return .{ .room_tab = self.room_tab_count - 1 } else return null,
+                .page_up => if (self.room_tab_first > 0) return .{ .room_tab = self.room_tab_first - 1 } else return null,
+                .page_down => {
+                    const comic_mode = self.shell.content_mode == .comic;
+                    const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
+                    const viewport = tabViewport(layout, comic_mode);
+                    if (self.room_tab_first + viewport.capacity < self.room_tab_count)
+                        return .{ .room_tab = self.room_tab_first + viewport.capacity };
+                    return null;
+                },
                 else => return null,
             }
         };
@@ -1507,7 +1516,7 @@ pub const View = struct {
 
         drawMenuBar(&self.canvas, layout.menu, self.active_menu, self.hovered_menu);
         drawToolBar(&self.canvas, layout.toolbar, comic_mode, self.hovered_toolbar, if (self.shell.focus == .toolbar) self.focused_toolbar else null, self.wire_live);
-        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab or self.shell.focus == .status, self.hovered_room_tab, self.hovered_room_overflow);
+        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab or self.shell.focus == .status, self.hovered_room_tab, self.hovered_room_overflow, status);
         drawSplitters(&self.canvas, layout, comic_mode);
 
         if (comic_mode) {
@@ -1592,7 +1601,7 @@ pub const View = struct {
             .selected = @as(i32, @intFromEnum(self.shell.say_mode)) == action_index,
             .focused = self.shell.focus == .say_actions and self.focused_say_action == action_index,
         });
-        snapshot.append(.{ .id = "status-tab", .role = .button, .bounds = .{ .x = layout.tabs.x, .y = layout.tabs.y, .w = 108, .h = layout.tabs.h }, .label = "Status", .selected = self.status_panel_open, .focused = self.shell.focus == .status });
+        snapshot.append(.{ .id = "status-tab", .role = .button, .bounds = .{ .x = layout.tabs.x, .y = layout.tabs.y, .w = 108, .h = layout.tabs.h }, .label = statusTabLabel(status), .selected = self.status_panel_open, .focused = self.shell.focus == .status });
         snapshot.append(.{ .id = "status", .role = .button, .bounds = layout.status, .label = statusBarLabel(status), .focused = self.shell.focus == .status });
         if (self.status_panel_open) snapshot.append(.{ .id = "status-panel", .role = .dialog, .bounds = statusPanelRect(self.canvas.width, self.canvas.height, self.status_detailed), .label = "Connection and activity status", .focused = true });
         if (self.active_menu) |menu| {
@@ -2044,9 +2053,9 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             else => "Exit",
         },
         1 => switch (item) {
-            0 => "Copy selected messages",
+            0 => "Copy selected lines",
             1 => "Insert page break",
-            2 => "Delete selected messages",
+            2 => "Delete selected lines",
             else => "Settings",
         },
         2 => switch (item) {
@@ -2596,12 +2605,12 @@ fn updateTabViewport(self: *View, layout: geometry.Layout, comic_mode: bool, cou
     self.room_tab_first = @min(self.room_tab_first, count - capacity);
 }
 
-fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover, status_selected: bool, status_hovered: bool, hovered_room: ?usize, overflow_hovered: bool) void {
+fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover, status_selected: bool, status_hovered: bool, hovered_room: ?usize, overflow_hovered: bool, status: []const u8) void {
     const rect = layout.tabs;
     ui.drawTabStrip(c, rect);
     const status_w: i32 = 108;
     ui.drawStatusTab(c, rect, status_selected, status_hovered);
-    ui.drawStatusTabContent(c, rect, status_selected);
+    ui.drawStatusTabContent(c, rect, status_selected, ui.statusTone(status), statusTabLabel(status));
     if (status_hovered) ui.drawFocusRing(c, .{ .x = rect.x + 8, .y = rect.y + 6, .w = 96, .h = rect.h - 12 });
     const viewport = tabViewport(layout, comic_mode);
     const first_x = rect.x + status_w + 6;
@@ -2879,14 +2888,9 @@ fn drawOverflowTooltip(c: *Canvas, layout: geometry.Layout, comic_mode: bool, co
 }
 
 fn drawStatusTabTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
-    const hint = switch (ui.statusTone(status)) {
-        .success => "Live",
-        .failure => "Failed",
-        .warning => "Offline",
-        .info => "Wire",
-    };
-    const width = @min(200, Canvas.uiTextWidth("Status") + Canvas.uiTextWidth(hint) + 38);
-    ui.drawTooltipWithHint(c, .{ .x = layout.tabs.x + 8, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, "Status", hint);
+    const label = statusTabLabel(status);
+    const width = @min(200, Canvas.uiTextWidth(label) + Canvas.uiTextWidth("Panel") + 38);
+    ui.drawTooltipWithHint(c, .{ .x = layout.tabs.x + 8, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, label, "Panel");
 }
 
 fn drawStatusBarTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
@@ -2945,11 +2949,11 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     const first_metric_y = panel.y + 69;
     if (panel_layout.show_metrics) {
         ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = first_metric_y, .w = metric_w, .h = 38 }, "CAST", members);
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = first_metric_y, .w = metric_w, .h = 38 }, "PAGE", if (shell.content_mode == .comic) panels else "Text transcript");
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18 + metric_w + metric_gap, .y = first_metric_y, .w = metric_w, .h = 38 }, "PAGE", if (shell.content_mode == .comic) panels else "Conversation");
     }
     if (show_details) {
         const detail_y = first_metric_y + 40;
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = detail_y, .w = metric_w, .h = 38 }, "MEMBERS", if (!shell.show_members) "Pane hidden" else if (shell.member_view == .icons) "Portrait cards" else "Compact list");
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = detail_y, .w = metric_w, .h = 38 }, "RAIL", if (!shell.show_members) "Pane hidden" else if (shell.member_view == .icons) "Portrait cards" else "Compact list");
         const theme_label = switch (appearance.accent) {
             .cobalt => "Vermillion",
             .violet => "Violet",
@@ -2996,6 +3000,14 @@ fn composerPlaceholder(status: []const u8) []const u8 {
     if (std.mem.indexOf(u8, status, "offline") != null) return "Connect, then ink the next balloon...";
     if (tone != .success) return "Waiting on the wire...";
     return "Ink the next balloon...";
+}
+
+fn statusTabLabel(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "Live";
+    if (tone == .failure) return "Fail";
+    if (std.mem.indexOf(u8, status, "offline") != null) return "Off";
+    return "Wait";
 }
 
 fn statusPanelHeading(status: []const u8) []const u8 {
@@ -3333,7 +3345,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .nickname => "Visible on the Sunday page",
         .away => "Posted while you are away",
         .settings => "Ink Sunday chrome, page density, and CAST",
-        .comics_view => "Sunday page or transcript",
+        .comics_view => "Sunday page or conversation",
         .character => "Who stands on the page",
         .background => "The paper behind every panel",
         .password => "Account name and password for this wire",
@@ -3374,7 +3386,7 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .connection_features => "What this wire is offering",
         .password => "Secure account sign-in",
         .sound => "Choose a sound and message",
-        .comics_view => "Sunday page or transcript",
+        .comics_view => "Sunday page or conversation",
         .about => "Portable Ink Sunday client",
         else => switch (spec.group) {
             .application => "Ink Sunday preferences",
@@ -4407,6 +4419,13 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Wire failed (refused) - click Connect", statusBarLabel("Connection failed (refused) - click for settings"));
     try std.testing.expectEqualStrings("Wire failed (refused) - click Connect", statusPanelDetail("Connection failed (refused) - click for settings"));
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
+    try std.testing.expectEqualStrings("Live", statusTabLabel("connected"));
+    try std.testing.expectEqualStrings("Off", statusTabLabel("offline"));
+    try std.testing.expectEqualStrings("Wait", statusTabLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Fail", statusTabLabel("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Copy selected lines", menuItemLabel(1, 0));
+    try std.testing.expectEqualStrings("Delete selected lines", menuItemLabel(1, 2));
+    try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
     try std.testing.expectEqualStrings("Search rooms after the wire is live", dialogHelper(.room_list, ""));
     try std.testing.expectEqualStrings("The bulletin arrives after the wire is live", dialogHelper(.motd, ""));
     try std.testing.expectEqualStrings("Bulletin", menuItemLabel(4, 5));
@@ -4479,6 +4498,10 @@ test "overflow rooms expose hover tooltip keyboard and jump to the next hidden r
     try std.testing.expectEqual(Action{ .room_tab = tabViewport(layout, true).capacity }, view.handleMenuKey(.right).?);
     try std.testing.expectEqual(Action{ .room_tab = 0 }, view.handleMenuKey(.home).?);
     try std.testing.expectEqual(Action{ .room_tab = 2 }, view.handleMenuKey(.end).?);
+    view.room_tab_first = 0;
+    try std.testing.expectEqual(Action{ .room_tab = tabViewport(layout, true).capacity }, view.handleMenuKey(.page_down).?);
+    view.room_tab_first = 1;
+    try std.testing.expectEqual(Action{ .room_tab = 0 }, view.handleMenuKey(.page_up).?);
 
     const snapshot = view.semanticSnapshot("connected", &tabs, 0);
     var found_overflow = false;

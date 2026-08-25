@@ -1178,11 +1178,16 @@ pub fn drawStatusTab(c: *Canvas, rect: Rect, selected: bool, hovered: bool) void
     if (!selected) c.fillRect(rect.x + 10, rect.y + 8, 92, 2, current.accent);
 }
 
-pub fn drawStatusTabContent(c: *Canvas, rect: Rect, selected: bool) void {
-    const mark = if (selected) current.layer else current.accent;
+pub fn drawStatusTabContent(c: *Canvas, rect: Rect, selected: bool, tone: NoticeTone, label: []const u8) void {
+    const mark = switch (tone) {
+        .success => current.success,
+        .warning => current.warning,
+        .failure => current.failure,
+        .info => if (selected) current.layer else current.accent,
+    };
     const text = if (selected) current.layer else current.ink;
     fillRoundedRect(c, rect.x + 16, rect.y + 12, 12, 9, 2, mark);
-    _ = c.drawUiText("Status", rect.x + 36, rect.y + 9, text);
+    _ = c.drawUiText(label, rect.x + 36, rect.y + 9, text);
 }
 
 pub fn drawMemberCard(c: *Canvas, rect: Rect, selected: bool, departed: bool, away: bool, hovered: bool) void {
@@ -1595,12 +1600,12 @@ pub fn drawConversationPresenceDot(c: *Canvas, x: i32, y: i32, live: bool) void 
 }
 
 pub fn drawConversationTitle(c: *Canvas, x: i32, y: i32) void {
-    _ = c.drawUiText("Transcript", x, y, current.ink);
+    _ = c.drawUiText("Conversation", x, y, current.ink);
 }
 
 pub fn drawConversationSummary(c: *Canvas, x: i32, y: i32, width: i32, count: usize, members: usize) void {
     var summary_buf: [32]u8 = undefined;
-    const summary = std.fmt.bufPrint(&summary_buf, "{d} messages / {d} here", .{ count, members }) catch "";
+    const summary = std.fmt.bufPrint(&summary_buf, "{d} lines / {d} here", .{ count, members }) catch "";
     drawEllipsized(c, summary, x, y, width, current.navigation_muted);
 }
 
@@ -1620,7 +1625,7 @@ pub fn drawConversationHeader(c: *Canvas, rect: Rect, count: usize, members: usi
     c.fillRect(rect.x, rect.y + 25, rect.w, 2, current.ink);
     c.fillRect(rect.x, rect.y + 27, rect.w, 3, current.accent);
     drawConversationPresenceDot(c, rect.x + 12, rect.y + 10, live);
-    _ = c.drawUiText("Transcript", rect.x + 28, rect.y + 7, current.navigation_ink);
+    _ = c.drawUiText("Conversation", rect.x + 28, rect.y + 7, current.navigation_ink);
     drawConversationSummary(c, rect.x + 136, rect.y + 7, @max(0, rect.w - 242), count, members);
     drawConversationStateBadge(c, rect.right() - 12, rect.y + 7, live);
 }

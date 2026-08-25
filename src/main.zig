@@ -4321,6 +4321,10 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
         try transcript.setAvatar("alex", "armando");
         try transcript.add("alex", "Welcome to #root. The new studio is ready.");
         try transcript.add("comicchat", "Great. The comic view feels much clearer now.");
+        for (transcript.roster.items) |*member| {
+            if (std.ascii.eqlIgnoreCase(member.nick, "comicchat")) member.role = .owner;
+            if (std.ascii.eqlIgnoreCase(member.nick, "alex")) member.role = .operator;
+        }
         if (std.mem.eql(u8, surface, "text-conversation")) {
             try transcript.add("comicchat", "The chat buffer now keeps a full thought together instead of turning every sentence into a separate visual interruption.");
             try transcript.add("alex", "That makes the room easier to scan when several people are talking at once.");

@@ -177,7 +177,7 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
             .{ .label = "Accent color", .hint = "Vermillion, violet, or forest", .kind = .choice },
             .{ .label = "Contrast", .hint = "Ink weight on chrome", .kind = .choice },
-            .{ .label = "Conversation view", .hint = "Sunday page or transcript", .kind = .choice },
+            .{ .label = "Conversation view", .hint = "Sunday page or conversation", .kind = .choice },
             .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
             .{ .label = "Member pane", .hint = "CAST rail visibility", .kind = .choice },
             .{ .label = "Member layout", .hint = "Portraits or compact list", .kind = .choice },
@@ -212,7 +212,7 @@ pub fn fields(id: Id) []const Field {
         .sound => &.{ .{ .label = "Sound file", .kind = .choice }, .{ .label = "Accompanying message", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
         .choose_color => &.{ .{ .label = "Color value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current theme color", .kind = .preview } },
-        .comics_view => &.{ .{ .label = "Page mode", .hint = "Sunday page or transcript", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
+        .comics_view => &.{ .{ .label = "Page mode", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
         .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving member" }, .{ .label = "Repeat limit", .hint = "8" }, .{ .label = "Repeat window seconds", .hint = "10" } },
         .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
         .rule_sets => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Import or export file", .hint = "Optional .ccrules path" } },
@@ -476,6 +476,8 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Online members", get(.notification_users).title);
     try std.testing.expectEqualStrings("Rename open set", get(.rename_loaded_set).title);
     try std.testing.expectEqualStrings("Page mode", fields(.comics_view)[0].label);
+    try std.testing.expectEqualStrings("Sunday page or conversation", fields(.settings)[3].hint);
+    try std.testing.expectEqualStrings("Sunday page or conversation", fields(.comics_view)[0].hint);
     try std.testing.expectEqualStrings("Rule limits", get(.advanced_event_params).title);
     try std.testing.expectEqualStrings("Repeat limit", fields(.automation)[2].label);
     try std.testing.expectEqualStrings("Repeat window seconds", fields(.automation)[3].label);
