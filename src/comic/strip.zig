@@ -2929,3 +2929,62 @@ test "remaining leftover HD dests keep dest-only paint on unused rooms" {
         }
     }
 }
+
+test "leftover dests speaking the conversation UI lines keep dest-only paint" {
+    // drawComicBuffer remaps leftover dests via colorCounterpart and renders
+    // with comic_columns=4 plus reserve_page_columns on the selected room.
+    const gpa = std.testing.allocator;
+    const room = @embedFile("../assets/generated/color-cafe.bgb");
+    const color_lines = [_]Line{
+        .{ .speaker = "armando color", .text = "Welcome to #root. The new studio is ready." },
+        .{ .speaker = "anna color", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "rebecca color", .text = "Color portraits should stay faces, not smashed bodies." },
+        .{ .speaker = "kevin color", .text = "Every default character now keeps its color." },
+    };
+    const empty_lines = [_]Line{
+        .{ .speaker = "anna", .text = "Welcome to #root. The new studio is ready." },
+        .{ .speaker = "anna", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "anna", .text = "Color portraits should stay faces, not smashed bodies." },
+        .{ .speaker = "anna", .text = "Every default character now keeps its color." },
+    };
+    var empty = try renderWithOptions(gpa, &empty_lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = room,
+    });
+    defer empty.deinit(gpa);
+    var image = try renderWithOptions(gpa, &color_lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = room,
+    });
+    defer image.deinit(gpa);
+    try leftoverDestXorEachStoryPanel(image, empty);
+}
+
+test "leftover dest wave dests keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color" };
+    const wave = "Hello leftover dest wave from this unused room.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = wave }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = wave }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+}
