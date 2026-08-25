@@ -290,6 +290,34 @@ pub const View = struct {
         return true;
     }
 
+    /// Alt+letter opens File/Edit/View/Format/Room/Member/Tools. Alt+Down
+    /// opens the hovered menu, or File.
+    pub fn handleMenuAccelerator(self: *View, key: platform_event.Key, alt: bool) ?Action {
+        if (!alt or self.active_dialog != null) return null;
+        const menu: u8 = switch (key) {
+            .down => self.hovered_menu orelse 0,
+            .char => |code| label: {
+                const ch = std.math.cast(u8, code) orelse return null;
+                break :label switch (std.ascii.toLower(ch)) {
+                    'f' => 0,
+                    'e' => 1,
+                    'v' => 2,
+                    'o' => 3,
+                    'r' => 4,
+                    'm' => 5,
+                    't' => 6,
+                    else => return null,
+                };
+            },
+            else => return null,
+        };
+        self.active_menu = menu;
+        self.hovered_menu = menu;
+        self.shell.focus = .navigation;
+        self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate, self.wire_live);
+        return .none;
+    }
+
     /// Keyboard navigation for the complete menu bar. A menu owns arrow,
     /// Home/End, Enter, and Escape until it closes so commands never leak into
     /// the composer or transcript.
@@ -1892,11 +1920,11 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             0 => "List",
             1 => "Join",
             2 => "New",
-            3 => "Prop",
+            3 => "Props",
             4 => "Away",
             5 => "MOTD",
             6, 7, 8 => "IRCX",
-            9 => "Fav",
+            9 => "Favorite",
             else => "Window",
         },
         5 => switch (item) {
@@ -1904,7 +1932,7 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             1 => "Card",
             2 => "Say",
             3 => "Room",
-            4, 5 => "Mod",
+            4, 5 => "Moderate",
             6 => "File",
             else => "Call",
         },
@@ -2295,6 +2323,10 @@ fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, activ
         if (x + tab_w > viewport.right) break;
         const width = tab_w;
         ui.drawConversationTab(c, .{ .x = x, .y = rect.y + 5, .w = width, .h = rect.h - 5 }, tab.label, tab.unread, index == active, focused and index == active, hovered_room == index);
+    }
+    if (first_visible + viewport.capacity < tabs.len and first_x + @as(i32, @intCast(@min(viewport.capacity, tabs.len - first_visible))) * tab_w + 28 <= viewport.right) {
+        const chip_x = first_x + @as(i32, @intCast(@min(viewport.capacity, tabs.len - first_visible))) * tab_w;
+        ui.drawInkChip(c, .{ .x = chip_x, .y = rect.y + 8, .w = 26, .h = 20 }, "...", false);
     }
     if (comic_mode and layout.transcript.w >= 430) drawComicColumnControl(c, layout, comic_columns, column_hover);
 }
@@ -2901,14 +2933,14 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .connection_features => "What this wire actually negotiated",
         .password => "Secure account sign-in",
         .sound => "Choose a sound and message",
-        .comics_view => "How the page is arranged",
+        .comics_view => "Sunday page or transcript",
         .about => "Portable Ink Sunday client",
         else => switch (spec.group) {
-            .application => "Application preferences",
-            .connection => "Connection, identity, and appearance",
-            .rooms => "Rooms and member workflow",
+            .application => "Ink Sunday preferences",
+            .connection => "Wire, identity, and appearance",
+            .rooms => "Rooms and CAST",
             .automation => "Automation and notifications",
-            .files => "Application and file workflow",
+            .files => "Files and conversations",
         },
     };
     ui.drawDialogSurface(c, rect, spec.title, group_text);
@@ -3874,6 +3906,16 @@ test "room and member menus stay closed until the wire is live" {
     view.active_menu = 4;
     _ = view.handlePointer(.{ .kind = .down, .x = room.x + 10, .y = room.y + 8, .button = .primary }, 0, 0);
     try std.testing.expectEqual(dialogs.Id.room_list, view.active_dialog.?);
+}
+
+test "alt accelerators open the menu bar from any focus" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .composer;
+    try std.testing.expectEqual(Action.none, view.handleMenuAccelerator(.{ .char = 't' }, true).?);
+    try std.testing.expectEqual(@as(?u8, 6), view.active_menu);
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
+    try std.testing.expect(view.handleMenuAccelerator(.{ .char = 't' }, false) == null);
 }
 
 test "view menu layout commands ask the host to persist settings" {

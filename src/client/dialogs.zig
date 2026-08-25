@@ -95,7 +95,7 @@ pub const specs = [_]Spec{
     .{ .id = .set_text_font, .resource = "IDD_SETTEXTFONT", .title = "Set Text Font", .group = .connection, .source_w = 264, .source_h = 261 },
     .{ .id = .user_list, .resource = "IDD_USERLIST", .title = "User List", .group = .rooms, .source_w = 395, .source_h = 263 },
     .{ .id = .whisper, .resource = "IDD_WHISPERBOX", .title = "Whisper Box", .group = .rooms, .source_w = 334, .source_h = 196 },
-    .{ .id = .comics_view, .resource = "IDD_COMICS_VIEW", .title = "Comic View", .group = .connection, .source_w = 252, .source_h = 218 },
+    .{ .id = .comics_view, .resource = "IDD_COMICS_VIEW", .title = "Page layout", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .automation, .resource = "IDD_AUTOMATION_PAGE", .title = "Automation", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .rules, .resource = "IDD_RULESPAGE", .title = "Rules", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .edit_rule, .resource = "IDD_EDITRULE", .title = "Edit Rule", .group = .automation, .source_w = 265, .source_h = 260 },
@@ -357,7 +357,12 @@ pub fn primaryLabel(id: Id) []const u8 {
         .call_link => "Send call link",
         .member_profile => "Request profile",
         .about, .motd, .connection_features => "Close",
-        else => "OK",
+        .nickname => "Set nickname",
+        .password => "Sign in",
+        .channel_password => "Unlock room",
+        .invitation => "Accept",
+        .channel_properties => "Apply",
+        .sound => "Send",
     };
 }
 
@@ -397,6 +402,10 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Light studio", choiceOptions(.settings, 0)[0]);
     try std.testing.expectEqualStrings("Vermillion", choiceOptions(.settings, 1)[0]);
     try std.testing.expectEqualStrings("Verified TLS", choiceOptions(.setup, 2)[0]);
+    try std.testing.expectEqualStrings("Page layout", get(.comics_view).title);
+    try std.testing.expectEqualStrings("Sign in", primaryLabel(.password));
+    try std.testing.expectEqualStrings("Set nickname", primaryLabel(.nickname));
+    try std.testing.expectEqualStrings("Send", primaryLabel(.sound));
 }
 
 test "settings accent chrome maps vermillion and leftover cobalt to index 0" {

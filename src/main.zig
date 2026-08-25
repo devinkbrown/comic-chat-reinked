@@ -1681,9 +1681,9 @@ fn runInteractivePollBackend(
     const posix = std.posix;
 
     const win = if (comptime @hasDecl(Backend.Window, "openWithDisplay"))
-        try Backend.Window.openWithDisplay(gpa, 960, 720, "Comic Chat", display orelse return error.DisplayUnset)
+        try Backend.Window.openWithDisplay(gpa, 960, 720, "Comic Chat / Sunday", display orelse return error.DisplayUnset)
     else
-        try Backend.Window.open(gpa, 960, 720, "Comic Chat");
+        try Backend.Window.open(gpa, 960, 720, "Comic Chat / Sunday");
     defer win.deinit();
     var view = try cc.client.view.View.init(gpa, win.width, win.height);
     defer view.deinit();
@@ -1795,7 +1795,7 @@ fn runInteractivePollBackend(
 fn runInteractiveWin32(gpa: std.mem.Allocator, host: []const u8, port: u16, nick: []const u8, channel: []const u8, startup_document: ?[]const u8, runtime: *ConnectionRuntime, io: std.Io) !void {
     const Win32 = cc.platform.win32;
 
-    const win = try Win32.Window.open(gpa, 960, 720, "Comic Chat");
+    const win = try Win32.Window.open(gpa, 960, 720, "Comic Chat / Sunday");
     defer win.deinit();
     var view = try cc.client.view.View.init(gpa, win.width, win.height);
     defer view.deinit();
@@ -1895,6 +1895,8 @@ fn handleWindowEvent(
                 break :key_result .{ .redraw = true };
             }
             const previous_dialog = view.active_dialog;
+            if (view.handleMenuAccelerator(key, key_input.modifiers.alt)) |_|
+                break :key_result .{ .redraw = true };
             if (view.handleContextMenuKey(key)) |action| {
                 const keep_running = switch (action) {
                     .send_expression => expression: {
@@ -1911,7 +1913,7 @@ fn handleWindowEvent(
             if (view.handleFocusedActionKey(key)) |action| {
                 const keep_running = switch (action) {
                     .quit => false,
-                    .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data),
+                    .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data, &network.runtime.preferences, network.runtime.preferences_path),
                     .connection => connection: {
                         view.openConnectionDialog(network.host, network.reconnect.port, network.effectiveOptions().security == .tls);
                         break :connection true;
@@ -2000,7 +2002,7 @@ fn handleWindowEvent(
             if (key_input.modifiers.shift and handleEditorSelectionKey(editor, key))
                 break :key_result .{ .redraw = true };
             break :key_result .{
-                .keep_running = try handleWorkspaceInputKey(gpa, io, key, view, editor, client, workspace, nick, state.joined, state.ircx_data),
+                .keep_running = try handleWorkspaceInputKey(gpa, io, key, view, editor, client, workspace, nick, state.joined, state.ircx_data, &network.runtime.preferences, network.runtime.preferences_path),
                 .redraw = true,
             };
         },
@@ -2012,7 +2014,7 @@ fn handleWindowEvent(
                 try prefillOpenedDialog(view, transcript, editor.text(), &network.runtime.preferences, state, network.clientPtr());
             const keep_running = switch (action) {
                 .quit => false,
-                .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data),
+                .send => try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, client, workspace, nick, state.joined, state.ircx_data, &network.runtime.preferences, network.runtime.preferences_path),
                 .connection => connection: {
                     view.openConnectionDialog(network.host, network.reconnect.port, network.effectiveOptions().security == .tls);
                     break :connection true;
@@ -2164,6 +2166,10 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(5, if (view.shell.show_members) "Shown" else "Hidden");
             try view.setDialogValueAt(6, if (view.shell.member_view == .icons) "Icons" else "List");
             try view.setDialogValueAt(7, if (view.status_detailed) "Detailed" else "Compact");
+        },
+        .about => {
+            try view.setDialogValueAt(0, "Comic Chat");
+            try view.setDialogValueAt(1, "AGPL-3.0-or-later / printed page");
         },
         .comics_view => {
             try view.setDialogValueAt(0, if (view.shell.content_mode == .comic) "Comic" else "Text");
@@ -3413,6 +3419,8 @@ fn handleWorkspaceInputKey(
     nick: []const u8,
     connected: bool,
     ircx_data: bool,
+    preferences: *cc.client.preferences.Store,
+    preferences_path: []const u8,
 ) !bool {
     if (key == .enter and editor.text().len > 0) {
         const text = editor.text();
@@ -3423,7 +3431,7 @@ fn handleWorkspaceInputKey(
             while (lines.next()) |line| {
                 if (line.len == 0) continue;
                 try editor.paste(line);
-                if (!try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, maybe_client, workspace, nick, connected, ircx_data)) return false;
+                if (!try handleWorkspaceInputKey(gpa, io, cc.platform.event.Key{ .enter = {} }, view, editor, maybe_client, workspace, nick, connected, ircx_data, preferences, preferences_path)) return false;
             }
             return true;
         }
@@ -3486,7 +3494,13 @@ fn handleWorkspaceInputKey(
         }
     }
     const room = workspace.activeRoom() orelse return true;
-    return handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, room.joined or connected, ircx_data);
+    const mode = view.shell.content_mode;
+    const members = view.shell.show_members;
+    const columns = view.shell.comic_columns;
+    const keep_running = try handleInputKey(gpa, key, view, editor, maybe_client, &room.transcript, nick, room.name, room.joined or connected, ircx_data);
+    if (view.shell.content_mode != mode or view.shell.show_members != members or view.shell.comic_columns != columns)
+        try persistViewLayout(io, view, preferences, preferences_path);
+    return keep_running;
 }
 
 fn processWorkspaceMessages(
@@ -3848,7 +3862,7 @@ fn presentWorkspace(
     try view.renderTabs(status, &room.transcript, room.editor.text(), room.editor.cursor, room.editor.selection(), tabs[0..workspace.rooms.items.len], workspace.active.?);
     if (comptime @hasDecl(@TypeOf(win.*), "setTitle")) {
         var title_buf: [96]u8 = undefined;
-        const title = std.fmt.bufPrint(&title_buf, "Comic Chat — {s}", .{room.name}) catch "Comic Chat";
+        const title = std.fmt.bufPrint(&title_buf, "Comic Chat / Sunday / {s}", .{room.name}) catch "Comic Chat / Sunday";
         win.setTitle(title) catch {};
     }
     try win.present(view.pixels(), view.width(), view.height());
