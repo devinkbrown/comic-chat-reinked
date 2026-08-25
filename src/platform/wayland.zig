@@ -3827,7 +3827,8 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/plain;charset=greek"));
     try std.testing.expectEqualStrings("text/plain;charset=latin-2", knownTextMime("text/plain;charset=latin-2").?);
     try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-2", knownTextMime("text/plain;charset=iso8859-2").?);
-    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-15", knownTextMime("text/plain;charset=latin-9").?);
+    try std.testing.expectEqualStrings("text/plain;charset=latin-9", knownTextMime("text/plain;charset=latin-9").?);
+    try std.testing.expectEqualStrings("text/plain;charset=ISO-8859-15", knownTextMime("text/plain;charset=iso8859-15").?);
     try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-15"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-9"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-5"));
