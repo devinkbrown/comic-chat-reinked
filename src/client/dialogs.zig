@@ -108,7 +108,7 @@ pub const specs = [_]Spec{
     .{ .id = .text_font, .resource = "IDD_TEXTFONTPAGE_IRC", .title = "Text font", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .choose_color, .resource = "IDD_CHOOSECOLOR", .title = "Choose color", .group = .connection, .source_w = 118, .source_h = 38 },
     .{ .id = .invitation, .resource = "IDD_INVITATION", .title = "Invitation", .group = .rooms, .source_w = 186, .source_h = 93 },
-    .{ .id = .advanced_event_params, .resource = "IDD_ADVANCEDEVENTPARAMS", .title = "Event parameters", .group = .automation, .source_w = 186, .source_h = 85 },
+    .{ .id = .advanced_event_params, .resource = "IDD_ADVANCEDEVENTPARAMS", .title = "Rule limits", .group = .automation, .source_w = 186, .source_h = 85 },
     .{ .id = .rule_sets, .resource = "IDD_RULESETSPAGE", .title = "Rule sets", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .add_to_sets, .resource = "IDD_ADDTOSETS", .title = "Add to rule sets", .group = .automation, .source_w = 252, .source_h = 161 },
     .{ .id = .rename_loaded_set, .resource = "IDD_RENAMELOADEDSET", .title = "Rename open set", .group = .automation, .source_w = 258, .source_h = 103 },
@@ -156,7 +156,7 @@ pub fn prompt(id: Id) ?[]const u8 {
         .sound => "Sound name",
         .set_text_font, .text_font => "Font name and size",
         .rename_loaded_set, .rename_set, .create_set => "Rule set name",
-        .advanced_event_params => "Event parameters",
+        .advanced_event_params => "Rule limits",
         .file_transfer => "File path",
         .open_conversation, .recent_files => "Conversation file",
         .open_locator => "Chat locator file",
@@ -213,16 +213,16 @@ pub fn fields(id: Id) []const Field {
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
         .choose_color => &.{ .{ .label = "Color value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current theme color", .kind = .preview } },
         .comics_view => &.{ .{ .label = "Page mode", .hint = "Sunday page or transcript", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
-        .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving member" }, .{ .label = "Flood message count", .hint = "8" }, .{ .label = "Flood interval seconds", .hint = "10" } },
+        .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving member" }, .{ .label = "Repeat limit", .hint = "8" }, .{ .label = "Repeat window seconds", .hint = "10" } },
         .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
         .rule_sets => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Import or export file", .hint = "Optional .ccrules path" } },
         .add_to_sets => &.{ .{ .label = "Rule name" }, .{ .label = "Rule set" } },
         .rename_loaded_set, .rename_set => &.{ .{ .label = "Current rule set" }, .{ .label = "New name" } },
         .create_set => &.{.{ .label = "Rule set name" }},
-        .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Maximum occurrences", .hint = "0 means unlimited" }, .{ .label = "Interval seconds", .hint = "0 means any interval" } },
+        .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat limit", .hint = "0 means unlimited" }, .{ .label = "Repeat window seconds", .hint = "0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Enabled", .kind = .choice }, .{ .label = "Case-sensitive match", .kind = .choice } },
         .notifications => &.{ .{ .label = "Nickname", .hint = "Nickname or * pattern" }, .{ .label = "User pattern", .hint = "*" }, .{ .label = "Host pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional server" }, .{ .label = "Delivery", .kind = .choice } },
-        .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "Member", .hint = "CAST nickname" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "IPv4 when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
+        .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "Member", .hint = "CAST nickname" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
         .save_conversation => &.{.{ .label = "Conversation file", .hint = "Save as .ccc" }},
         .export_image => &.{.{ .label = "Image file", .hint = "Export as .png" }},
@@ -476,6 +476,12 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Online members", get(.notification_users).title);
     try std.testing.expectEqualStrings("Rename open set", get(.rename_loaded_set).title);
     try std.testing.expectEqualStrings("Page mode", fields(.comics_view)[0].label);
+    try std.testing.expectEqualStrings("Rule limits", get(.advanced_event_params).title);
+    try std.testing.expectEqualStrings("Repeat limit", fields(.automation)[2].label);
+    try std.testing.expectEqualStrings("Repeat window seconds", fields(.automation)[3].label);
+    try std.testing.expectEqualStrings("Repeat limit", fields(.advanced_event_params)[1].label);
+    try std.testing.expectEqualStrings("Repeat window seconds", fields(.advanced_event_params)[2].label);
+    try std.testing.expectEqualStrings("Address when offering a file", fields(.file_transfer)[3].hint);
     try std.testing.expectEqualStrings("Room", choiceOptions(.ircx_events, 1)[0]);
     try std.testing.expectEqualStrings("Link", choiceOptions(.ircx_events, 1)[4]);
     try std.testing.expectEqualStrings("Summary", fields(.channel_properties)[4].label);

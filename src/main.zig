@@ -2732,7 +2732,7 @@ fn applyDialogAction(
             const count = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(2), " \t"), 10) catch 8;
             const interval = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(3), " \t"), 10) catch 10;
             if (count == 0 or interval == 0) {
-                view.setDialogNotice("Flood limits must be positive numbers.");
+                view.setDialogNotice("Repeat limits must be positive numbers.");
                 return;
             }
             if (hasWireControl(view.dialogValueAt(1))) {
@@ -2825,11 +2825,11 @@ fn applyDialogAction(
         },
         .advanced_event_params => {
             const maximum = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(1), " \t"), 10) catch {
-                view.setDialogNotice("Maximum occurrences must be a number.");
+                view.setDialogNotice("Repeat limit must be a number.");
                 return;
             };
             const interval = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(2), " \t"), 10) catch {
-                view.setDialogNotice("Interval seconds must be a number.");
+                view.setDialogNotice("Repeat window seconds must be a number.");
                 return;
             };
             const rule = findRule(preferences, value) orelse {

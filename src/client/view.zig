@@ -305,6 +305,19 @@ pub const View = struct {
     }
 
     pub fn handleTranscriptKey(self: *View, key: platform_event.Key, total_lines: usize, extend: bool) bool {
+        if (self.shell.focus == .composer) {
+            switch (key) {
+                .page_up => {
+                    self.pageEarlier(total_lines);
+                    return true;
+                },
+                .page_down => {
+                    self.pageLater();
+                    return true;
+                },
+                else => return false,
+            }
+        }
         if (self.shell.focus != .transcript) return false;
         switch (key) {
             .up => self.shell.moveTranscriptSelection(total_lines, -1, extend),
@@ -1809,7 +1822,7 @@ pub const View = struct {
         for (transcript.roster.items[start..], start..) |member, index| {
             if (y + 24 > content.bottom()) break;
             const selected = if (self.shell.selected_member) |selected_index| selected_index == index else member.is_self;
-            ui.drawMemberRow(&self.canvas, .{ .x = content.x, .y = y, .w = content.w, .h = 24 }, member.nick, member.role.badge(), selected, member.departed, member.away, self.hovered_member == index);
+            ui.drawMemberRow(&self.canvas, .{ .x = content.x, .y = y, .w = content.w, .h = 24 }, member.nick, memberRoleChip(member.role), selected, member.departed, member.away, self.hovered_member == index);
             y += 24;
         }
         ui.drawVerticalScrollbar(&self.canvas, content, transcript.roster.items.len, visible_rows, start);
@@ -1839,7 +1852,11 @@ pub const View = struct {
             var icon = bgb.decodeIcon(self.gpa, avatar) catch continue;
             defer icon.deinit(self.gpa);
             blitHeightBottomAlphaSmooth(&self.canvas, icon.pixels, icon.width, icon.height, cell.x + @divTrunc(cell.w - 52, 2), cell.y + 6, 52, 52);
-            if (member.role.badge().len != 0) ui.drawPill(&self.canvas, .{ .x = cell.right() - 25, .y = cell.y + 5, .w = 20, .h = 18 }, member.role.badge(), true);
+            const role_chip = memberRoleChip(member.role);
+            if (role_chip.len != 0) {
+                const pill_w = Canvas.uiTextWidth(role_chip) + 16;
+                ui.drawPill(&self.canvas, .{ .x = cell.right() - pill_w - 5, .y = cell.y + 5, .w = pill_w, .h = 18 }, role_chip, true);
+            }
             const name_w = Canvas.uiTextWidth(member.nick);
             drawTextEllipsized(
                 &self.canvas,
@@ -3222,6 +3239,17 @@ fn dialogLayout(width: u32, height: u32, spec: dialogs.Spec) ui.DialogLayout {
     return ui.DialogLayout.init(width, height, spec.source_w, spec.source_h, dialogs.fields(spec.id).len, dialogPrimaryButtonWidth(spec.id), dialogs.showsCancel(spec.id));
 }
 
+/// CAST chips are Sunday letters. Wire prefixes stay in `MemberRole.badge`.
+fn memberRoleChip(role: session.MemberRole) []const u8 {
+    return switch (role) {
+        .member => "",
+        .voice => "V",
+        .halfop => "H",
+        .operator => "OP",
+        .owner => "OWN",
+    };
+}
+
 fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
     return switch (id) {
         .settings => switch (index) {
@@ -3244,7 +3272,7 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         },
         .password => switch (index) {
             0 => "SIGN",
-            1 => "AUTH",
+            1 => "KEY",
             else => "",
         },
         .room_list => switch (index) {
@@ -3308,6 +3336,24 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .comics_view => "Sunday page or transcript",
         .character => "Who stands on the page",
         .background => "The paper behind every panel",
+        .password => "Account name and password for this wire",
+        .automation => "Greeting and repeat limits",
+        .rules, .edit_rule => "When something happens on the page",
+        .rule_sets => "Create, import, or export a rule set",
+        .add_to_sets => "Add a rule to an open set",
+        .rename_loaded_set, .rename_set => "Rename the open rule set",
+        .create_set => "Name a new rule set",
+        .advanced_event_params => "How often this rule may fire",
+        .advanced_rule_settings => "Enable matching and case",
+        .open_conversation => "Open a saved conversation",
+        .save_conversation => "Save this conversation",
+        .export_image => "Export the Sunday page as an image",
+        .open_locator => "Open a saved chat locator",
+        .print_preview => "Save a printable Sunday page",
+        .channel_password => "Needed if the room is locked",
+        .choose_color => "Ink color for typed text",
+        .text_font, .set_text_font => "Type on the Sunday page",
+        .about => "Portable Ink Sunday client",
         else => "",
     };
 }
@@ -4373,6 +4419,33 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Wire", toolbarHint(0));
     try std.testing.expectEqualStrings("Join", toolbarHint(2));
     try std.testing.expectEqualStrings("CAST", toolbarHint(8));
+    try std.testing.expectEqualStrings("KEY", settingsKicker(.password, 1));
+    try std.testing.expectEqualStrings("SIGN", settingsKicker(.password, 0));
+    try std.testing.expectEqualStrings("", memberRoleChip(.member));
+    try std.testing.expectEqualStrings("V", memberRoleChip(.voice));
+    try std.testing.expectEqualStrings("H", memberRoleChip(.halfop));
+    try std.testing.expectEqualStrings("OP", memberRoleChip(.operator));
+    try std.testing.expectEqualStrings("OWN", memberRoleChip(.owner));
+    try std.testing.expectEqualStrings("Account name and password for this wire", dialogHelper(.password, ""));
+    try std.testing.expectEqualStrings("How often this rule may fire", dialogHelper(.advanced_event_params, ""));
+}
+
+test "composer Page Up and Page Down page the transcript" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    var transcript = session.Transcript.init(std.testing.allocator);
+    defer transcript.deinit();
+    try transcript.setSelf("anna");
+    var index: usize = 0;
+    while (index < 14) : (index += 1) try transcript.add(if (index % 2 == 0) "anna" else "kevin", "A live chat buffer line");
+
+    view.shell.focus = .composer;
+    try std.testing.expect(view.handleTranscriptKey(.page_up, transcript.lines.items.len, false));
+    try std.testing.expect(view.shell.history_offset > 0);
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    try std.testing.expect(view.handleTranscriptKey(.page_down, transcript.lines.items.len, false));
+    try std.testing.expectEqual(shell_mod.Focus.composer, view.shell.focus);
+    try std.testing.expect(!view.handleTranscriptKey(.up, transcript.lines.items.len, false));
 }
 
 test "member context stays closed until the wire is live" {

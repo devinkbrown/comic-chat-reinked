@@ -1605,7 +1605,7 @@ pub fn drawConversationSummary(c: *Canvas, x: i32, y: i32, width: i32, count: us
 }
 
 pub fn drawConversationStateBadge(c: *Canvas, x: i32, y: i32, live: bool) void {
-    const mode = if (live) "LIVE" else "EARLIER";
+    const mode = if (live) "Live" else "Earlier";
     const width = Canvas.uiTextWidth(mode) + 18;
     drawInkPlate(c, x - width, y, width, 16, 2, if (live) current.accent else current.notice_warning);
     _ = c.drawUiText(mode, x - width + 9, y + 1, if (live) current.layer else current.ink);
@@ -1644,11 +1644,11 @@ pub fn drawMemberRow(c: *Canvas, rect: Rect, label: []const u8, role_badge: []co
         c.fillRect(rect.x + 3, rect.y + 2, 2, 18, current.subtle);
     }
     fillRoundedRect(c, rect.x + 8, rect.y + 5, 8, 8, 4, if (departed) current.divider else if (away) current.warning else current.success);
-    const badge_w: i32 = if (role_badge.len == 0) 0 else 21;
+    const badge_w: i32 = if (role_badge.len == 0) 0 else Canvas.uiTextWidth(role_badge) + 10;
     drawEllipsized(c, label, rect.x + 24, rect.y, rect.w - 30 - badge_w, if (departed) current.secondary else current.ink);
     if (role_badge.len != 0) {
-        fillRoundedRect(c, rect.right() - 24, rect.y + 2, 18, 18, 6, current.accent_soft);
-        _ = c.drawUiText(role_badge, rect.right() - 19, rect.y + 2, current.accent);
+        fillRoundedRect(c, rect.right() - badge_w - 6, rect.y + 2, badge_w, 18, 6, current.accent_soft);
+        _ = c.drawUiText(role_badge, rect.right() - badge_w - 2, rect.y + 2, current.accent);
     }
 }
 
@@ -1711,9 +1711,9 @@ pub fn drawStatusBar(c: *Canvas, x: i32, y: i32, width: i32, height: i32, status
     c.fillRect(x + 10, y + 9, 8, 8, status_color);
     var buf: [32]u8 = undefined;
     const members = if (member_count == 1)
-        "cast 1"
+        "CAST 1"
     else
-        std.fmt.bufPrint(&buf, "cast {d}", .{member_count}) catch "cast";
+        std.fmt.bufPrint(&buf, "CAST {d}", .{member_count}) catch "CAST";
     const badge_w = Canvas.uiTextWidth(members) + 24;
     const badge_x = x + @max(108, width - badge_w - 8);
     if (hovered) c.fillRect(x + 4, y + 4, @max(1, badge_x - x - 10), @max(1, height - 8), current.navigation_hover);
