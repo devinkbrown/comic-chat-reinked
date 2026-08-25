@@ -2775,6 +2775,11 @@ fn applyDialogAction(
                 view.setDialogNotice("Maximum users must be a positive number.");
                 return;
             }
+            const pending_topic = view.dialogValueAt(1);
+            if (hasWireControl(pending_topic)) {
+                view.setDialogNotice("The topic must stay on one line.");
+                return;
+            }
             const index = workspace.ensure(value) catch |err| {
                 view.setDialogNotice(roomEnsureFailureNotice(err));
                 return;
@@ -2788,7 +2793,7 @@ fn applyDialogAction(
                     return;
                 }
                 try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(4));
-                try workspace.rooms.items[index].setPendingTopic(workspace.gpa, view.dialogValueAt(1));
+                try workspace.rooms.items[index].setPendingTopic(workspace.gpa, pending_topic);
             }
         },
         .comics_view => {
@@ -2838,6 +2843,14 @@ fn applyDialogAction(
                 return;
             };
             const key = view.dialogValueAt(3);
+            if (hasWireControl(value)) {
+                view.setDialogNotice("The topic must stay on one line.");
+                return;
+            }
+            if (hasWireControl(key)) {
+                view.setDialogNotice("The room password must stay on one line.");
+                return;
+            }
             if (key.len != 0 and cc.net.irc_map.SessionLimits.exceeds(workspace.session_limits.keylen, key)) {
                 view.setDialogNotice("That room password is longer than the server allows.");
                 return;
@@ -3181,6 +3194,10 @@ fn applyDialogAction(
                         view.setDialogNotice("Connect before sending an invitation.");
                         return;
                     };
+                    if (!isSingleIrcToken(member)) {
+                        view.setDialogNotice("Enter one nickname without spaces.");
+                        return;
+                    }
                     try client.invite(member, room.name);
                 }
             }
@@ -3283,9 +3300,24 @@ fn applyDialogAction(
             }
         },
         .kick => if (maybe_client) |client| {
+            if (!isSingleIrcToken(value)) {
+                view.setDialogNotice("Enter one nickname without spaces.");
+                return;
+            }
+            const reason = view.dialogValueAt(1);
+            if (hasWireControl(reason)) {
+                view.setDialogNotice("The kick reason must stay on one line.");
+                return;
+            }
             const ban_mask = std.mem.trim(u8, view.dialogValueAt(2), " \t");
-            if (ban_mask.len != 0) try client.setBan(room.name, ban_mask);
-            try client.kick(room.name, value, view.dialogValueAt(1));
+            if (ban_mask.len != 0) {
+                if (!isSingleIrcToken(ban_mask)) {
+                    view.setDialogNotice("Use one nickname mask without spaces.");
+                    return;
+                }
+                try client.setBan(room.name, ban_mask);
+            }
+            try client.kick(room.name, value, reason);
         },
         .ban => if (maybe_client) |client| {
             const list = classifyChannelListMask(value);
@@ -3316,6 +3348,10 @@ fn applyDialogAction(
                         view.setDialogNotice("Enter the mask to remove, for example -nick!*@* or -e:nick!*@*.");
                         return;
                     }
+                    if (!isSingleIrcToken(mask)) {
+                        view.setDialogNotice("Use one nickname mask without spaces.");
+                        return;
+                    }
                     switch (list.kind) {
                         .ban => try client.clearBan(room.name, mask),
                         .except => try client.clearException(room.name, mask),
@@ -3323,11 +3359,17 @@ fn applyDialogAction(
                         .silence => unreachable,
                     }
                 },
-                .add => switch (list.kind) {
-                    .ban => try client.setBan(room.name, mask),
-                    .except => try client.setException(room.name, mask),
-                    .invite => try client.setInviteMask(room.name, mask),
-                    .silence => unreachable,
+                .add => {
+                    if (!isSingleIrcToken(mask)) {
+                        view.setDialogNotice("Use one nickname mask without spaces.");
+                        return;
+                    }
+                    switch (list.kind) {
+                        .ban => try client.setBan(room.name, mask),
+                        .except => try client.setException(room.name, mask),
+                        .invite => try client.setInviteMask(room.name, mask),
+                        .silence => unreachable,
+                    }
                 },
             }
         },
@@ -3367,7 +3409,13 @@ fn applyDialogAction(
                 }
             }
         },
-        .invite => if (maybe_client) |client| try client.invite(value, room.name),
+        .invite => if (maybe_client) |client| {
+            if (!isSingleIrcToken(value)) {
+                view.setDialogNotice("Enter one nickname without spaces.");
+                return;
+            }
+            try client.invite(value, room.name);
+        },
         .user_list, .whisper => {
             if (id == .user_list and silenceFilterToken(std.mem.trim(u8, view.dialogValueAt(1), " \t"))) {
                 const client = maybe_client orelse {
@@ -4154,7 +4202,10 @@ fn processWorkspaceMessages(
                 state.joined = true;
                 state.status = "connected";
                 if (room.pending_topic) |topic| {
-                    try client.setTopic(room.name, topic);
+                    client.setTopic(room.name, topic) catch |err| switch (err) {
+                        error.InvalidIrcParameter => {},
+                        else => return err,
+                    };
                     try room.setPendingTopic(workspace.gpa, "");
                 }
                 try announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data);
@@ -4175,7 +4226,10 @@ fn processWorkspaceMessages(
                 state.joined = true;
                 state.status = "connected";
                 if (joined_room.pending_topic) |topic| {
-                    try client.setTopic(joined_room.name, topic);
+                    client.setTopic(joined_room.name, topic) catch |err| switch (err) {
+                        error.InvalidIrcParameter => {},
+                        else => return err,
+                    };
                     try joined_room.setPendingTopic(workspace.gpa, "");
                 }
                 redraw = true;
@@ -5642,6 +5696,10 @@ fn isPositiveCount(text: []const u8) bool {
     return (std.fmt.parseUnsigned(u32, text, 10) catch 0) != 0;
 }
 
+fn isSingleIrcToken(value: []const u8) bool {
+    return value.len != 0 and std.mem.indexOfAny(u8, value, " \t\r\n\x00\x01") == null;
+}
+
 test "portable transfer and call inputs reject unsafe values" {
     var safe_name: [64]u8 = undefined;
     try std.testing.expectEqualStrings("payload.exe", safeIncomingFilename("../../payload.exe", &safe_name));
@@ -5656,6 +5714,13 @@ test "portable transfer and call inputs reject unsafe values" {
     try std.testing.expect(!isPositiveCount(""));
     try std.testing.expect(!isPositiveCount("abc"));
     try std.testing.expect(!isPositiveCount("10x"));
+    try std.testing.expect(isSingleIrcToken("alice"));
+    try std.testing.expect(isSingleIrcToken("alice!*@*"));
+    try std.testing.expect(isSingleIrcToken("b:alice!*@*"[2..]));
+    try std.testing.expect(!isSingleIrcToken(""));
+    try std.testing.expect(!isSingleIrcToken("alice smith"));
+    try std.testing.expect(!isSingleIrcToken("alice!*@* extra"));
+    try std.testing.expect(!isSingleIrcToken("alice\nnick"));
 }
 
 test "pending UDI is discarded and bounded" {
@@ -6657,6 +6722,9 @@ test "MOTD, invite, knock, key, and ban helpers stay live" {
     try std.testing.expectEqual(BanAction.add, classifyChannelListMask("s:nick!*@*").action);
     try std.testing.expectEqualStrings("nick!*@*", channelListMaskArgument("-s:nick!*@*", .silence));
     try std.testing.expectEqual(ChannelListKind.ban, classifyChannelListMask("-someone").kind);
+    try std.testing.expect(isSingleIrcToken(channelListMaskArgument("+b:alice!*@*", .ban)));
+    try std.testing.expect(!isSingleIrcToken(channelListMaskArgument("alice!*@* extra", .ban)));
+    try std.testing.expect(!isSingleIrcToken(channelListMaskArgument("+e:alice extra!*@*", .except)));
     try std.testing.expect(silenceFilterToken("SILENCE"));
     try std.testing.expect(silenceFilterToken("ignore"));
     try std.testing.expect(!silenceFilterToken("alice"));

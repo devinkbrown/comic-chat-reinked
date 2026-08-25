@@ -129,6 +129,12 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 31 leftovers in scope
+
+- Invite/kick nicknames and ban/except/invite/kick masks reject spaces in the dialog (`INVITE`/`KICK` nick is a middle parameter and would otherwise throw `InvalidIrcParameter` out of the UI)
+- Kick reason, CREATE pending topic, and channel-properties topic/key reject control bytes; JOIN/366 `setTopic` of a leftover pending topic does not tear the session
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 30 leftovers in scope
 
 - Ban dialog `+b` / `ban` / `b:` match `+e` / `+I` (list vs add); add uses the stripped mask
