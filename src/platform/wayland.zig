@@ -1527,7 +1527,7 @@ pub const Window = struct {
                 self.pointer_y = @divTrunc(getI32(body[8..12]), 256);
             },
             4 => { // drop
-                return try self.takeDrop();
+                return self.takeDrop();
             },
             5 => { // selection
                 if (body.len != 4) return error.InvalidWaylandMessage;
@@ -1549,7 +1549,7 @@ pub const Window = struct {
         try sendAccept(&self.conn, self.gpa, offer_id, data_offer_accept, serial, mime);
     }
 
-    fn takeDrop(self: *Window) !?Event {
+    fn takeDrop(self: *Window) ?Event {
         const offer_id = self.dnd_offer_id;
         if (offer_id == 0 or !self.dnd_has_text) {
             self.clearDndOffer();
@@ -1562,7 +1562,7 @@ pub const Window = struct {
         defer self.gpa.free(bytes);
         sendEmpty(&self.conn, offer_id, data_offer_finish) catch {};
         self.clearDndOffer();
-        return try self.enqueueDropText(bytes);
+        return self.enqueueDropText(bytes) catch null;
     }
 
     fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
