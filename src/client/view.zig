@@ -302,6 +302,14 @@ pub const View = struct {
                 .end => {
                     if (self.status_panel_open) self.focused_status_action = .settings;
                 },
+                .page_up => {
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .connection;
+                },
+                .page_down => {
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .settings;
+                },
                 .escape => {
                     if (self.status_panel_open) {
                         self.closeStatusPanel();
@@ -2120,7 +2128,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
         },
         3 => switch (item) {
             0 => "Text font",
-            1 => "Text color",
+            1 => "Ink color",
             2 => "Backdrop",
             3 => "Character",
             4 => "CAST card",
@@ -2194,7 +2202,7 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             5 => "Bulletin",
             6, 7, 8 => "Room",
             9 => "Favorite",
-            else => "Window",
+            else => "Room",
         },
         5 => switch (item) {
             0 => "List",
@@ -2483,7 +2491,7 @@ fn toolbarLabel(index: u8) []const u8 {
         15 => "Open homepage",
         16 => "Send call link",
         17 => "Choose text font",
-        18 => "Choose text color",
+        18 => "Choose ink",
         19 => "Bold",
         20 => "Italic",
         21 => "Underline",
@@ -4615,6 +4623,9 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Room details", menuItemLabel(4, 3));
     try std.testing.expectEqualStrings("Open room separately", menuItemLabel(4, 10));
     try std.testing.expectEqualStrings("Look", menu_labels[3]);
+    try std.testing.expectEqualStrings("Ink color", menuItemLabel(3, 1));
+    try std.testing.expectEqualStrings("Choose ink", toolbarLabel(18));
+    try std.testing.expectEqualStrings("Room", menuItemHint(4, 10, true));
     try std.testing.expectEqualStrings("Insert symbol", toolbarLabel(23));
     try std.testing.expectEqualStrings("Sunday tool", toolbarLabel(24));
     try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
@@ -4782,6 +4793,13 @@ test "status keyboard opens the panel and activates its actions" {
     try std.testing.expectEqual(@as(?StatusActionHover, .connection), view.focused_status_action);
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
     try std.testing.expectEqual(@as(?StatusActionHover, .settings), view.focused_status_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(@as(?StatusActionHover, .connection), view.focused_status_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_down).?);
+    try std.testing.expectEqual(@as(?StatusActionHover, .settings), view.focused_status_action);
+    view.status_panel_open = false;
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.page_up));
+    view.status_panel_open = true;
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
     try std.testing.expectEqual(dialogs.Id.settings, view.active_dialog.?);
     try std.testing.expect(!view.status_panel_open);

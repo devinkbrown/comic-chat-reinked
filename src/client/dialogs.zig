@@ -116,7 +116,7 @@ pub const specs = [_]Spec{
     .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Online notifications", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule settings", .group = .automation, .source_w = 186, .source_h = 95 },
     .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Online CAST", .group = .automation, .source_w = 262, .source_h = 111 },
-    .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Server list", .group = .connection, .source_w = 252, .source_h = 218 },
+    .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Wire list", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Sign in", .group = .connection, .source_w = 198, .source_h = 127 },
     .{ .id = .create_set, .resource = "IDD_CREATESET", .title = "Create rule set", .group = .automation, .source_w = 226, .source_h = 79 },
     .{ .id = .open_conversation, .resource = "PORTABLE_OPEN_CONVERSATION", .title = "Open conversation", .group = .files, .source_w = 300, .source_h = 108 },
@@ -152,7 +152,7 @@ pub fn prompt(id: Id) ?[]const u8 {
         .kick, .ban, .invite, .whisper, .call_link, .member_profile => "CAST member",
         .away => "Away message",
         .password, .channel_password => "Password",
-        .choose_color => "Color value",
+        .choose_color => "Ink value",
         .sound => "Sound name",
         .set_text_font, .text_font => "Font name and size",
         .rename_loaded_set, .rename_set, .create_set => "Rule set name",
@@ -211,7 +211,7 @@ pub fn fields(id: Id) []const Field {
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound file", .kind = .choice }, .{ .label = "Accompanying message", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
-        .choose_color => &.{ .{ .label = "Color value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current theme color", .kind = .preview } },
+        .choose_color => &.{ .{ .label = "Ink value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current theme color", .kind = .preview } },
         .comics_view => &.{ .{ .label = "Page mode", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
         .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving CAST" }, .{ .label = "Repeat limit", .hint = "8" }, .{ .label = "Repeat window seconds", .hint = "10" } },
         .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
@@ -334,21 +334,21 @@ pub fn requiresInput(id: Id) bool {
 pub fn primaryLabel(id: Id) []const u8 {
     return switch (id) {
         .setup => "Open wire",
-        .settings => "Apply settings",
+        .settings => "Save settings",
         .servers => "Save changes",
         .personal => "Save card",
         .character => "Choose character",
         .background => "Choose backdrop",
-        .text_font, .set_text_font => "Apply font",
-        .choose_color => "Apply color",
-        .comics_view => "Apply layout",
+        .text_font, .set_text_font => "Save font",
+        .choose_color => "Save ink",
+        .comics_view => "Save layout",
         .room_list => "Join room",
         .user_list => "Select CAST",
         .channel => "Join room",
         .channel_create => "Create room",
-        .kick => "Kick",
+        .kick => "Kick CAST",
         .ban => "Save ban",
-        .invite => "Invite",
+        .invite => "Invite CAST",
         .whisper => "Whisper",
         .file_transfer => "Start transfer",
         .open_conversation => "Open",
@@ -358,14 +358,14 @@ pub fn primaryLabel(id: Id) []const u8 {
         .recent_files => "Open recent",
         .favorite_rooms => "Update favorites",
         .print_preview => "Create PDF",
-        .away => "Set away",
+        .away => "Save away",
         .automation, .rules, .edit_rule, .rule_sets, .add_to_sets, .rename_loaded_set, .rename_set, .create_set, .advanced_event_params, .advanced_rule_settings => "Save rule",
         .notifications, .notification_users => "Save notifications",
         .ircx_properties => "Save properties",
         .room_access => "Save access",
         .ircx_events => "Save events",
         .call_link => "Send call link",
-        .member_profile => "Request profile",
+        .member_profile => "Request CAST",
         .about, .motd, .connection_features => "Close",
         .nickname => "Set sign-in name",
         .password => "Sign in",
@@ -469,7 +469,14 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("CAST", choiceOptions(.ircx_events, 1)[1]);
     try std.testing.expectEqualStrings("Room, CAST, server, connection, or link", fields(.ircx_events)[1].hint);
     try std.testing.expectEqualStrings("Use %nick% for the arriving CAST", fields(.automation)[1].hint);
-    try std.testing.expectEqualStrings("Set away", primaryLabel(.away));
+    try std.testing.expectEqualStrings("Save away", primaryLabel(.away));
+    try std.testing.expectEqualStrings("Save settings", primaryLabel(.settings));
+    try std.testing.expectEqualStrings("Save ink", primaryLabel(.choose_color));
+    try std.testing.expectEqualStrings("Kick CAST", primaryLabel(.kick));
+    try std.testing.expectEqualStrings("Invite CAST", primaryLabel(.invite));
+    try std.testing.expectEqualStrings("Request CAST", primaryLabel(.member_profile));
+    try std.testing.expectEqualStrings("Wire list", get(.servers).title);
+    try std.testing.expectEqualStrings("Ink value", fields(.choose_color)[0].label);
     try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
     try std.testing.expectEqualStrings("Named properties", get(.ircx_properties).title);
     try std.testing.expectEqualStrings("Online notifications", get(.notifications).title);
@@ -484,7 +491,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Room options", fields(.channel_properties)[1].label);
     try std.testing.expectEqualStrings("CAST pane", fields(.settings)[5].label);
     try std.testing.expectEqualStrings("CAST layout", fields(.settings)[6].label);
-    try std.testing.expectEqualStrings("Server list", get(.servers).title);
+    try std.testing.expectEqualStrings("Wire list", get(.servers).title);
     try std.testing.expectEqualStrings("CAST profile", get(.member_profile).title);
     try std.testing.expectEqualStrings("Kick CAST", get(.kick).title);
     try std.testing.expectEqualStrings("Invite CAST", get(.invite).title);

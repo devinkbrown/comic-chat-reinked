@@ -1984,7 +1984,7 @@ fn handleWindowEvent(
                     .child_window => child: {
                         spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                             view.openDialog(.channel);
-                            view.setDialogNotice("A separate room window could not be started.");
+                            view.setDialogNotice("The room could not be opened separately.");
                         };
                         break :child true;
                     },
@@ -2089,7 +2089,7 @@ fn handleWindowEvent(
                 .child_window => child: {
                     spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                         view.openDialog(.channel);
-                        view.setDialogNotice("A separate room window could not be started.");
+                        view.setDialogNotice("The room could not be opened separately.");
                     };
                     break :child true;
                 },
