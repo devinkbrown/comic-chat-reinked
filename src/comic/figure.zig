@@ -565,7 +565,59 @@ fn largestPaperInkRun(image: Image) ?Bounds {
         }
     }
     if (min_y >= max_y) return paperInkBounds(image);
-    return .{ .x = best_x0, .y = min_y, .w = best_x1 - best_x0, .h = max_y - min_y };
+
+    // A wrap sliver can sit in the same columns as the figure, far below the
+    // heels. Keep the tallest y-band and allow a 2-row hole so a shoe strap
+    // is not split off.
+    var best_y0 = min_y;
+    var best_y1 = min_y;
+    var y = min_y;
+    while (y < max_y) {
+        var has_ink = false;
+        var col = best_x0;
+        while (col < best_x1) : (col += 1) {
+            if (paperInkPixel(image, col, y)) {
+                has_ink = true;
+                break;
+            }
+        }
+        if (!has_ink) {
+            y += 1;
+            continue;
+        }
+        var y1 = y + 1;
+        var empty: u32 = 0;
+        while (y1 < max_y) {
+            var row_ink = false;
+            col = best_x0;
+            while (col < best_x1) : (col += 1) {
+                if (paperInkPixel(image, col, y1)) {
+                    row_ink = true;
+                    break;
+                }
+            }
+            if (row_ink) {
+                empty = 0;
+                y1 += 1;
+                continue;
+            }
+            empty += 1;
+            if (empty > 2) {
+                y1 -= empty;
+                break;
+            }
+            y1 += 1;
+        }
+        if (y1 > max_y) y1 = max_y;
+        if (empty > 0 and y1 + empty <= max_y) y1 -= empty;
+        if (y1 - y > best_y1 - best_y0) {
+            best_y0 = y;
+            best_y1 = y1;
+        }
+        y = y1 + 1;
+    }
+    if (best_y1 <= best_y0) return .{ .x = best_x0, .y = min_y, .w = best_x1 - best_x0, .h = max_y - min_y };
+    return .{ .x = best_x0, .y = best_y0, .w = best_x1 - best_x0, .h = best_y1 - best_y0 };
 }
 
 /// Packager `normalize_pose` keeps 12px of paper around the silhouette. Grow
@@ -1359,6 +1411,11 @@ test "Color default-cast cards are standing silhouettes with local color" {
         try std.testing.expect(assembled.image.height >= 140);
         try std.testing.expect(assembled.image.height + 20 > assembled.image.width);
         const ink = paperInkBounds(assembled.image) orelse return error.TestUnexpectedResult;
+        const run = largestPaperInkRun(assembled.image) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(ink.x, run.x);
+        try std.testing.expectEqual(ink.w, run.w);
+        try std.testing.expectEqual(ink.y, run.y);
+        try std.testing.expectEqual(ink.h, run.h);
         try std.testing.expect(ink.h * 5 >= assembled.image.height * 3);
         const band = @max(@as(u32, 4), ink.h / 10);
         var top_edge: usize = 0;
