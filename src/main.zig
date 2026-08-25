@@ -4357,7 +4357,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             },
             .ircx_events => {
                 try view.setDialogValueAt(0, "Show");
-                try view.setDialogValueAt(1, "Room");
+                try view.setDialogValueAt(1, "CAST");
             },
             .connection_features => {
                 try view.setDialogValueAt(0, "Offline");
