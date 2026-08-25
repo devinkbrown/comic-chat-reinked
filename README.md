@@ -286,7 +286,7 @@ commits behind `wl_surface.frame`, copies through
 `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
 decode including receive-only `text/plain;charset=utf-16`, `text/html`,
 `text/rtf`, `text/x-uri-list`, receive-only `COMPOUND_TEXT` (including ISO-8859-15 `ESC - b`, ISO-8859-5 `ESC - L`, ISO-8859-7 `ESC - F`, ISO-8859-3 `ESC - C`, ISO-8859-4 `ESC - D`, ISO-8859-6 `ESC - G`, ISO-8859-8 `ESC - H`), receive-only
-ISO-8859-1/2/3/4/5/6/7/8/9/13/15 and Windows-1250/1251/1252/1253/1254/1255/1256/1257 charset MIME and Markdown, and
+ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R charset MIME and Markdown, and
 desktop file-list MIME including KDE5 / Mozilla-priv / KDE suggested-filename, and CR/LF
 normalized to LF; invalid UTF-8 bytes decode as Latin-1), skips `present()` while suspended and exposes when leaving
 that state or gaining activated, disables text-input when not activated, pastes PRIMARY on
@@ -309,7 +309,7 @@ per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT` / ISO-8859-1/2/3/4/5/6/7/8/9/13/15 / Windows-1250/1251/1252/1253/1254/1255/1256/1257 / Markdown, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla/KDE suggested-filename), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
+`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT` / ISO-8859-1/2/3/4/5/6/7/8/9/13/15 / Windows-1250/1251/1252/1253/1254/1255/1256/1257 / KOI8-R / Markdown, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla/KDE suggested-filename), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
 TARGETS list and sending a user ConvertSelection timestamp; invalid UTF-8 paste decodes as Latin-1), accepts XDND text/`file:`
 drops as typed keys (TARGETS-first, drop timestamp, Position hover via TranslateCoordinates, Leave emits `.up` for a held button then clears hover; Latin-1 drop bytes decode to UTF-8), ignores extra mouse buttons 6–9 and wheel releases, ignores grab/ungrab Enter/Leave and pointer-only FocusIn/Out, pastes PRIMARY on
 middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste does not read PRIMARY and uses local text only while we own CLIPBOARD), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden/shaded and
@@ -320,7 +320,7 @@ installs a scaled core pointer, `_NET_WM_ICON` at 16/32/64/128, and an ICCCM `WM
 `notify` until FocusIn or `_NET_WM_STATE_FOCUSED` (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
 present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
 `_NET_WM_USER_TIME`, `_NET_STARTUP_ID` plus a startup-notification remove
-after map, an outgoing `DESKTOP_STARTUP_ID` for `xdg-open`, EnterNotify cursor restore and pointer move, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
+after map, an outgoing `DESKTOP_STARTUP_ID` for `xdg-open`, EnterNotify cursor restore and pointer move (Button1/Button3 already down emit `.down` then queue the hover), `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
 replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,

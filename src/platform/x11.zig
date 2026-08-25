@@ -33,7 +33,7 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, and Markdown MIME,
+//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear (a held button emits `.up` first),
@@ -48,7 +48,8 @@
 //!     `_NET_WM_USER_TIME_WINDOW`) /startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
 //!     for `xdg-open`, EnterNotify cursor restore and pointer move
-//!     (grab/ungrab and pointer-focus details ignored), wheel releases ignored,
+//!     (Button1/Button3 already down emit `.down` then queue the hover;
+//!     grab/ungrab and pointer-focus details ignored), wheel releases ignored,
 //!     XSETTINGS owner re-watch after DestroyNotify (that owner does not close
 //!     the chat),
 //!     allowed actions,
@@ -76,6 +77,8 @@ const event_enter_window: u32 = 1 << 4;
 const event_leave_window: u32 = 1 << 5;
 const notify_mode_grab: u8 = 1;
 const notify_mode_ungrab: u8 = 2;
+const x11_button1_mask: u16 = 0x100;
+const x11_button3_mask: u16 = 0x400;
 const notify_detail_pointer: u8 = 7;
 const notify_detail_pointer_root: u8 = 8;
 const event_pointer_motion: u32 = 1 << 6;
@@ -240,6 +243,9 @@ const XConn = struct {
     mime_text_cp1256_alt: u32 = 0,
     mime_text_cp1257: u32 = 0,
     mime_text_cp1257_alt: u32 = 0,
+    mime_text_koi8r: u32 = 0,
+    mime_text_koi8r_alt: u32 = 0,
+    koi8r: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -865,11 +871,19 @@ pub const Window = struct {
                 if (self.cursor_id != 0) defineCursor(&self.conn, self.window, self.cursor_id) catch {};
                 const raw_x: i32 = @as(i16, @bitCast(get16(event[24..26])));
                 const raw_y: i32 = @as(i16, @bitCast(get16(event[26..28])));
-                return .{ .pointer = .{
-                    .kind = .move,
-                    .x = physicalPointToLogical(raw_x, self.scale),
-                    .y = physicalPointToLogical(raw_y, self.scale),
-                } };
+                const x = physicalPointToLogical(raw_x, self.scale);
+                const y = physicalPointToLogical(raw_y, self.scale);
+                const state = get16(event[28..30]);
+                const held = shared_event.pointerEnterHeldButton(
+                    state & x11_button1_mask != 0,
+                    state & x11_button3_mask != 0,
+                    self.held_primary,
+                    self.held_secondary,
+                );
+                if (held != .none) self.noteHeldButton(held, true);
+                const sequence = shared_event.pointerEnterSequence(held, x, y);
+                self.pending_pointer = sequence.queued;
+                return sequence.first;
             },
             8 => { // LeaveNotify
                 if (x11NotifyModeIsGrab(event[30])) return .other;
@@ -1183,6 +1197,9 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1256_alt, "windows-1256")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1257, "windows-1257")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1257_alt, "windows-1257")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_koi8r, "KOI8-R")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_koi8r_alt, "KOI8-R")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.koi8r, "KOI8-R")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1349,6 +1366,11 @@ pub const Window = struct {
         }
         if (isCp1257Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1257") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isKoi8rAtom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "KOI8-R") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
@@ -3027,6 +3049,9 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_cp1256_alt = try internAtom(conn, "text/plain;charset=cp1256");
     conn.mime_text_cp1257 = try internAtom(conn, "text/plain;charset=windows-1257");
     conn.mime_text_cp1257_alt = try internAtom(conn, "text/plain;charset=cp1257");
+    conn.mime_text_koi8r = try internAtom(conn, "text/plain;charset=KOI8-R");
+    conn.mime_text_koi8r_alt = try internAtom(conn, "text/plain;charset=koi8-r");
+    conn.koi8r = try internAtom(conn, "KOI8-R");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3761,7 +3786,8 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
         isCyrillicAtom(conn, atom) or isGreekAtom(conn, atom) or isLatin3Atom(conn, atom) or isLatin4Atom(conn, atom) or
         isArabicAtom(conn, atom) or isHebrewAtom(conn, atom) or isCp1252Atom(conn, atom) or isCp1251Atom(conn, atom) or
         isCp1250Atom(conn, atom) or isLatin7Atom(conn, atom) or isCp1253Atom(conn, atom) or isCp1254Atom(conn, atom) or
-        isCp1255Atom(conn, atom) or isCp1256Atom(conn, atom) or isCp1257Atom(conn, atom)) return 3;
+        isCp1255Atom(conn, atom) or isCp1256Atom(conn, atom) or isCp1257Atom(conn, atom) or
+        isKoi8rAtom(conn, atom)) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3856,6 +3882,10 @@ fn isCp1257Atom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_cp1257 or atom == conn.mime_text_cp1257_alt);
 }
 
+fn isKoi8rAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_koi8r or atom == conn.mime_text_koi8r_alt or atom == conn.koi8r);
+}
+
 fn x11NotifyModeIsGrab(mode: u8) bool {
     return mode == notify_mode_grab or mode == notify_mode_ungrab;
 }
@@ -3905,7 +3935,8 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         isCp1250Atom(conn, target) or isLatin7Atom(conn, target) or
         isCp1253Atom(conn, target) or isCp1254Atom(conn, target) or
         isCp1255Atom(conn, target) or isCp1256Atom(conn, target) or
-        isCp1257Atom(conn, target) or isMarkdownAtom(conn, target);
+        isCp1257Atom(conn, target) or isKoi8rAtom(conn, target) or
+        isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -4250,6 +4281,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_cp1256_alt = 160,
         .mime_text_cp1257 = 161,
         .mime_text_cp1257_alt = 162,
+        .mime_text_koi8r = 163,
+        .mime_text_koi8r_alt = 164,
+        .koi8r = 165,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -4354,6 +4388,12 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 151));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 155));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 161));
+    try std.testing.expect(isKoi8rAtom(&conn, 163));
+    try std.testing.expect(isKoi8rAtom(&conn, 165));
+    try std.testing.expect(isClipboardTextTarget(&conn, 163));
+    try std.testing.expect(isClipboardTextTarget(&conn, 165));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 163));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 165));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));

@@ -42,7 +42,7 @@
 //! tracks the seat; a held button emits `.up` before the `(-1,-1)` clear.
 //! NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
 //! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
-//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/13/15 and Windows-1250/1251/1252/1253/1254/1255/1256/1257 `text/plain` charset MIME,
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R `text/plain` charset MIME,
 //! Markdown, and extra KDE5/Mozilla-priv/KDE suggested-filename file MIME are accepted.
 //! `present()` skips
 //! commits while the toplevel is suspended; leaving suspended or gaining
@@ -280,6 +280,10 @@ const latin_mime_types = [_][]const u8{
     "text/plain;charset=cp1256",
     "text/plain;charset=windows-1257",
     "text/plain;charset=cp1257",
+    "text/plain;charset=KOI8-R",
+    "text/plain;charset=koi8-r",
+    "text/plain;charset=koi8r",
+    "KOI8-R",
 };
 
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
@@ -3760,6 +3764,8 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1255"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1256"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=windows-1257"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=KOI8-R"));
+    try std.testing.expect(isPlainTextMime("KOI8-R"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-8"));
     try std.testing.expect(isPlainTextMime("text/markdown"));
     try std.testing.expect(isPlainTextMime("text/x-markdown"));

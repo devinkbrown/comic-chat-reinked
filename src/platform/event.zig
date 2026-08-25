@@ -85,6 +85,24 @@ pub fn pointerLeaveSequence(held: PointerButton) struct { first: Event, queued: 
     };
 }
 
+/// X11 EnterNotify Button1/Button3 already down. Never synthesize middle:
+/// that would surprise-paste PRIMARY.
+pub fn pointerEnterHeldButton(button1: bool, button3: bool, held_primary: bool, held_secondary: bool) PointerButton {
+    if (button1 and !held_primary) return .primary;
+    if (button3 and !held_secondary) return .secondary;
+    return .none;
+}
+
+/// EnterNotify with a button already down: emit `.down`, then queue the hover move.
+pub fn pointerEnterSequence(held: PointerButton, x: i32, y: i32) struct { first: Event, queued: ?Event } {
+    const move: Event = .{ .pointer = .{ .kind = .move, .x = x, .y = y } };
+    if (held == .none) return .{ .first = move, .queued = null };
+    return .{
+        .first = .{ .pointer = .{ .kind = .down, .x = x, .y = y, .button = held } },
+        .queued = move,
+    };
+}
+
 test "key input preserves the logical modifier contract" {
     const event: Event = .{ .key = .{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } } };
     try std.testing.expect(event.key.modifiers.control);
@@ -103,4 +121,20 @@ test "pointer leave releases a held button before clearing hover" {
     const idle = pointerLeaveSequence(.none);
     try std.testing.expectEqual(PointerKind.move, idle.first.pointer.kind);
     try std.testing.expectEqual(@as(?Event, null), idle.queued);
+}
+
+test "pointer enter synthesizes primary or secondary down then queues the hover move" {
+    try std.testing.expectEqual(PointerButton.primary, pointerEnterHeldButton(true, true, false, false));
+    try std.testing.expectEqual(PointerButton.secondary, pointerEnterHeldButton(false, true, false, false));
+    try std.testing.expectEqual(PointerButton.none, pointerEnterHeldButton(true, false, true, false));
+    try std.testing.expectEqual(PointerButton.none, pointerEnterHeldButton(false, false, false, false));
+    const drag = pointerEnterSequence(.primary, 12, 34);
+    try std.testing.expectEqual(PointerKind.down, drag.first.pointer.kind);
+    try std.testing.expectEqual(PointerButton.primary, drag.first.pointer.button);
+    try std.testing.expectEqual(@as(i32, 12), drag.first.pointer.x);
+    try std.testing.expectEqual(PointerKind.move, drag.queued.?.pointer.kind);
+    try std.testing.expectEqual(@as(i32, 12), drag.queued.?.pointer.x);
+    const hover = pointerEnterSequence(.none, 8, 9);
+    try std.testing.expectEqual(PointerKind.move, hover.first.pointer.kind);
+    try std.testing.expectEqual(@as(?Event, null), hover.queued);
 }

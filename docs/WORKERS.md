@@ -116,7 +116,9 @@ hash.
   arrives.   Pointer leave and incoming DnD motion emit pointer moves so
   hover tracks the seat; LeaveNotify / `wl_pointer.leave` emit `.up` for a
   held button before `(-1,-1)`, and XdndLeave
-  moves to `(-1,-1)` to clear hover. X11 Enter/Leave ignore grab/ungrab
+  moves to `(-1,-1)` to clear hover. X11 EnterNotify with Button1 or Button3
+  already down emits `.down` then queues the hover move (middle is not
+  synthesized). X11 Enter/Leave ignore grab/ungrab
   modes, and FocusIn/Out ignore grab/ungrab plus pointer-focus details.
   X11 wheel button releases do not emit pointer up. NumLock XOR Shift selects keypad
   digits on both backends. X11 Mod3 Mode_switch selects group 2.
@@ -125,8 +127,8 @@ hash.
   ISO-8859-15, `ESC - M` ISO-8859-9, `ESC - L` ISO-8859-5, `ESC - F`
   ISO-8859-7, `ESC - G` ISO-8859-6, and `ESC - H` ISO-8859-8. Invalid UTF-8 clipboard bytes
   decode as Latin-1, including incoming DnD and Shift+Insert / middle-click
-  paste-as-keys. Receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15 and Windows-1250/1251/1252/1253/1254/1255/1256/1257 `text/plain` charset MIME
-  (both common casings on X11) and Markdown decode to UTF-8. X11 extra
+  paste-as-keys. Receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, and KOI8-R `text/plain` charset MIME
+  (both common casings on X11, plus the bare `KOI8-R` target) and Markdown decode to UTF-8. X11 extra
   mouse buttons 6–9 do not synthesize pointer clicks. Extra KDE5 / Mozilla-priv / KDE suggested-filename file MIME yields a local
   path. Receive-only `text/html` strips tags to plain text.
   Clipboard text normalizes
