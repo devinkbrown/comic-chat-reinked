@@ -3662,6 +3662,10 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isUriListAtom(&conn, 116));
     try std.testing.expect(isRtfAtom(&conn, 117));
     try std.testing.expect(isLatin1Atom(&conn, 122));
+    try std.testing.expect(isLatin9Atom(&conn, 124));
+    try std.testing.expect(isLatin9Atom(&conn, 128));
+    try std.testing.expect(isLatin2Atom(&conn, 127));
+    try std.testing.expect(isLatin2Atom(&conn, 129));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expectEqual(@as(u32, 1 << 5), event_leave_window);
     const xdnd = xdndRootPoint((@as(u32, 120) << 16) | 80);

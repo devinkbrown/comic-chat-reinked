@@ -117,8 +117,10 @@ hash.
   digits on both backends. X11 Mod3 Mode_switch selects group 2.
   Receive-only `COMPOUND_TEXT` decodes to UTF-8, including `ESC - B`
   ISO-8859-2 and `ESC - b` ISO-8859-15. Invalid UTF-8 clipboard bytes
-  decode as Latin-1. Receive-only ISO-8859-1/2/15 `text/plain` charset
-  MIME and Markdown decode to UTF-8. Extra KDE5 / Mozilla-priv file MIME yields a local
+  decode as Latin-1, including incoming DnD and Shift+Insert / middle-click
+  paste-as-keys. Receive-only ISO-8859-1/2/15 `text/plain` charset MIME
+  (both common casings on X11) and Markdown decode to UTF-8. X11 extra
+  mouse buttons 6–9 do not synthesize pointer clicks. Extra KDE5 / Mozilla-priv file MIME yields a local
   path. Receive-only `text/html` strips tags to plain text.
   Clipboard text normalizes
   CR/LF to LF. `notify-send` uses `--urgency=normal` and
