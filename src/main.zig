@@ -4355,6 +4355,12 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
                 try view.setDialogValueAt(0, "List");
                 try view.setDialogValueAt(1, "Room");
             },
+            .connection_features => {
+                try view.setDialogValueAt(0, "Offline");
+                try view.setDialogValueAt(1, "Offline");
+                try view.setDialogValueAt(2, "Not enabled");
+                try view.setDialogValueAt(3, "Waiting on the wire");
+            },
             .file_transfer => {
                 try view.setDialogValueAt(0, "Receive offer");
                 try view.setDialogValueAt(1, "alex");
