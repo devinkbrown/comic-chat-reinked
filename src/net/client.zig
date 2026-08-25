@@ -375,6 +375,7 @@ pub const Client = struct {
     sts_upgrade_port: ?u16 = null,
     typing_targets: std.ArrayList(TypingTarget) = .empty,
     restoration: ?policy.Restoration = null,
+    quit_requested: bool = false,
     rx: [8192]u8 = undefined,
 
     pub fn connect(gpa: std.mem.Allocator, host: []const u8, port: u16) !Client {
@@ -551,6 +552,7 @@ pub const Client = struct {
     }
 
     pub fn quit(self: *Client, reason: []const u8) !void {
+        self.quit_requested = true;
         if (reason.len == 0)
             try self.appendCommand("QUIT", &.{})
         else {
@@ -1095,9 +1097,17 @@ pub const Client = struct {
         if (self.features) |*state| try state.recordEcho(target, text);
     }
 
+    pub fn ctcpRequest(self: *Client, target: []const u8, command: []const u8, payload: ?[]const u8) !void {
+        return self.sendCtcp(.privmsg, target, command, payload);
+    }
+
     /// Emit the NOTICE form used by Microsoft's CTCP information replies.
     /// A non-null empty payload intentionally retains the separating space.
     pub fn ctcpReply(self: *Client, target: []const u8, command: []const u8, payload: ?[]const u8) !void {
+        return self.sendCtcp(.notice, target, command, payload);
+    }
+
+    fn sendCtcp(self: *Client, kind: enum { privmsg, notice }, target: []const u8, command: []const u8, payload: ?[]const u8) !void {
         if (command.len == 0 or std.mem.indexOfAny(u8, command, " \r\n\x00\x01") != null)
             return error.InvalidIrcParameter;
         var wire: std.ArrayList(u8) = .empty;
@@ -1111,7 +1121,10 @@ pub const Client = struct {
             try wire.appendSlice(self.gpa, value);
         }
         try wire.append(self.gpa, 0x01);
-        return self.notice(target, wire.items);
+        return switch (kind) {
+            .privmsg => self.privmsg(target, wire.items),
+            .notice => self.notice(target, wire.items),
+        };
     }
 
     pub fn sendCallLink(self: *Client, target: []const u8, link: []const u8) !void {
@@ -3174,6 +3187,8 @@ test "advertised ACCOUNTEXTBAN, CHATHISTORY, EXCEPTS, and UTF-8 stay live" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ISON alice :bob") != null);
     try client.partReason("#root", "later");
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PART #root :later") != null);
+    try client.ctcpRequest("alice", "VERSION", null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PRIVMSG alice :\x01VERSION\x01") != null);
     try client.setException("#root", "alice!*@*");
     try client.setInviteMask("#root", "bob!*@*");
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 2].bytes, "MODE #root +x alice!*@*") != null);

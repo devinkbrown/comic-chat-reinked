@@ -1823,6 +1823,7 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
 
 fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
     const connected = client orelse return;
+    if (connected.quit_requested) return;
     connected.quit("Comic Chat") catch {};
 }
 
@@ -3987,6 +3988,91 @@ test "comic view choices remain bounded and roster selection ignores departed us
     try std.testing.expect(selectRosterMember(&transcript, "alice") == null);
 }
 
+fn composerSlashVerb(text: []const u8) ?[]const u8 {
+    if (text.len < 2 or text[0] != '/') return null;
+    const body = text[1..];
+    const split = std.mem.indexOfScalar(u8, body, ' ') orelse body.len;
+    if (split == 0) return null;
+    return body[0..split];
+}
+
+fn composerSlashIs(text: []const u8, verb: []const u8) bool {
+    const name = composerSlashVerb(text) orelse return false;
+    return std.ascii.eqlIgnoreCase(name, verb);
+}
+
+fn composerSlashRest(text: []const u8) []const u8 {
+    const name = composerSlashVerb(text) orelse return "";
+    if (text.len <= 1 + name.len) return "";
+    return std.mem.trim(u8, text[1 + name.len ..], " \t");
+}
+
+const JoinSlash = struct { channel: []const u8, key: []const u8 };
+
+fn parseJoinSlash(text: []const u8) ?JoinSlash {
+    if (!composerSlashIs(text, "join")) return null;
+    const rest = composerSlashRest(text);
+    if (rest.len == 0) return .{ .channel = "", .key = "" };
+    const split = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    return .{ .channel = rest[0..split], .key = std.mem.trim(u8, rest[split..], " \t") };
+}
+
+fn sendCreateSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    gpa: std.mem.Allocator,
+    text: []const u8,
+) !bool {
+    const rest = composerSlashRest(text);
+    var words: [4][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.tokenizeAny(u8, rest, " \t");
+    while (it.next()) |word| {
+        if (count == words.len) break;
+        words[count] = word;
+        count += 1;
+    }
+    if (count == 0) {
+        try appendSessionNotice(workspace, "Usage: /create <#channel> [modes] [limit] [key]");
+        return true;
+    }
+    var modes: []const u8 = "";
+    var limit: []const u8 = "";
+    var key: []const u8 = "";
+    var index: usize = 1;
+    if (index < count and (words[index][0] == '+' or words[index][0] == '-')) {
+        modes = words[index];
+        index += 1;
+    }
+    if (index < count and isPositiveCount(words[index])) {
+        limit = words[index];
+        index += 1;
+    }
+    if (index < count) key = words[index];
+    if (modes.len != 0 and std.mem.indexOfAny(u8, modes, " \r\n\x00") != null) {
+        try appendSessionNotice(workspace, "Enter modes as one token, for example +nt.");
+        return true;
+    }
+    const room_index = workspace.ensure(words[0]) catch |err| {
+        try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+        return true;
+    };
+    _ = workspace.activate(room_index);
+    workspace.rooms.items[room_index].setWantRejoin(true);
+    if (maybe_client) |client| {
+        if (try requestCreateRoom(client, workspace, words[0], modes, limit, key)) |notice| {
+            workspace.rooms.items[room_index].setWantRejoin(false);
+            try appendSessionNotice(workspace, notice);
+            return true;
+        }
+        try workspace.rooms.items[room_index].setJoinKey(gpa, key);
+        if (key.len != 0) client.setRestorationKey(words[0], key);
+    } else if (key.len != 0) {
+        try workspace.rooms.items[room_index].setJoinKey(gpa, key);
+    }
+    return true;
+}
+
 fn handleWorkspaceInputKey(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -4012,16 +4098,25 @@ fn handleWorkspaceInputKey(
             }
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/save ")) {
-            const path = std.mem.trim(u8, text[6..], " \t");
+        if (composerSlashIs(text, "quit")) {
+            const reason = composerSlashRest(text);
+            if (maybe_client) |client| {
+                client.quit(if (reason.len == 0) "Comic Chat" else reason) catch {};
+            }
+            const consumed = try editor.take();
+            gpa.free(consumed);
+            return false;
+        }
+        if (composerSlashIs(text, "save")) {
+            const path = composerSlashRest(text);
             const room = workspace.activeRoom() orelse return true;
             cc.client.files.saveConversation(io, gpa, path, &room.transcript) catch return true;
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/open ")) {
-            const path = std.mem.trim(u8, text[6..], " \t");
+        if (composerSlashIs(text, "open")) {
+            const path = composerSlashRest(text);
             var loaded = cc.client.files.loadConversation(io, gpa, path) catch return true;
             errdefer loaded.deinit();
             try loaded.setSelf(nick);
@@ -4033,8 +4128,8 @@ fn handleWorkspaceInputKey(
             view.jumpLatest();
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/export ")) {
-            const path = std.mem.trim(u8, text[8..], " \t");
+        if (composerSlashIs(text, "export")) {
+            const path = composerSlashRest(text);
             const png = cc.render.png.encode(gpa, view.pixels(), view.width(), view.height()) catch return true;
             defer gpa.free(png);
             cc.client.files.saveBytesAtomic(io, gpa, path, png) catch return true;
@@ -4047,9 +4142,15 @@ fn handleWorkspaceInputKey(
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/join ")) {
-            const name = std.mem.trim(u8, text[6..], " \t");
-            const index = workspace.ensure(name) catch |err| {
+        if (composerSlashIs(text, "join")) {
+            const parsed = parseJoinSlash(text).?;
+            if (parsed.channel.len == 0) {
+                try appendSessionNotice(workspace, "Usage: /join <#channel> [key]");
+                const consumed = try editor.take();
+                gpa.free(consumed);
+                return true;
+            }
+            const index = workspace.ensure(parsed.channel) catch |err| {
                 try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
                 const consumed = try editor.take();
                 gpa.free(consumed);
@@ -4057,25 +4158,38 @@ fn handleWorkspaceInputKey(
             };
             _ = workspace.activate(index);
             workspace.rooms.items[index].setWantRejoin(true);
+            const join_key = if (parsed.key.len != 0) parsed.key else workspace.rooms.items[index].join_key orelse "";
             if (maybe_client) |client| {
-                if (try requestJoinWithKey(client, workspace, name, workspace.rooms.items[index].join_key orelse "")) |notice| {
+                if (try requestJoinWithKey(client, workspace, parsed.channel, join_key)) |notice| {
                     workspace.rooms.items[index].setWantRejoin(false);
                     try appendSessionNotice(workspace, notice);
+                } else if (parsed.key.len != 0) {
+                    try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
+                    client.setRestorationKey(parsed.channel, parsed.key);
                 }
+            } else if (parsed.key.len != 0) {
+                try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
             }
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.startsWith(u8, text, "/switch ")) {
-            const name = std.mem.trim(u8, text[8..], " \t");
+        if (composerSlashIs(text, "create")) {
+            if (try sendCreateSlash(maybe_client, workspace, gpa, text)) {
+                const consumed = try editor.take();
+                gpa.free(consumed);
+                return true;
+            }
+        }
+        if (composerSlashIs(text, "switch")) {
+            const name = composerSlashRest(text);
             if (workspace.find(name)) |index| _ = workspace.activate(index);
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
         }
-        if (std.mem.eql(u8, text, "/part") or std.mem.startsWith(u8, text, "/part ")) {
-            const rest = if (text.len > 6) std.mem.trim(u8, text[6..], " \t") else "";
+        if (composerSlashIs(text, "part")) {
+            const rest = composerSlashRest(text);
             const first_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
             const first = rest[0..first_end];
             const named_room = first.len != 0 and cc.net.irc_map.isChannelName(workspace.chantypes, first);
@@ -5211,6 +5325,46 @@ fn sendOnyxServiceSlash(
         };
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "rename")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /rename [#old] <#new> [reason]");
+            return true;
+        }
+        const second_is_chan = count > 1 and cc.net.irc_map.isChannelName(workspace.chantypes, words[1]);
+        const old_name = if (second_is_chan) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Rename needs a room.");
+            return true;
+        };
+        const new_name = if (second_is_chan) words[1] else words[0];
+        const reason_start = if (second_is_chan) words[0].len + 1 + words[1].len else words[0].len;
+        const reason = if (rest.len > reason_start) std.mem.trim(u8, rest[reason_start..], " \t") else "";
+        client.renameChannel(old_name, new_name, if (reason.len == 0) null else reason) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "ctcp") or std.ascii.eqlIgnoreCase(verb, "ping")) {
+        if (std.ascii.eqlIgnoreCase(verb, "ping") and count == 0) {
+            client.sendService("PING", &.{"reinked"}) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (count == 0 or (std.ascii.eqlIgnoreCase(verb, "ctcp") and count < 2)) {
+            try appendSessionNotice(workspace, "Usage: /ctcp <target> <command> [payload]");
+            return true;
+        }
+        const command = if (std.ascii.eqlIgnoreCase(verb, "ping")) "PING" else words[1];
+        const payload_start = if (std.ascii.eqlIgnoreCase(verb, "ping")) words[0].len else words[0].len + 1 + words[1].len;
+        const payload = if (rest.len > payload_start) std.mem.trim(u8, rest[payload_start..], " \t") else "";
+        client.ctcpRequest(words[0], command, if (payload.len == 0) null else payload) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
     if (!isOnyxServiceSlash(verb)) return false;
     var command_buf: [16]u8 = undefined;
     if (verb.len > command_buf.len) return false;
@@ -5235,7 +5389,7 @@ fn isOnyxQuerySlash(verb: []const u8) bool {
         "whois", "whowas", "who",     "whox",    "ison",  "userhost",
         "motd",  "version", "time",   "admin",   "info",  "lusers",
         "commands", "names", "list",  "msg",     "notice", "nick",
-        "topic", "invite", "mode", "kick",
+        "topic", "invite", "mode", "kick", "rename", "ctcp", "ping",
     };
     inline for (names) |name| {
         if (std.ascii.eqlIgnoreCase(verb, name)) return true;
@@ -6475,7 +6629,13 @@ fn handleInputKey(
             if (editor.text().len == 0) return true;
             const line = try editor.take();
             defer gpa.free(line);
-            if (std.mem.eql(u8, line, "/quit")) return false;
+            if (composerSlashIs(line, "quit")) {
+                const reason = composerSlashRest(line);
+                if (maybe_client) |client| {
+                    client.quit(if (reason.len == 0) "Comic Chat" else reason) catch {};
+                }
+                return false;
+            }
             if (std.mem.eql(u8, line, "/clear")) {
                 transcript.trimTo(0);
                 view.jumpLatest();
@@ -7160,6 +7320,15 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("invite"));
     try std.testing.expect(isOnyxServiceSlash("mode"));
     try std.testing.expect(isOnyxServiceSlash("kick"));
+    try std.testing.expect(isOnyxServiceSlash("rename"));
+    try std.testing.expect(isOnyxServiceSlash("ctcp"));
+    try std.testing.expect(isOnyxServiceSlash("ping"));
+    try std.testing.expect(composerSlashIs("/JOIN #locked secret", "join"));
+    try std.testing.expect(composerSlashIs("/QUIT later", "quit"));
+    try std.testing.expect(composerSlashIs("/Create #room", "create"));
+    try std.testing.expectEqualStrings("#locked", parseJoinSlash("/JOIN #locked secret").?.channel);
+    try std.testing.expectEqualStrings("secret", parseJoinSlash("/join #locked secret").?.key);
+    try std.testing.expectEqualStrings("", parseJoinSlash("/join").?.channel);
     try std.testing.expect(!isOnyxServiceReply("WHOIS"));
     try std.testing.expect(!isOnyxServiceReply("MOTD"));
     try std.testing.expect(!isOnyxServiceSlash("users"));
@@ -7753,6 +7922,17 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +o alice") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/kick alice later"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KICK #root alice :later") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/rename #new later"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "RENAME #root #new :later") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ctcp alice VERSION"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PRIVMSG alice :\x01VERSION\x01") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ping alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PRIVMSG alice :\x01PING\x01") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ping"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PING") != null);
+    try std.testing.expect(try sendCreateSlash(&client, &workspace, gpa, "/create #made +nt 20 secret"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CREATE #made +nt 20 secret") != null);
+    try std.testing.expect(workspace.find("#made") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
     try std.testing.expect(!client.projectsSessionChannels());
 

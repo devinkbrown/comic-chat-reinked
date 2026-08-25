@@ -159,6 +159,14 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 37 leftovers in scope
+
+- `/join #channel key` stores the key and JOINs; `/JOIN` is case-insensitive
+- `/quit [reason]` quits instead of becoming comic speech
+- `/create`, `/rename`, `/ctcp`, and `/ping` stay on the wire
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 33 leftovers in scope
 
 - Server NOTICE/NOTE without a user prefix stay as Server lines (SESSION TOKEN,
