@@ -4177,7 +4177,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
         301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
         322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
         710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733, 734 => true,
-        801...819, 824, 825, 900...908 => true,
+        801...819, 824, 825, 900...905, 907, 908 => true,
         else => false,
     };
 }
@@ -4443,7 +4443,8 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "919") or
         std.mem.eql(u8, command, "923") or
         std.mem.eql(u8, command, "924") or
-        std.mem.eql(u8, command, "925");
+        std.mem.eql(u8, command, "925") or
+        std.mem.eql(u8, command, "906");
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
@@ -6244,6 +6245,9 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isCommandFailureNumeric("918"));
     try std.testing.expect(isCommandFailureNumeric("923"));
     try std.testing.expect(isCommandFailureNumeric("925"));
+    try std.testing.expect(isCommandFailureNumeric("906"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("906"));
+    try std.testing.expect(isVisibleServerWorkflowReply("904"));
     try std.testing.expect(!isVisibleServerWorkflowReply("913"));
     try std.testing.expect(!isVisibleServerWorkflowReply("923"));
     try std.testing.expect(isVisibleServerWorkflowReply("804"));

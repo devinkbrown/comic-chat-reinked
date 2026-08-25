@@ -129,6 +129,11 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 24 leftovers in scope
+
+- IRCX properties `906` BADVALUE is a command failure, not a raw 900–908 workflow dump
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 23 leftovers in scope
 
 - `403` NOSUCHCHANNEL is a join denial only before the room is seated; Ban/Kick/Invite/send `403` on a joined room is a command failure and keeps `want_rejoin`
