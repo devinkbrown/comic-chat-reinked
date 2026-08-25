@@ -122,6 +122,12 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Retarget last-key and last-invite hints when 470 forwards a room
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 19 leftovers in scope
+
+- Notification Join room, `/join`, and automation Join room reuse the stored key and set `want_rejoin`
+- Inbound `RENAME` retargets last-key/last-invite hints and writes a room-renamed line
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 18 leftovers in scope
 
 - Mark the startup and locator rooms `want_rejoin` so the first 001 still JOINs them

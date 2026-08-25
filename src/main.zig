@@ -3114,7 +3114,8 @@ fn applyDialogAction(
                     return;
                 };
                 _ = workspace.activate(index);
-                try client.join(target_room);
+                workspace.rooms.items[index].setWantRejoin(true);
+                try client.joinWithKey(target_room, workspace.rooms.items[index].join_key orelse "");
             } else {
                 const member = std.mem.trim(u8, view.dialogValueAt(1), " \t");
                 if (!containsIgnoreCase(state.notification_current.items, member)) {
@@ -3816,7 +3817,8 @@ fn handleWorkspaceInputKey(
             const name = std.mem.trim(u8, text[6..], " \t");
             const index = workspace.ensure(name) catch return true;
             _ = workspace.activate(index);
-            if (maybe_client) |client| try client.join(name);
+            workspace.rooms.items[index].setWantRejoin(true);
+            if (maybe_client) |client| try client.joinWithKey(name, workspace.rooms.items[index].join_key orelse "");
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
@@ -3874,20 +3876,20 @@ fn processWorkspaceMessages(
         if (std.ascii.eqlIgnoreCase(msg.command, "PART")) {
             const room_name = msg.param(0) orelse "";
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
-            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Leave", who, room_name, msg.param(1) orelse "");
+            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Leave", who, room_name, msg.param(1) orelse "");
             if (std.ascii.eqlIgnoreCase(who, workspace.self_nick))
                 redraw = (try applySelfLeftChannel(workspace, client, state, room_name, msg.param(1))) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "KICK")) {
             const room_name = msg.param(0) orelse "";
             const who = msg.param(1) orelse "";
-            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Kick", who, room_name, msg.param(2) orelse "");
+            if (workspace.find(room_name)) |room_index| _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Kick", who, room_name, msg.param(2) orelse "");
             if (std.ascii.eqlIgnoreCase(who, workspace.self_nick))
                 redraw = (try applySelfLeftChannel(workspace, client, state, room_name, msg.param(2))) or redraw;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "INVITE")) {
             const invited = msg.param(0) orelse "";
             const room_name = msg.param(1) orelse "";
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
-            if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, &active_room.transcript, preferences, "Invitation", who, room_name, "");
+            if (workspace.activeRoom()) |active_room| _ = try runPersistentRules(workspace.gpa, client, workspace, &active_room.transcript, preferences, "Invitation", who, room_name, "");
             if (std.ascii.eqlIgnoreCase(invited, workspace.self_nick)) {
                 try state.replaceOwned(workspace.gpa, &state.last_invite_channel, room_name);
                 try state.replaceOwned(workspace.gpa, &state.last_invite_from, who);
@@ -3937,6 +3939,9 @@ fn processWorkspaceMessages(
             const new_name = msg.param(1) orelse "";
             if (try workspace.rename(old_name, new_name)) {
                 client.renameRestoration(old_name, new_name);
+                try retargetSessionHint(workspace, state, &state.last_key_channel, old_name, new_name);
+                try retargetSessionHint(workspace, state, &state.last_invite_channel, old_name, new_name);
+                _ = try appendRenameLine(workspace, old_name, new_name);
                 redraw = true;
             }
         } else if (std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or
@@ -4060,7 +4065,7 @@ fn processWorkspaceMessages(
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
                 try sendAutomaticGreeting(client, preferences, joined_channel, who);
-                _ = try runPersistentRules(workspace.gpa, client, &workspace.rooms.items[room_index].transcript, preferences, "Join", who, joined_channel, "");
+                _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Join", who, joined_channel, "");
                 redraw = true;
             }
         } else if (std.mem.eql(u8, msg.command, "366")) {
@@ -4140,7 +4145,7 @@ fn processWorkspaceMessages(
                 redraw = true;
                 continue;
             }
-            if (!std.ascii.eqlIgnoreCase(who, nick) and try runPersistentRules(workspace.gpa, client, transcript, preferences, if (is_private) "Whisper" else "Message", who, room.name, text)) {
+            if (!std.ascii.eqlIgnoreCase(who, nick) and try runPersistentRules(workspace.gpa, client, workspace, transcript, preferences, if (is_private) "Whisper" else "Message", who, room.name, text)) {
                 state.discardPendingUdi(workspace.gpa, resolved, who);
                 redraw = true;
                 continue;
@@ -4593,6 +4598,16 @@ fn retargetSessionHint(
     const hint = slot.* orelse return;
     if (!cc.net.irc_map.eql(workspace.casemapping, hint, from)) return;
     try state.replaceOwned(workspace.gpa, slot, dest);
+}
+
+fn appendRenameLine(workspace: *cc.client.workspace.Workspace, from: []const u8, dest: []const u8) !bool {
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "Room renamed from {s} to {s}", .{ from, dest }) catch "Room renamed.";
+    if (workspace.find(dest) orelse workspace.active) |index| {
+        try workspace.rooms.items[index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+        return true;
+    }
+    return false;
 }
 
 fn applyChannelForward(
@@ -5189,6 +5204,7 @@ fn replaceNickToken(gpa: std.mem.Allocator, source: []const u8, nick: []const u8
 fn runPersistentRules(
     gpa: std.mem.Allocator,
     client: *cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
     transcript: *cc.comic.session.Transcript,
     preferences: *const cc.client.preferences.Store,
     event: []const u8,
@@ -5221,7 +5237,11 @@ fn runPersistentRules(
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Sound")) {
             if (value.len != 0) try client.sendSound(channel, value, "");
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Join room")) {
-            if (value.len != 0) try client.join(value);
+            if (value.len != 0) {
+                const index = workspace.ensure(value) catch continue;
+                workspace.rooms.items[index].setWantRejoin(true);
+                try client.joinWithKey(value, workspace.rooms.items[index].join_key orelse "");
+            }
         }
     }
     return suppress;
@@ -5956,6 +5976,28 @@ test "reconnect joins only rooms that still want rejoin" {
     workspace.markDisconnected();
     try std.testing.expect(workspace.rooms.items[kept].want_rejoin);
     try std.testing.expect(roomNeedsReconnectJoin(&workspace.rooms.items[kept], &client));
+}
+
+test "room rename retargets last key and invite hints" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const old = try workspace.ensure("#old");
+    try workspace.rooms.items[old].setJoinKey(gpa, "secret");
+    workspace.rooms.items[old].setWantRejoin(true);
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    try state.replaceOwned(gpa, &state.last_key_channel, "#old");
+    try state.replaceOwned(gpa, &state.last_invite_channel, "#old");
+    try std.testing.expect(try workspace.rename("#old", "#vault"));
+    try retargetSessionHint(&workspace, &state, &state.last_key_channel, "#old", "#vault");
+    try retargetSessionHint(&workspace, &state, &state.last_invite_channel, "#old", "#vault");
+    try std.testing.expect(try appendRenameLine(&workspace, "#old", "#vault"));
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+    try std.testing.expectEqualStrings("#vault", state.last_invite_channel.?);
+    try std.testing.expectEqualStrings("secret", workspace.rooms.items[old].join_key.?);
+    try std.testing.expect(workspace.rooms.items[old].want_rejoin);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[old].transcript.lines.items[0].text, "Room renamed from #old to #vault") != null);
 }
 
 test "unknown CTCP is consumed while ACTION and SOUND stay speech" {
