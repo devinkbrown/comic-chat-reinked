@@ -5365,6 +5365,85 @@ fn sendOnyxServiceSlash(
         };
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "op") or std.ascii.eqlIgnoreCase(verb, "deop") or
+        std.ascii.eqlIgnoreCase(verb, "voice") or std.ascii.eqlIgnoreCase(verb, "devoice"))
+    {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /op|/deop|/voice|/devoice <nick> [#channel]");
+            return true;
+        }
+        const named = count > 1 and cc.net.irc_map.isChannelName(workspace.chantypes, words[1]);
+        const first_is_chan = cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named)
+            words[1]
+        else if (first_is_chan and count > 1)
+            words[0]
+        else if (workspace.activeRoom()) |room|
+            room.name
+        else {
+            try appendSessionNotice(workspace, "That command needs a room.");
+            return true;
+        };
+        const nick = if (first_is_chan and count > 1) words[1] else words[0];
+        const flag = if (std.ascii.eqlIgnoreCase(verb, "op"))
+            "+o"
+        else if (std.ascii.eqlIgnoreCase(verb, "deop"))
+            "-o"
+        else if (std.ascii.eqlIgnoreCase(verb, "voice"))
+            "+v"
+        else
+            "-v";
+        client.setMode(channel, flag, nick) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "ban") or std.ascii.eqlIgnoreCase(verb, "unban")) {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Ban needs a room.");
+            return true;
+        };
+        const mask = if (named) (if (count > 1) words[1] else "") else if (count > 0) words[0] else "";
+        if (mask.len == 0) {
+            if (std.ascii.eqlIgnoreCase(verb, "unban")) {
+                try appendSessionNotice(workspace, "Usage: /unban [channel] <mask>");
+                return true;
+            }
+            client.listBans(channel) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const send = if (std.ascii.eqlIgnoreCase(verb, "ban"))
+            client.setBan(channel, mask)
+        else
+            client.clearBan(channel, mask);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "whisper")) {
+        if (count == 0 or rest.len == words[0].len) {
+            try appendSessionNotice(workspace, "Usage: /whisper <nick> <text>");
+            return true;
+        }
+        const room = workspace.activeRoom() orelse {
+            try appendSessionNotice(workspace, "Whisper needs a room.");
+            return true;
+        };
+        const text_arg = std.mem.trim(u8, rest[words[0].len..], " \t");
+        client.whisper(room.name, words[0], text_arg) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        try room.transcript.addWithOptions(workspace.self_nick, text_arg, .{ .modes = cc.proto.udi.bm_whisper });
+        return true;
+    }
     if (!isOnyxServiceSlash(verb)) return false;
     var command_buf: [16]u8 = undefined;
     if (verb.len > command_buf.len) return false;
@@ -5390,6 +5469,7 @@ fn isOnyxQuerySlash(verb: []const u8) bool {
         "motd",  "version", "time",   "admin",   "info",  "lusers",
         "commands", "names", "list",  "msg",     "notice", "nick",
         "topic", "invite", "mode", "kick", "rename", "ctcp", "ping",
+        "op", "deop", "voice", "devoice", "ban", "unban", "whisper",
     };
     inline for (names) |name| {
         if (std.ascii.eqlIgnoreCase(verb, name)) return true;
@@ -6636,45 +6716,43 @@ fn handleInputKey(
                 }
                 return false;
             }
-            if (std.mem.eql(u8, line, "/clear")) {
+            if (composerSlashIs(line, "clear")) {
                 transcript.trimTo(0);
                 view.jumpLatest();
                 return true;
             }
-            if (std.mem.eql(u8, line, "/view comic") or std.mem.eql(u8, line, "/comic")) {
+            if (composerSlashIs(line, "comic") or (composerSlashIs(line, "view") and std.ascii.eqlIgnoreCase(composerSlashRest(line), "comic"))) {
                 view.setContentMode(.comic);
                 return true;
             }
-            if (std.mem.eql(u8, line, "/view text") or std.mem.eql(u8, line, "/text")) {
+            if (composerSlashIs(line, "text") or (composerSlashIs(line, "view") and std.ascii.eqlIgnoreCase(composerSlashRest(line), "text"))) {
                 view.setContentMode(.text);
                 return true;
             }
-            if (std.mem.eql(u8, line, "/members")) {
+            if (composerSlashIs(line, "members")) {
                 view.toggleMembers();
                 return true;
             }
-            if (std.mem.eql(u8, line, "/latest")) {
+            if (composerSlashIs(line, "latest")) {
                 view.jumpLatest();
                 return true;
             }
-            if (std.mem.startsWith(u8, line, "/dialog ")) {
-                _ = view.openDialogByResource(std.mem.trim(u8, line["/dialog ".len..], " \t"));
+            if (composerSlashIs(line, "dialog")) {
+                _ = view.openDialogByResource(composerSlashRest(line));
                 return true;
             }
             if (!joined) return true;
             const client = maybe_client orelse return true;
-            if (std.mem.eql(u8, line, "/avatar") or std.mem.startsWith(u8, line, "/avatar ")) {
-                const requested = if (line.len > "/avatar ".len) line["/avatar ".len..] else "";
+            if (composerSlashIs(line, "avatar")) {
+                const requested = composerSlashRest(line);
                 const selected = cc.comic.session.bundledAvatarByName(requested) orelse return true;
                 try transcript.setAvatar(nick, selected);
                 try announceRoomAvatar(client, channel, selected, ircx_data);
                 return true;
             }
             const selected_mode = view.shell.say_mode;
-            const action_text: ?[]const u8 = if (std.mem.eql(u8, line, "/me"))
-                ""
-            else if (std.mem.startsWith(u8, line, "/me "))
-                line["/me ".len..]
+            const action_text: ?[]const u8 = if (composerSlashIs(line, "me"))
+                composerSlashRest(line)
             else if (selected_mode == .action)
                 line
             else
@@ -7323,6 +7401,13 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("rename"));
     try std.testing.expect(isOnyxServiceSlash("ctcp"));
     try std.testing.expect(isOnyxServiceSlash("ping"));
+    try std.testing.expect(isOnyxServiceSlash("op"));
+    try std.testing.expect(isOnyxServiceSlash("ban"));
+    try std.testing.expect(isOnyxServiceSlash("whisper"));
+    try std.testing.expect(composerSlashIs("/ME waves", "me"));
+    try std.testing.expectEqualStrings("waves", composerSlashRest("/ME waves"));
+    try std.testing.expect(composerSlashIs("/CLEAR", "clear"));
+    try std.testing.expect(composerSlashIs("/DIALOG invite", "dialog"));
     try std.testing.expect(composerSlashIs("/JOIN #locked secret", "join"));
     try std.testing.expect(composerSlashIs("/QUIT later", "quit"));
     try std.testing.expect(composerSlashIs("/Create #room", "create"));
@@ -7933,6 +8018,18 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(try sendCreateSlash(&client, &workspace, gpa, "/create #made +nt 20 secret"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CREATE #made +nt 20 secret") != null);
     try std.testing.expect(workspace.find("#made") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/op alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +o alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/deop #root bob"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root -o bob") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/voice alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +v alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ban evil!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +b evil!*@*") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/unban evil!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root -b evil!*@*") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/whisper alice hi"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WHISPER #root alice :hi") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
     try std.testing.expect(!client.projectsSessionChannels());
 
