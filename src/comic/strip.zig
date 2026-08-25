@@ -767,6 +767,16 @@ fn renderScene(
             }
             nudgeColorDestsBelowBalloons(layout.placements, bodies, balloon_layout.balloons);
         }
+        var balloon_i: usize = 0;
+        for (layout.placements) |placement| {
+            const line = findOwnedLine(lines, bodies[placement.body_index].id) orelse continue;
+            if (!line.has_balloon) continue;
+            if (balloon_i >= balloon_layout.balloons.len) break;
+            if (bodies[placement.body_index].keep_recognizable) {
+                balloon_layout.balloons[balloon_i].retargetTip(-placement.rect.y + 200);
+            }
+            balloon_i += 1;
+        }
     }
 
     var canvas = try Canvas.init(gpa, panel_width, panel_height);

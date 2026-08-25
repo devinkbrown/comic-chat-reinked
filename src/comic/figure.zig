@@ -474,7 +474,17 @@ fn isPaddedSimpleCard(image: Image, bbox: Bounds) bool {
 fn paperInkPixel(image: Image, x: u32, y: u32) bool {
     if (x >= image.width or y >= image.height) return false;
     const pixel = image.pixels[y * image.width + x];
-    return (pixel >> 24) != 0 and (pixel & 0x00ffffff) != 0x00ffffff;
+    if ((pixel >> 24) == 0) return false;
+    const red: u8 = @truncate(pixel >> 16);
+    const green: u8 = @truncate(pixel >> 8);
+    const blue: u8 = @truncate(pixel);
+    if (red == 255 and green == 255 and blue == 255) return false;
+    const max_c = @max(red, @max(green, blue));
+    const min_c = @min(red, @min(green, blue));
+    // Same near-gray AA rule as `original_figure.stickerInk`: a pale fringe
+    // must not join a wrap sliver onto the real silhouette.
+    if (min_c >= 228 and max_c - min_c < 18) return false;
+    return true;
 }
 
 fn paperInkBounds(image: Image) ?Bounds {

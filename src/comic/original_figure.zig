@@ -774,8 +774,9 @@ fn drawingHasChromaticInk(image: Image) bool {
     return false;
 }
 
-/// Near-white anti-alias on Color/HD cards is paper, not silhouette. Treating
-/// it as ink MERGEPAINTs a pale halo around the woman on colored rooms.
+/// Near-white / near-gray anti-alias on Color/HD cards is paper, not
+/// silhouette. Treating mid-gray fringe (230–241) as ink MERGEPAINTs a pale
+/// halo around the woman on colored rooms. Chromatic clothes stay ink.
 fn stickerInk(sampled: u32) bool {
     if (sampled >> 24 == 0) return false;
     const rgb = sampled & 0x00ffffff;
@@ -783,6 +784,9 @@ fn stickerInk(sampled: u32) bool {
     const red: u8 = @truncate(sampled >> 16);
     const green: u8 = @truncate(sampled >> 8);
     const blue: u8 = @truncate(sampled);
+    const max_c = @max(red, @max(green, blue));
+    const min_c = @min(red, @min(green, blue));
+    if (min_c >= 228 and max_c - min_c < 18) return false;
     return red < 242 or green < 242 or blue < 242;
 }
 
@@ -982,8 +986,11 @@ test "color DIB MERGEPAINT sticker keeps chromatic ink off a colored dest" {
 test "Color sticker ignores near-white AA so dest is not bleached" {
     try std.testing.expect(!stickerInk(0xfff8f4f2));
     try std.testing.expect(!stickerInk(0xffffffff));
+    try std.testing.expect(!stickerInk(0xfff0f0f0));
+    try std.testing.expect(!stickerInk(0xffe6e6e4));
     try std.testing.expect(stickerInk(0xffff2040));
     try std.testing.expect(stickerInk(0xffe0b090));
+    try std.testing.expect(stickerInk(0xfff5ead0));
 
     var fringe = [_]u32{0xfff8f4f2};
     const pose = PoseLayers{ .drawing = .{ .width = 1, .height = 1, .pixels = &fringe } };
