@@ -145,8 +145,14 @@ pub fn firstPathFromUriList(text: []const u8, buf: []u8) ?[]const u8 {
 
 fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
     var rest = url["file:".len..];
-    if (std.mem.startsWith(u8, rest, "//localhost")) rest = rest["//localhost".len..];
-    if (std.mem.startsWith(u8, rest, "//")) rest = rest[1..]; // keep one slash → absolute path
+    if (std.mem.startsWith(u8, rest, "//")) {
+        rest = rest[2..];
+        if (std.mem.startsWith(u8, rest, "localhost")) {
+            rest = rest["localhost".len..];
+        } else if (rest.len != 0 and rest[0] != '/') {
+            return null;
+        }
+    }
     if (rest.len == 0) return null;
     return percentDecode(rest, buf);
 }
