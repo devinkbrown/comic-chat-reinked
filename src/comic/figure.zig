@@ -1105,6 +1105,32 @@ test "leftover Color and HD bodycam figures stay standing with local color" {
         @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
     };
     const texts = [_][]const u8{ "", "ha ha leftover laugh", "oh no leftover sad" };
     for (blobs) |avb_data| {
@@ -1617,6 +1643,10 @@ test "leftover Color pose cards keep one paper-ink column-run" {
             try std.testing.expect(card.width >= 200);
             try std.testing.expect(card.height >= 240);
             try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(card));
+            const ink = paperInkBounds(card) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(ink.x >= 2);
+            try std.testing.expect(ink.x + ink.w + 2 <= card.width);
+            try std.testing.expect(ink.w < 200);
         }
     }
 }
