@@ -106,7 +106,7 @@ hash.
   strip and UTF-16 decode. Receive-only `text/x-uri-list` is treated like
   `text/uri-list`. Receive-only `text/rtf` / `application/rtf` strip to
   plain text. X11 paste prefers the owner's TARGETS list and
-  stashes events that arrive during GetProperty. ConvertSelection uses a
+  stashes events that arrive during GetProperty (up to 256 during ConvertSelection / INCR). ConvertSelection uses a
   user timestamp rather than CurrentTime. XDND also prefers TARGETS and
   uses the drop timestamp. Middle-click pastes PRIMARY as typed keys, with
   `wl-paste --primary` / `xclip`/`xsel` PRIMARY fallback when the native
