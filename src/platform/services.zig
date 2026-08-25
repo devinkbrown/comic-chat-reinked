@@ -7,7 +7,7 @@
 //! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
 //! printing. `xdg-open` can carry an outgoing activation / startup token.
 //! Incoming desktop file-list MIME, receive-only RTF, receive-only
-//! COMPOUND_TEXT (including ISO-8859-2), ISO-8859 charset MIME, Markdown,
+//! COMPOUND_TEXT (including ISO-8859-2/9/15), ISO-8859 charset MIME, Markdown,
 //! and invalid-UTF-8 Latin-1 fallback are parsed here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
 //! internal application fallback.

@@ -41,7 +41,7 @@
 //! Pointer leave and incoming DnD motion emit pointer moves so hover
 //! tracks the seat. NumLock (Mod2 lock bit or KEY_NUMLOCK) selects keypad
 //! digits. XKB groups 3–4 wrap and AltGr reads the active group's Level3.
-//! Receive-only COMPOUND_TEXT, ISO-8859-1/15/2 `text/plain` charset MIME,
+//! Receive-only COMPOUND_TEXT, ISO-8859-1/2/9/15 `text/plain` charset MIME,
 //! Markdown, and extra KDE5/Mozilla-priv file MIME are accepted.
 //! `present()` skips
 //! commits while the toplevel is suspended; leaving suspended or gaining
