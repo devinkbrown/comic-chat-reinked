@@ -1036,6 +1036,38 @@ test "title stars keep authored icons and replace smashed generated HD" {
     try std.testing.expect(color_star.height >= 80);
 }
 
+test "leftover Color and HD title stars are standing silhouettes not smashed icons" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+    };
+    for (blobs) |avb_data| {
+        var star = try titleStarIcon(gpa, avb_data);
+        defer star.deinit(gpa);
+        var portrait = try chromePortrait(gpa, avb_data);
+        defer portrait.deinit(gpa);
+        try std.testing.expectEqual(portrait.width, star.width);
+        try std.testing.expectEqual(portrait.height, star.height);
+        try std.testing.expect(star.height >= 140);
+        try std.testing.expect(star.height + 16 > star.width);
+        try std.testing.expect(star.width != 64 or star.height != 64);
+        var smashed = try bgb.decodeIcon(gpa, avb_data);
+        defer smashed.deinit(gpa);
+        try std.testing.expect(star.width != smashed.width or star.height != smashed.height);
+    }
+}
+
 fn countOpaque(image: Image) usize {
     var count: usize = 0;
     for (image.pixels) |pixel| {
@@ -1198,11 +1230,17 @@ test "authored simple face.x is unchanged and generated cards keep paper pad" {
         @embedFile("../assets/generated/cro-color-hd-v1.avb"),
         @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
         @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
         @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
     };
     for (blobs, 0..) |avb_data, index| {
         var generated = try assembleDetailedForText(gpa, avb_data, "ordinary text");
@@ -1781,6 +1819,40 @@ test "Sage HD Mike HD Scotty HD Lynnea HD keep leftover local color" {
                 try std.testing.expect(cool + brown > peach * 4);
             },
         }
+    }
+}
+
+test "leftover Color dest cards keep authored chromatic ink" {
+    // Unlocked leftover dests without a dedicated hue lock must still package
+    // local color. A grayscale leftover dest would SRCAND on Color rooms.
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+    };
+    for (blobs) |avb_data| {
+        var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, 9, 0);
+        defer card.deinit(gpa);
+        var chromatic: usize = 0;
+        for (card.pixels) |pixel| {
+            const red: u8 = @truncate(pixel >> 16);
+            const green: u8 = @truncate(pixel >> 8);
+            const blue: u8 = @truncate(pixel);
+            if (red >= 245 and green >= 245 and blue >= 245) continue;
+            const mx = @max(red, @max(green, blue));
+            const mn = @min(red, @min(green, blue));
+            if (mx > mn + 18) chromatic += 1;
+        }
+        try std.testing.expect(chromatic > 400);
     }
 }
 
