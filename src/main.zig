@@ -1441,11 +1441,7 @@ const ChatState = struct {
     }
 
     fn setConnectionFailure(self: *ChatState, err: anyerror) void {
-        self.status = std.fmt.bufPrint(
-            &self.status_storage,
-            "Connection failed ({s}) - click for settings",
-            .{@errorName(err)},
-        ) catch "Connection failed - click for settings";
+        self.status = connectionFailureStatus(err);
     }
 
     fn rememberDccOffer(self: *ChatState, gpa: std.mem.Allocator, sender: []const u8, offer: cc.proto.dcc.SendOffer) !void {
@@ -1692,6 +1688,27 @@ const AsyncNetwork = struct {
     }
 };
 
+fn connectionFailureStatus(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ConnectionRefused => "Connection failed (server refused) - click for settings",
+        error.ConnectionResetByPeer => "Connection failed (reset) - click for settings",
+        error.EndOfStream => "Connection failed (closed) - click for settings",
+        error.ConnectionTimedOut, error.ConnectionDeadlineExceeded, error.Timeout => "Connection failed (timed out) - click for settings",
+        error.NameResolutionFailed, error.UnknownHost, error.UnknownHostName => "Connection failed (unknown host) - click for settings",
+        error.CertificateHostMismatch => "Connection failed (certificate host mismatch) - click for settings",
+        error.CertificateExpired => "Connection failed (certificate expired) - click for settings",
+        error.CertificateNotYetValid => "Connection failed (certificate not yet valid) - click for settings",
+        error.CertificateAuthorityLoadFailed => "Connection failed (trusted certificates unavailable) - click for settings",
+        error.TlsFailure, error.TlsAlert, error.TlsInitializationFailed, error.TlsReadFailed, error.TlsDecodeError => "Connection failed (TLS) - click for settings",
+        error.AuthenticationFailed => "Connection failed (authentication) - click for settings",
+        error.IrcServerError => "Connection failed (server closed the session) - click for settings",
+        error.UnexpectedConnectClose, error.ConnectionFailed => "Connection failed (could not connect) - click for settings",
+        error.StsUpgradeRequired => "Connection failed (TLS upgrade required) - click for settings",
+        error.ProxyConnectFailed, error.ProxyAuthenticationRequired, error.ProxyHandshakeTimeout, error.ProxyClosed, error.InvalidProxyTarget, error.InvalidProxyResponse => "Connection failed (proxy) - click for settings",
+        else => "Connection failed - click for settings",
+    };
+}
+
 fn applyNetworkEvent(
     event: NetworkEvent,
     state: *ChatState,
@@ -1745,10 +1762,10 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
         rooms.markDisconnected();
         rooms.resetIsupport();
     }
-    // Silence masks, away text, last invite/key, notify-previous, and IRCX
-    // CLIENT keystrings survive reconnect so they can be resent or reused
-    // after 001/800. The current online snapshot is cleared so a nick who
-    // left during the outage is not kept online. Advertised ISUPPORT maps
+    // Silence masks, away text, last invite/key, notify-previous, want_rejoin,
+    // and IRCX CLIENT keystrings survive reconnect so they can be resent or
+    // reused after 001/800. The current online snapshot is cleared so a nick
+    // who left during the outage is not kept online. Advertised ISUPPORT maps
     // come back on the next 005.
 }
 
@@ -2708,12 +2725,14 @@ fn applyDialogAction(
                     return;
                 };
                 _ = workspace.activate(index);
+                workspace.rooms.items[index].setWantRejoin(true);
                 try client.join(room_to_join);
             }
         },
         .channel => {
             const index = workspace.ensure(value) catch return;
             _ = workspace.activate(index);
+            workspace.rooms.items[index].setWantRejoin(true);
             if (maybe_client) |client| try client.joinWithKey(value, view.dialogValueAt(1));
             try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(1));
         },
@@ -2736,6 +2755,7 @@ fn applyDialogAction(
             }
             const index = workspace.ensure(value) catch return;
             _ = workspace.activate(index);
+            workspace.rooms.items[index].setWantRejoin(true);
             if (maybe_client) |client| {
                 try client.create(value, creation_modes, limit, view.dialogValueAt(4));
                 try workspace.rooms.items[index].setJoinKey(workspace.gpa, view.dialogValueAt(4));
@@ -3241,6 +3261,7 @@ fn applyDialogAction(
                 return;
             };
             _ = workspace.activate(index);
+            workspace.rooms.items[index].setWantRejoin(true);
             try client.joinWithKey(target, value);
             try workspace.rooms.items[index].setJoinKey(gpa, value);
         },
@@ -3254,6 +3275,7 @@ fn applyDialogAction(
                 return;
             };
             _ = workspace.activate(index);
+            workspace.rooms.items[index].setWantRejoin(true);
             if (maybe_client) |client| try client.join(target);
         },
         .invite => if (maybe_client) |client| try client.invite(value, room.name),
@@ -3682,8 +3704,14 @@ test "connection failures remain actionable" {
     try std.testing.expect(!state.ircx_data);
     try std.testing.expect(!workspace.rooms.items[root].joined);
     try std.testing.expect(!roomCanSend(workspace.rooms.items[root].joined, state.joined));
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") != null);
-    try std.testing.expect(std.mem.indexOf(u8, state.status, "click for settings") != null);
+    try std.testing.expectEqualStrings("Connection failed (server refused) - click for settings", state.status);
+    try std.testing.expect(std.mem.indexOf(u8, state.status, "ConnectionRefused") == null);
+    try std.testing.expectEqualStrings("Connection failed (reset) - click for settings", connectionFailureStatus(error.ConnectionResetByPeer));
+    try std.testing.expectEqualStrings("Connection failed (closed) - click for settings", connectionFailureStatus(error.EndOfStream));
+    try std.testing.expectEqualStrings("Connection failed (TLS) - click for settings", connectionFailureStatus(error.TlsReadFailed));
+    try std.testing.expectEqualStrings("Connection failed (server closed the session) - click for settings", connectionFailureStatus(error.IrcServerError));
+    try std.testing.expectEqualStrings("Connection failed - click for settings", connectionFailureStatus(error.Unexpected));
+    try std.testing.expect(std.mem.indexOf(u8, connectionFailureStatus(error.OutOfMemory), "OutOfMemory") == null);
 }
 
 test "comic view choices remain bounded and roster selection ignores departed users" {
@@ -3959,17 +3987,19 @@ fn processWorkspaceMessages(
             if (client.hasRestorationTargets()) {
                 for (workspace.rooms.items) |*room| {
                     room.joined = false;
-                    if (!client.restoresChannel(room.name))
+                    if (roomNeedsReconnectJoin(room, client))
                         try client.joinWithKey(room.name, room.join_key orelse "");
                 }
             } else if (workspace.rooms.items.len == 0) {
                 // Open the startup room before MOTD/LUSERS so those numerics
                 // have a transcript. JOIN confirmation still marks it joined.
-                _ = try workspace.ensure(channel);
+                const startup = try workspace.ensure(channel);
+                workspace.rooms.items[startup].setWantRejoin(true);
                 try client.join(channel);
             } else for (workspace.rooms.items) |*room| {
                 room.joined = false;
-                try client.joinWithKey(room.name, room.join_key orelse "");
+                if (roomNeedsReconnectJoin(room, client))
+                    try client.joinWithKey(room.name, room.join_key orelse "");
             }
             state.join_requested = true;
             state.status = "joining";
@@ -3990,6 +4020,7 @@ fn processWorkspaceMessages(
                 const room_index = try workspace.ensure(joined_channel);
                 var room = &workspace.rooms.items[room_index];
                 room.joined = true;
+                room.setWantRejoin(true);
                 state.joined = true;
                 state.status = "connected";
                 if (room.pending_topic) |topic| {
@@ -4010,6 +4041,7 @@ fn processWorkspaceMessages(
             if (workspace.find(joined_channel)) |room_index| {
                 var joined_room = &workspace.rooms.items[room_index];
                 joined_room.joined = true;
+                joined_room.setWantRejoin(true);
                 state.joined = true;
                 state.status = "connected";
                 if (joined_room.pending_topic) |topic| {
@@ -4493,6 +4525,7 @@ fn applySelfLeftChannel(
     };
     var room = &workspace.rooms.items[room_index];
     room.joined = false;
+    room.setWantRejoin(false);
     if (reason) |text| {
         if (text.len > 0) {
             var buf: [280]u8 = undefined;
@@ -4502,6 +4535,22 @@ fn applySelfLeftChannel(
     }
     refreshJoinedState(workspace, state, "left room");
     return true;
+}
+
+fn roomNeedsReconnectJoin(room: *const cc.client.workspace.Room, client: *const cc.net.client.Client) bool {
+    return room.want_rejoin and !client.restoresChannel(room.name);
+}
+
+fn retargetSessionHint(
+    workspace: *const cc.client.workspace.Workspace,
+    state: *ChatState,
+    slot: *?[]u8,
+    from: []const u8,
+    dest: []const u8,
+) !void {
+    const hint = slot.* orelse return;
+    if (!cc.net.irc_map.eql(workspace.casemapping, hint, from)) return;
+    try state.replaceOwned(workspace.gpa, slot, dest);
 }
 
 fn applyChannelForward(
@@ -4521,6 +4570,7 @@ fn applyChannelForward(
     client.renameRestoration(from, dest);
     if (workspace.find(from)) |from_index| {
         workspace.rooms.items[from_index].joined = false;
+        workspace.rooms.items[from_index].setWantRejoin(false);
         const dest_index = workspace.ensure(dest) catch from_index;
         if (dest_index != from_index) {
             if (workspace.find(from)) |source_index| {
@@ -4529,9 +4579,14 @@ fn applyChannelForward(
                 if (workspace.rooms.items[source_index].client_data) |data|
                     try workspace.rooms.items[dest_index].setClientData(workspace.gpa, data);
             }
+            workspace.rooms.items[dest_index].setWantRejoin(true);
             _ = workspace.activate(dest_index);
         }
-    } else _ = workspace.ensure(dest) catch {};
+    } else if (workspace.ensure(dest)) |dest_index| {
+        workspace.rooms.items[dest_index].setWantRejoin(true);
+    } else |_| {}
+    try retargetSessionHint(workspace, state, &state.last_key_channel, from, dest);
+    try retargetSessionHint(workspace, state, &state.last_invite_channel, from, dest);
     var buf: [280]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "Forwarded from {s} to {s}", .{ from, dest }) catch "Room forwarded.";
     if (workspace.find(dest) orelse workspace.active) |index| {
@@ -4554,6 +4609,7 @@ fn applyJoinDenied(
     const line = std.fmt.bufPrint(&buf, "Cannot join {s}: {s}", .{ channel, detail }) catch "Cannot join room.";
     if (workspace.find(channel)) |room_index| {
         workspace.rooms.items[room_index].joined = false;
+        workspace.rooms.items[room_index].setWantRejoin(false);
         try workspace.rooms.items[room_index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
     } else if (workspace.activeRoom()) |active| {
         try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
@@ -5749,6 +5805,7 @@ test "self leave and join denial clear membership without a live socket" {
     defer workspace.deinit();
     const root = try workspace.ensure("#root");
     workspace.rooms.items[root].joined = true;
+    workspace.rooms.items[root].setWantRejoin(true);
     var state: ChatState = .{ .joined = true, .status = "connected" };
     defer state.deinit(gpa);
 
@@ -5777,6 +5834,7 @@ test "self leave and join denial clear membership without a live socket" {
 
     try std.testing.expect(try applySelfLeftChannel(&workspace, &client, &state, "#root", "out"));
     try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!workspace.rooms.items[root].want_rejoin);
     try std.testing.expect(!state.joined);
     try std.testing.expectEqualStrings("left room", state.status);
     try std.testing.expect(!client.hasRestorationTargets());
@@ -5784,11 +5842,14 @@ test "self leave and join denial clear membership without a live socket" {
 
     try client.join("#locked");
     workspace.rooms.items[root].joined = false;
+    const locked = try workspace.ensure("#locked");
+    workspace.rooms.items[locked].setWantRejoin(true);
     const denied = cc.net.message.parse(":server 473 me #locked :Cannot join channel (+i)");
     try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &denied));
     try std.testing.expect(!client.hasRestorationTargets());
+    try std.testing.expect(!workspace.rooms.items[locked].want_rejoin);
     try std.testing.expectEqualStrings("join denied", state.status);
-    try std.testing.expectEqualStrings("Cannot join #locked: Cannot join channel (+i)", workspace.rooms.items[root].transcript.lines.items[1].text);
+    try std.testing.expectEqualStrings("Cannot join #locked: Cannot join channel (+i)", workspace.rooms.items[locked].transcript.lines.items[0].text);
 
     workspace.rooms.items[root].joined = true;
     state.joined = true;
@@ -5807,6 +5868,7 @@ test "self leave and join denial clear membership without a live socket" {
     try client.join("#root");
     try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &throttled));
     try std.testing.expect(!workspace.rooms.items[root].joined);
+    try std.testing.expect(!workspace.rooms.items[root].want_rejoin);
     try std.testing.expect(!client.restoresChannel("#root"));
 
     try client.join("#secure");
@@ -5814,6 +5876,44 @@ test "self leave and join denial clear membership without a live socket" {
     try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
     try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &secure));
     try std.testing.expect(!client.restoresChannel("#secure"));
+}
+
+test "reconnect joins only rooms that still want rejoin" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    const kept = try workspace.ensure("#kept");
+    const left = try workspace.ensure("#left");
+    workspace.rooms.items[kept].setWantRejoin(true);
+    workspace.rooms.items[left].setWantRejoin(false);
+    try workspace.rooms.items[kept].setJoinKey(gpa, "secret");
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+
+    try std.testing.expect(roomNeedsReconnectJoin(&workspace.rooms.items[kept], &client));
+    try std.testing.expect(!roomNeedsReconnectJoin(&workspace.rooms.items[left], &client));
+    workspace.markDisconnected();
+    try std.testing.expect(workspace.rooms.items[kept].want_rejoin);
+    try std.testing.expect(roomNeedsReconnectJoin(&workspace.rooms.items[kept], &client));
 }
 
 test "unknown CTCP is consumed while ACTION and SOUND stay speech" {
@@ -6375,13 +6475,22 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
 
     const old = try workspace.ensure("#old");
     workspace.rooms.items[old].joined = true;
+    workspace.rooms.items[old].setWantRejoin(true);
     try workspace.rooms.items[old].setJoinKey(gpa, "secret");
+    try state.replaceOwned(gpa, &state.last_key_channel, "#old");
+    try state.replaceOwned(gpa, &state.last_invite_channel, "#old");
     try client.join("#old");
     try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #old #vault :Forwarding")));
     const vault = workspace.find("#vault").?;
     try std.testing.expectEqualStrings("secret", workspace.rooms.items[vault].join_key.?);
     try std.testing.expect(!workspace.rooms.items[old].joined);
+    try std.testing.expect(!workspace.rooms.items[old].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[vault].want_rejoin);
     try std.testing.expect(client.restoresChannel("#vault"));
+    try std.testing.expect(!roomNeedsReconnectJoin(&workspace.rooms.items[old], &client));
+    try std.testing.expect(!roomNeedsReconnectJoin(&workspace.rooms.items[vault], &client));
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
+    try std.testing.expectEqualStrings("#vault", state.last_invite_channel.?);
     try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[vault].transcript.lines.items[0].text, "Forwarded from #old to #vault") != null);
 
     try workspace.rooms.items[vault].setClientData(gpa, "bk=room;");
@@ -6396,6 +6505,8 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expectError(error.TooManyRooms, workspace.ensure("#x"));
 
     resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(!workspace.rooms.items[old].want_rejoin);
+    try std.testing.expect(workspace.rooms.items[vault].want_rejoin);
     try std.testing.expectEqual(cc.net.irc_map.CaseMapping.rfc1459, workspace.casemapping);
     try std.testing.expect(workspace.prefixes.isSymbol('~'));
     try std.testing.expect(!workspace.chanmodes.takesParam('Z', true));

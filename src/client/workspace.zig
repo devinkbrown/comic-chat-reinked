@@ -13,6 +13,9 @@ pub const Room = struct {
     transcript: session.Transcript,
     editor: input.Editor,
     joined: bool = false,
+    /// Stay on the 001 rejoin list across disconnect. Cleared on part, kick,
+    /// join denial, or a 470 forward away from this room.
+    want_rejoin: bool = false,
     unread: u32 = 0,
     /// Optional channel key for reconnect (`JOIN <room> <password>`).
     join_key: ?[]u8 = null,
@@ -51,6 +54,10 @@ pub const Room = struct {
 
     pub fn markDisconnected(self: *Room) void {
         self.joined = false;
+    }
+
+    pub fn setWantRejoin(self: *Room, want: bool) void {
+        self.want_rejoin = want;
     }
 
     pub fn setClientData(self: *Room, gpa: std.mem.Allocator, value: []const u8) !void {
@@ -229,10 +236,12 @@ test "workspace retains a room join key for reconnect" {
     try workspace.rooms.items[index].setJoinKey(workspace.gpa, "");
     try std.testing.expect(workspace.rooms.items[index].join_key == null);
     workspace.rooms.items[index].joined = true;
+    workspace.rooms.items[index].setWantRejoin(true);
     try workspace.rooms.items[index].setPendingTopic(workspace.gpa, "Welcome");
     try std.testing.expectEqualStrings("Welcome", workspace.rooms.items[index].pending_topic.?);
     workspace.markDisconnected();
     try std.testing.expect(!workspace.rooms.items[index].joined);
+    try std.testing.expect(workspace.rooms.items[index].want_rejoin);
     try workspace.rooms.items[index].setPendingTopic(workspace.gpa, "");
     try std.testing.expect(workspace.rooms.items[index].pending_topic == null);
 }

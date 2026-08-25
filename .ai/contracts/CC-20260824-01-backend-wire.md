@@ -115,6 +115,13 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Keep 489 as a command failure when the room is already joined (voice/send)
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 17 leftovers in scope
+
+- Map connection-failure status to human sentences; do not show raw Zig `@errorName` in the status bar
+- Rejoin only rooms that still `want_rejoin` after 001 (forget parted, kicked, join-denied, and 470 source rooms)
+- Retarget last-key and last-invite hints when 470 forwards a room
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules
