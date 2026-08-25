@@ -3734,6 +3734,8 @@ test "Wayland drop finishes any nonzero offer and axis_stop clears the discrete 
         .gpa = std.testing.allocator,
         .threaded = undefined,
         .conn = undefined,
+        .width = 320,
+        .height = 240,
         .axis_have_discrete = true,
     };
     const stopped = try window.pointerEvent(7, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 });
