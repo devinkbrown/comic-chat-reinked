@@ -268,6 +268,11 @@ pub const View = struct {
                 },
                 else => return null,
             },
+            .members => switch (key) {
+                .enter => return self.activateFocusedMember(),
+                .char => |code| if (code == ' ') return self.activateFocusedMember() else return null,
+                else => return null,
+            },
             else => return null,
         }
         return .none;
@@ -934,6 +939,14 @@ pub const View = struct {
             .end => if (dialogs.fieldAcceptsText(id, self.dialog_field) and self.dialog_action_focus == null and !self.dialog_browse_focus) {
                 if (modifiers.shift) editor.extendEnd() else editor.end();
             },
+            .page_up => {
+                if (self.dialog_first_field > 0) self.dialog_first_field -= 1;
+            },
+            .page_down => {
+                const layout = dialogLayout(self.canvas.width, self.canvas.height, dialogs.get(id));
+                const maximum = dialogs.fields(id).len -| layout.visibleRows();
+                if (self.dialog_first_field < maximum) self.dialog_first_field += 1;
+            },
             else => {},
         }
         return .none;
@@ -1247,6 +1260,12 @@ pub const View = struct {
         }
         self.shell.setSayMode(@enumFromInt(index));
         self.shell.focus = .say_actions;
+        return .none;
+    }
+
+    fn activateFocusedMember(self: *View) Action {
+        if (!self.wire_live) return .none;
+        self.openDialog(.whisper);
         return .none;
     }
 
@@ -3193,7 +3212,7 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .user_list => if (index == 0) "CAST" else "",
         .channel, .channel_create => if (index == 0) "JOIN" else "",
         .whisper, .invite => if (index == 0) "SAY" else "",
-        .away => if (index == 0) "AWAY" else "",
+        .away => if (index == 0) "NOTE" else "",
         .nickname => if (index == 0) "NAME" else "",
         .personal => if (index == 0) "CARD" else "",
         else => "",
@@ -3219,7 +3238,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .channel, .channel_create => "Join after the wire is live",
         .whisper => "Whisper after the wire is live",
         .invite => "Invite after the wire is live",
-        .kick, .ban, .room_access => "Moderation after the wire is live",
+        .kick, .ban, .room_access, .ircx_properties, .ircx_events => "Moderation after the wire is live",
         .personal => "Shown on your CAST card",
         .nickname => "Visible on the Sunday page",
         .away => "Posted while you are away",
@@ -4434,4 +4453,17 @@ test "composer send chip sends and space activates focused chrome" {
     view.openDialog(.about);
     view.dialog_action_focus = .primary;
     try std.testing.expectEqual(Action{ .dialog_accept = .about }, (try view.handleDialogKey(.{ .char = ' ' }, .{})).?);
+}
+
+test "member keyboard opens whisper after the wire is live" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .members;
+    view.shell.selected_member = 0;
+    view.wire_live = false;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expect(view.active_dialog == null);
+    view.wire_live = true;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.{ .char = ' ' }).?);
+    try std.testing.expectEqual(dialogs.Id.whisper, view.active_dialog.?);
 }

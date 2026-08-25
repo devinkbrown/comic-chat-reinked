@@ -2238,7 +2238,7 @@ fn prefillOpenedDialog(
         },
         .connection_features => {
             try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext" else "Disconnected");
-            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "SASL authenticated" else "Not authenticated" else "Unavailable");
+            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Not signed in" else "Unavailable");
             try view.setDialogValueAt(2, if (state.ircx_data) "Enabled" else "Not enabled");
             if (client) |connected| {
                 var capabilities: std.ArrayList(u8) = .empty;
@@ -2476,7 +2476,7 @@ fn applyDialogAction(
             return;
         };
         network.reconfigure(request.host, request.port, request.security, monotonicMilliseconds(io)) catch {
-            view.setDialogNotice("Connection failed. Check server and TLS.");
+            view.setDialogNotice("Wire failed. Check the server and TLS.");
             return;
         };
         resetChatConnectionState(state);
@@ -2513,12 +2513,12 @@ fn applyDialogAction(
             };
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (std.mem.indexOfAny(u8, value, " \r\n\x00") != null) {
-                view.setDialogNotice("Separate LISTX terms with commas, not spaces.");
+                view.setDialogNotice("Separate search terms with commas, not spaces.");
                 return;
             }
             if (limit.len != 0) {
                 for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("The LISTX result limit must be a number.");
+                    view.setDialogNotice("The room search limit must be a number.");
                     return;
                 };
             }
@@ -2542,7 +2542,7 @@ fn applyDialogAction(
             const creation_modes = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             const limit = std.mem.trim(u8, view.dialogValueAt(3), " \t");
             if (creation_modes.len != 0 and std.mem.indexOfAny(u8, creation_modes, " \r\n\x00") != null) {
-                view.setDialogNotice("Enter modes as one token, for example +nt.");
+                view.setDialogNotice("Enter room modes as one word, without spaces.");
                 return;
             }
             if (limit.len != 0) {
@@ -2617,7 +2617,7 @@ fn applyDialogAction(
         },
         .ircx_properties => {
             if (!state.ircx_data) {
-                view.setDialogNotice("IRCX properties require an IRCX-enabled connection.");
+                view.setDialogNotice("Channel properties need an extended-rooms connection.");
                 return;
             }
             const client = maybe_client orelse {
@@ -2629,7 +2629,7 @@ fn applyDialogAction(
             const property_value = view.dialogValueAt(2);
             const operation = view.dialogValueAt(3);
             if (std.mem.indexOfAny(u8, entity, " \r\n\x00") != null or std.mem.indexOfAny(u8, property, " \r\n\x00") != null or hasWireControl(property_value)) {
-                view.setDialogNotice("Channel and property names cannot contain spaces; values must stay on one line.");
+                view.setDialogNotice("Room and property names cannot contain spaces; values must stay on one line.");
                 return;
             }
             if (std.ascii.eqlIgnoreCase(operation, "Get common")) {
@@ -2650,7 +2650,7 @@ fn applyDialogAction(
         },
         .room_access => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Room access controls require an IRCX-enabled connection.");
+                view.setDialogNotice("Room access needs an extended-rooms connection.");
                 return;
             }
             const client = maybe_client orelse {
@@ -2682,7 +2682,7 @@ fn applyDialogAction(
                 }
                 const timeout = std.mem.trim(u8, view.dialogValueAt(3), " \t");
                 for (timeout) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("The ACCESS timeout must be a number of minutes.");
+                    view.setDialogNotice("The access timeout must be a number of minutes.");
                     return;
                 };
                 if (std.mem.indexOfAny(u8, mask, " \r\n\x00") != null or hasWireControl(view.dialogValueAt(4))) {
@@ -2694,7 +2694,7 @@ fn applyDialogAction(
         },
         .ircx_events => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Operator event subscriptions require an IRCX-enabled connection.");
+                view.setDialogNotice("Operator events need an extended-rooms connection.");
                 return;
             }
             const client = maybe_client orelse {
@@ -2712,7 +2712,7 @@ fn applyDialogAction(
                 try client.eventList(event);
             } else {
                 if (event.len == 0 or std.mem.indexOfAny(u8, event, " \r\n\x00") != null) {
-                    view.setDialogNotice("Enter one IRCX event name.");
+                    view.setDialogNotice("Enter one event name.");
                     return;
                 }
                 try client.eventChange(std.ascii.eqlIgnoreCase(operation, "Add"), event, mask);
@@ -3267,7 +3267,7 @@ fn applyFileTransferDialog(
     errdefer gpa.free(payload);
     if (payload.len == 0) {
         gpa.free(payload);
-        view.setDialogNotice("Empty files cannot be sent with the legacy DCC protocol.");
+        view.setDialogNotice("Empty files cannot be sent.");
         return;
     }
     const host_ip = parseIpv4Number(view.dialogValueAt(3)) orelse {
@@ -4409,7 +4409,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
     }
     if (std.mem.eql(u8, surface, "failed")) {
         view.openDialog(.setup);
-        view.setDialogNotice("Connection failed. Check server and TLS.");
+        view.setDialogNotice("Wire failed. Check the server and TLS.");
     }
     const preview_input = if (std.mem.eql(u8, surface, "composer"))
         "A polished input should keep the caret visible even when the message becomes wider than the available composer field."

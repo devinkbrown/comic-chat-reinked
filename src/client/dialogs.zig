@@ -196,11 +196,11 @@ pub fn fields(id: Id) []const Field {
         .channel_create => &.{
             .{ .label = "Room name" },
             .{ .label = "Topic", .hint = "Optional" },
-            .{ .label = "Initial modes", .hint = "+nt" },
+            .{ .label = "Room modes", .hint = "Optional" },
             .{ .label = "Maximum users", .hint = "Optional" },
             .{ .label = "Optional password", .kind = .password },
         },
-        .channel_properties => &.{ .{ .label = "Topic" }, .{ .label = "Room modes", .hint = "+nt" }, .{ .label = "Maximum users", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Apply", .hint = "Topic, modes and limits", .kind = .readonly } },
+        .channel_properties => &.{ .{ .label = "Topic" }, .{ .label = "Room modes", .hint = "Optional" }, .{ .label = "Maximum users", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Apply", .hint = "Topic, modes and limits", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password" }},
         .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "Result limit", .hint = "Optional; blank means unlimited" } },
         .user_list => &.{ .{ .label = "Member nickname", .hint = "Choose a visible room member" }, .{ .label = "Filter", .hint = "Optional nickname filter" } },
@@ -424,6 +424,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Apply properties", primaryLabel(.ircx_properties));
     try std.testing.expectEqualStrings("Extended rooms", fields(.connection_features)[2].label);
     try std.testing.expectEqualStrings("Room", fields(.ircx_properties)[0].label);
+    try std.testing.expectEqualStrings("Room modes", fields(.channel_create)[2].label);
 }
 
 test "settings accent chrome maps vermillion and leftover cobalt to index 0" {
