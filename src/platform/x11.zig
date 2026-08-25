@@ -50,6 +50,7 @@
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
 //!     for `xdg-open`, EnterNotify cursor restore and pointer move
 //!     (Button1/Button3 already down emit `.down` then queue the hover;
+//!     implicit-grab motion after leave is dropped;
 //!     grab/ungrab and pointer-focus details ignored), wheel releases ignored,
 //!     XSETTINGS owner re-watch after DestroyNotify (that owner does not close
 //!     the chat),
