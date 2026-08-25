@@ -198,7 +198,7 @@ pub const State = struct {
         if (x == 0 and y == 0) {
             x = radius;
         } else {
-            const scale_den = @max(@abs(x), @abs(y));
+            const scale_den: i32 = @intCast(@max(@abs(x), @abs(y)));
             x = @divTrunc(x * radius, scale_den);
             y = @divTrunc(y * radius, scale_den);
             if (@as(i64, x) * x + @as(i64, y) * y > @as(i64, radius) * radius) {
