@@ -732,6 +732,7 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Apply set", &.{ "Save set", "Apply set" }));
     try std.testing.expect(matchesAny("Apply CAST", &.{ "Use CAST", "Apply CAST" }));
     try std.testing.expect(matchesAny("Read common properties", &.{ "Read common", "Read common properties" }));
+    try std.testing.expect(matchesAny("Get common properties", &.{ "Read common", "Get common properties", "Read common properties" }));
     try std.testing.expect(matchesAny("Yes", &.{ "On", "Yes" }));
     try std.testing.expect(matchesAny("No", &.{ "Off", "No" }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
