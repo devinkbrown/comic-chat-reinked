@@ -1048,9 +1048,23 @@ test "leftover Color and HD title stars are standing silhouettes not smashed ico
         @embedFile("../assets/generated/mike-color-hd-v1.avb"),
         @embedFile("../assets/generated/sage-color-hd-v1.avb"),
         @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
         @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
     };
     for (blobs) |avb_data| {
         var star = try titleStarIcon(gpa, avb_data);
@@ -1838,6 +1852,17 @@ test "leftover Color dest cards keep authored chromatic ink" {
         @embedFile("../assets/generated/susan-color-hd-v1.avb"),
         @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
         @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
     };
     for (blobs) |avb_data| {
         var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, 9, 0);

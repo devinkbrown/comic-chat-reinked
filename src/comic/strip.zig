@@ -2429,3 +2429,65 @@ test "leftover dests keep pose-authored face color on unused Color and HD rooms"
         }
     }
 }
+
+test "leftover HD dests keep dest-only paint on Color and HD rooms" {
+    // Leftover HD dests use the same pose-authored paint as Color. dest-XOR
+    // against testdata anna keeps unused Color sky out of the leftover count.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{
+        "hugh hd",     "cro hd",     "maynard hd", "rebecca hd", "xeno hd",  "jordan hd",
+        "dan hd",      "armando hd", "mike hd",    "sage hd",    "scotty hd", "lynnea hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try std.testing.expectEqual(empty.width, image.width);
+            try std.testing.expectEqual(empty.height, image.height);
+            const stride = panel_width + device_interstice;
+            const cols = if (stride == 0) 1 else image.width / stride + 1;
+            var dest_chrom: usize = 0;
+            var dest_min: u32 = std.math.maxInt(u32);
+            var dest_max: u32 = 0;
+            var col: u32 = 1;
+            while (col < cols) : (col += 1) {
+                const x0 = col * stride;
+                if (x0 + panel_width > image.width) continue;
+                var y: u32 = 0;
+                while (y < panel_height) : (y += 1) {
+                    var x: u32 = 0;
+                    while (x < panel_width) : (x += 1) {
+                        const i = y * image.width + x0 + x;
+                        if (image.pixels[i] == empty.pixels[i]) continue;
+                        dest_min = @min(dest_min, y);
+                        dest_max = @max(dest_max, y);
+                        const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
+                        const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
+                        const blue: i32 = @as(u8, @truncate(image.pixels[i]));
+                        const mx = @max(red, @max(green, blue));
+                        const mn = @min(red, @min(green, blue));
+                        if (mx > mn + 18 and mx > 40) dest_chrom += 1;
+                    }
+                }
+            }
+            try std.testing.expect(dest_chrom > 200);
+            try std.testing.expect(dest_max > dest_min + 140);
+        }
+    }
+}
