@@ -5152,6 +5152,65 @@ fn sendOnyxServiceSlash(
         };
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "mode")) {
+        const first_is_modes = count > 0 and words[0].len != 0 and (words[0][0] == '+' or words[0][0] == '-');
+        if (count == 0 or first_is_modes) {
+            const room = workspace.activeRoom() orelse {
+                try appendSessionNotice(workspace, "Mode needs a target.");
+                return true;
+            };
+            const send = if (count == 0)
+                client.queryMode(room.name)
+            else
+                client.setMode(room.name, words[0], if (count > 1) words[1] else "");
+            send catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (count == 1) {
+            client.queryMode(words[0]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        client.setMode(words[0], words[1], if (count > 2) words[2] else "") catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "kick")) {
+        if (count == 0) {
+            try appendSessionNotice(workspace, "Usage: /kick [#channel] <nick> [reason]");
+            return true;
+        }
+        const named = cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Kick needs a room.");
+            return true;
+        };
+        if (named and count < 2) {
+            try appendSessionNotice(workspace, "Usage: /kick [#channel] <nick> [reason]");
+            return true;
+        }
+        const nick_start = if (named) (std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len) else 0;
+        const after_chan = if (named) std.mem.trim(u8, rest[nick_start..], " \t") else rest;
+        const nick_end = std.mem.indexOfScalar(u8, after_chan, ' ') orelse after_chan.len;
+        const nick = after_chan[0..nick_end];
+        const reason = std.mem.trim(u8, after_chan[nick_end..], " \t");
+        if (nick.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /kick [#channel] <nick> [reason]");
+            return true;
+        }
+        client.kick(channel, nick, reason) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
     if (!isOnyxServiceSlash(verb)) return false;
     var command_buf: [16]u8 = undefined;
     if (verb.len > command_buf.len) return false;
@@ -5176,7 +5235,7 @@ fn isOnyxQuerySlash(verb: []const u8) bool {
         "whois", "whowas", "who",     "whox",    "ison",  "userhost",
         "motd",  "version", "time",   "admin",   "info",  "lusers",
         "commands", "names", "list",  "msg",     "notice", "nick",
-        "topic", "invite",
+        "topic", "invite", "mode", "kick",
     };
     inline for (names) |name| {
         if (std.ascii.eqlIgnoreCase(verb, name)) return true;
@@ -7099,6 +7158,8 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("nick"));
     try std.testing.expect(isOnyxServiceSlash("topic"));
     try std.testing.expect(isOnyxServiceSlash("invite"));
+    try std.testing.expect(isOnyxServiceSlash("mode"));
+    try std.testing.expect(isOnyxServiceSlash("kick"));
     try std.testing.expect(!isOnyxServiceReply("WHOIS"));
     try std.testing.expect(!isOnyxServiceReply("MOTD"));
     try std.testing.expect(!isOnyxServiceSlash("users"));
@@ -7686,6 +7747,12 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOPIC #root :hello room") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/invite alice"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "INVITE alice #root") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/mode +n"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +n") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/mode #root +o alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +o alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/kick alice later"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KICK #root alice :later") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
     try std.testing.expect(!client.projectsSessionChannels());
 

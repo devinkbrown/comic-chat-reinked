@@ -153,6 +153,12 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Leave SASL EXTERNAL cert, `draft/pre-away` after 001, TARGMAX vs MAXTARGETS,
   and `FAIL JOIN TEMPORARILY_UNAVAILABLE` keeping `want_rejoin`
 
+## Wave 36 leftovers in scope
+
+- `/mode` and `/kick` composer slashes stay on the wire instead of comic PRIVMSG
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 33 leftovers in scope
 
 - Server NOTICE/NOTE without a user prefix stay as Server lines (SESSION TOKEN,
