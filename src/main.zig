@@ -1739,25 +1739,13 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
         state.pending_dcc = null;
     }
     state.motd.clearRetainingCapacity();
-    if (state.last_invite_channel) |value| {
-        gpa.free(value);
-        state.last_invite_channel = null;
-    }
-    if (state.last_invite_from) |value| {
-        gpa.free(value);
-        state.last_invite_from = null;
-    }
-    if (state.last_key_channel) |value| {
-        gpa.free(value);
-        state.last_key_channel = null;
-    }
     if (workspace) |rooms| {
         rooms.markDisconnected();
         rooms.resetIsupport();
     }
-    // Silence masks, away text, and IRCX CLIENT keystrings survive reconnect
-    // so they can be resent after 001/800. Advertised ISUPPORT maps come
-    // back on the next 005.
+    // Silence masks, away text, last invite/key, and IRCX CLIENT keystrings
+    // survive reconnect so they can be resent or reused after 001/800.
+    // Advertised ISUPPORT maps come back on the next 005.
 }
 
 fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
@@ -4115,7 +4103,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
         return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE");
     return switch (code) {
         2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
-        301, 302, 303, 304, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
+        301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
         322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
         710, 711, 712, 713, 714, 715, 717, 718, 732, 733, 734 => true,
         801...819, 824, 825, 900...908, 913...925 => true,
@@ -4256,7 +4244,11 @@ fn appendTopicLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net
 fn appendModeLine(workspace: *cc.client.workspace.Workspace, msg: *const cc.net.message.Message) !bool {
     const channel = if (std.mem.eql(u8, msg.command, "324")) msg.param(1) else msg.param(0);
     const room_name = channel orelse return false;
-    const room_index = workspace.find(room_name) orelse return false;
+    const room_index = workspace.find(room_name) orelse blk: {
+        if (std.mem.eql(u8, msg.command, "324")) return false;
+        if (!cc.net.irc_map.eql(workspace.casemapping, room_name, workspace.self_nick)) return false;
+        break :blk workspace.active orelse return false;
+    };
     var display: std.ArrayList(u8) = .empty;
     defer display.deinit(workspace.gpa);
     try display.appendSlice(workspace.gpa, "Mode");
@@ -4358,12 +4350,18 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "716") or
         std.mem.eql(u8, command, "821") or
         std.mem.eql(u8, command, "822") or
-        std.mem.eql(u8, command, "823");
+        std.mem.eql(u8, command, "823") or
+        std.mem.eql(u8, command, "410") or
+        std.mem.eql(u8, command, "513") or
+        std.mem.eql(u8, command, "517") or
+        std.mem.eql(u8, command, "525") or
+        std.mem.eql(u8, command, "531");
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
     return std.mem.eql(u8, command, "432") or
         std.mem.eql(u8, command, "433") or
+        std.mem.eql(u8, command, "435") or
         std.mem.eql(u8, command, "436") or
         std.mem.eql(u8, command, "437") or
         std.mem.eql(u8, command, "438");
@@ -4777,6 +4775,8 @@ fn appendNickNumericLine(
         "invalid nickname"
     else if (std.mem.eql(u8, msg.command, "433"))
         "nickname in use"
+    else if (std.mem.eql(u8, msg.command, "435"))
+        "cannot change nickname"
     else if (std.mem.eql(u8, msg.command, "437") or std.mem.eql(u8, msg.command, "438"))
         "nickname unavailable"
     else
@@ -5698,6 +5698,15 @@ test "channel mode and invite lines land in the matching room" {
     try std.testing.expectEqualStrings("Mode from op: +o alice", workspace.rooms.items[0].transcript.lines.items[1].text);
     try std.testing.expect(try appendInviteLine(&workspace, "alice", "#root"));
     try std.testing.expectEqualStrings("alice invited you to #root", workspace.rooms.items[0].transcript.lines.items[2].text);
+    const umode = cc.net.message.parse(":me!u@h MODE me +i");
+    try std.testing.expect(try appendModeLine(&workspace, &umode));
+    try std.testing.expectEqualStrings("Mode from me: +i", workspace.rooms.items[0].transcript.lines.items[3].text);
+    const mapped = cc.net.message.parse(":server MODE ME +iw");
+    try std.testing.expect(try appendModeLine(&workspace, &mapped));
+    try std.testing.expectEqualStrings("Mode from server: +iw", workspace.rooms.items[0].transcript.lines.items[4].text);
+    const other = cc.net.message.parse(":alice!u@h MODE alice +i");
+    try std.testing.expect(!try appendModeLine(&workspace, &other));
+    try std.testing.expectEqual(@as(usize, 5), workspace.rooms.items[0].transcript.lines.items.len);
 }
 
 test "self leave and join denial clear membership without a live socket" {
@@ -5786,6 +5795,10 @@ test "nick collision and invalid nick numerics update status" {
     try std.testing.expect(try appendNickNumericLine(&workspace, &state, &in_use));
     try std.testing.expectEqualStrings("nickname in use", state.status);
     try std.testing.expectEqualStrings("Nick taken: Nickname is already in use", workspace.rooms.items[0].transcript.lines.items[2].text);
+    const banned = cc.net.message.parse(":server 435 me newnick :Cannot change nickname while banned");
+    try std.testing.expect(try appendNickNumericLine(&workspace, &state, &banned));
+    try std.testing.expectEqualStrings("cannot change nickname", state.status);
+    try std.testing.expectEqualStrings("Nick newnick: Cannot change nickname while banned", workspace.rooms.items[0].transcript.lines.items[3].text);
 }
 
 test "live MODE key and command failures update membership state" {
@@ -5899,6 +5912,15 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("364"));
     try std.testing.expect(isVisibleServerWorkflowReply("717"));
     try std.testing.expect(isVisibleServerWorkflowReply("824"));
+    try std.testing.expect(isVisibleServerWorkflowReply("305"));
+    try std.testing.expect(isVisibleServerWorkflowReply("306"));
+    try std.testing.expect(isCommandFailureNumeric("531"));
+    try std.testing.expect(isCommandFailureNumeric("525"));
+    try std.testing.expect(isCommandFailureNumeric("410"));
+    try std.testing.expect(isCommandFailureNumeric("513"));
+    try std.testing.expect(isCommandFailureNumeric("517"));
+    try std.testing.expect(isNickFailureNumeric("435"));
+    try std.testing.expect(!isCommandFailureNumeric("435"));
     try std.testing.expect(isCommandFailureNumeric("402"));
     try std.testing.expect(isCommandFailureNumeric("407"));
     try std.testing.expect(isCommandFailureNumeric("411"));
@@ -6196,9 +6218,15 @@ test "silence, modern events, and leftover session numerics stay live" {
     observeSilenceState(gpa, &state, &cc.net.message.parse(":me!u@h SILENCE -nick!*@*"));
     try std.testing.expect(!containsIgnoreCase(state.silence_masks.items, "nick!*@*"));
     try state.replaceOwned(gpa, &state.away_message, "back later");
+    try state.replaceOwned(gpa, &state.last_invite_channel, "#locked");
+    try state.replaceOwned(gpa, &state.last_invite_from, "alice");
+    try state.replaceOwned(gpa, &state.last_key_channel, "#vault");
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expect(containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
     try std.testing.expectEqualStrings("back later", state.away_message.?);
+    try std.testing.expectEqualStrings("#locked", state.last_invite_channel.?);
+    try std.testing.expectEqualStrings("alice", state.last_invite_from.?);
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
 
     const owned_host = try gpa.dupe(u8, "irc.example");
     var client = cc.net.client.Client{

@@ -92,6 +92,15 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Show leftover live numerics 015-017, 043, 270, 281, 282, 301, 304, 316, 325, 328, 344, 360, 364, 365, 373, 382, 717, 718, 824, 825
 - Show leftover send failures 402, 407, 411, 416, 440, 456-458, 480, 489, 492, 494, 716, 821-823
 
+## Wave 14 leftovers in scope
+
+- Show leftover live numerics 305/306 (self away confirm) after roster update
+- Show leftover send failures 410, 513, 517, 525, 531 (NOCOMICDATA)
+- Treat 435 BANNICKCHANGE as a nick failure
+- Show inbound self user MODE (`MODE me +i`) in the active room
+- Keep last invite and last key-channel hints across reconnect
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, and PR #11 UI
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules
