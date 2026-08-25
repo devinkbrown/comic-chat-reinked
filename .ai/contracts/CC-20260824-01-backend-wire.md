@@ -129,6 +129,12 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 30 leftovers in scope
+
+- Ban dialog `+b` / `ban` / `b:` match `+e` / `+I` (list vs add); add uses the stripped mask
+- Channel-properties mode tokens reject spaces, same as CREATE (Onyx otherwise mis-parses `MODE +n t`)
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 29 leftovers in scope
 
 - Channel-properties `+l` rejects a non-positive limit in the dialog (Onyx otherwise swallows `MODE +l abc` with no numeric)

@@ -2844,7 +2844,13 @@ fn applyDialogAction(
             }
             try client.setTopic(room.name, value);
             const modes = std.mem.trim(u8, view.dialogValueAt(1), " \t");
-            if (modes.len != 0) try client.setMode(room.name, modes, "");
+            if (modes.len != 0) {
+                if (std.mem.indexOfAny(u8, modes, " \r\n\x00") != null) {
+                    view.setDialogNotice("Enter modes as one token, for example +nt.");
+                    return;
+                }
+                try client.setMode(room.name, modes, "");
+            }
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (limit.len != 0) {
                 if (!isPositiveCount(limit)) {
@@ -3318,7 +3324,7 @@ fn applyDialogAction(
                     }
                 },
                 .add => switch (list.kind) {
-                    .ban => try client.setBan(room.name, value),
+                    .ban => try client.setBan(room.name, mask),
                     .except => try client.setException(room.name, mask),
                     .invite => try client.setInviteMask(room.name, mask),
                     .silence => unreachable,
@@ -4988,6 +4994,12 @@ fn classifyChannelListMask(mask: []const u8) ChannelListAction {
         return .{ .action = if (rest.len == 0) .list else .add, .kind = .silence };
     if (channelListPrefixed(trimmed, "s:")) |rest|
         return .{ .action = if (rest.len == 0) .list else .add, .kind = .silence };
+    if (channelListToken(trimmed, &.{ "+b", "b", "ban" })) return .{ .action = .list, .kind = .ban };
+    if (channelListPrefixed(trimmed, "-b")) |_| return .{ .action = .delete, .kind = .ban };
+    if (channelListPrefixed(trimmed, "+b")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .ban };
+    if (channelListPrefixed(trimmed, "b:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .ban };
     if (trimmed.len == 0) return .{ .action = .list, .kind = .ban };
     if (trimmed[0] == '-') return .{ .action = .delete, .kind = .ban };
     return .{ .action = .add, .kind = .ban };
@@ -5017,7 +5029,7 @@ fn channelListMaskArgument(mask: []const u8, kind: ChannelListKind) []const u8 {
         .except => &.{ "-e", "+e", "e:" },
         .invite => &.{ "-I", "+I", "I:" },
         .silence => &.{ "-s", "+s", "s:" },
-        .ban => &.{},
+        .ban => &.{ "-b", "+b", "b:" },
     };
     for (prefixes) |prefix| {
         if (channelListPrefixed(trimmed, prefix)) |rest| return rest;
@@ -6632,6 +6644,13 @@ test "MOTD, invite, knock, key, and ban helpers stay live" {
     try std.testing.expectEqual(ChannelListKind.invite, classifyChannelListMask("invex").kind);
     try std.testing.expectEqual(BanAction.delete, classifyChannelListMask("-I:alice!*@*").action);
     try std.testing.expectEqual(ChannelListKind.ban, classifyChannelListMask("-evil!*@*").kind);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("+b").action);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("ban").action);
+    try std.testing.expectEqual(BanAction.add, classifyChannelListMask("+b:alice!*@*").action);
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("+b:alice!*@*", .ban));
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("b:alice!*@*", .ban));
+    try std.testing.expectEqual(BanAction.delete, classifyChannelListMask("-b:alice!*@*").action);
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("-b:alice!*@*", .ban));
     try std.testing.expectEqual(ChannelListKind.silence, classifyChannelListMask("silence").kind);
     try std.testing.expectEqual(BanAction.list, classifyChannelListMask("ignore").action);
     try std.testing.expectEqual(ChannelListKind.silence, classifyChannelListMask("+s:nick!*@*").kind);
