@@ -164,7 +164,8 @@ hash.
   window state; X11 also tracks `_NET_WM_STATE_HIDDEN` / `_NET_WM_STATE_SHADED` and ICCCM
   `WM_STATE` / `WM_CHANGE_STATE` and skips `present()` while NET hidden, ICCCM
   iconic, unmapped, shaded, or fully obscured (MapWindow reads the initial
-  `_NET_WM_STATE` / `WM_STATE`; MapNotify exposes; a `_NET_WM_STATE`
+  `_NET_WM_STATE` / `WM_STATE`; MapNotify exposes and QueryPointer seeds hover
+  when the pointer is already inside; a `_NET_WM_STATE`
   without HIDDEN cannot clear ICCCM Iconic), and Wayland records tiled/suspended xdg
   states plus `wm_capabilities` / `configure_bounds` when xdg-shell is v5+
   and skips `present()` while suspended (leaving suspended or gaining

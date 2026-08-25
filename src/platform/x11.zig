@@ -43,7 +43,7 @@
 //!     keys (`file://` localhost / `127.0.0.1` / `[::1]` / local nodename
 //!     are local paths), `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
 //!     FocusIn/leaving-hidden/gaining `_NET_WM_STATE_FOCUSED` expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
-//!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes), a scaled
+//!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes and QueryPointer seeds hover when the pointer is already inside), a scaled
 //!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 plus ICCCM `WM_HINTS`
 //!     icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), urgency on `notify` (cleared on
 //!     FocusIn and gaining `_NET_WM_STATE_FOCUSED`), EWMH ping/type/icon name/user time (`_NET_WM_USER_TIME` plus
@@ -941,6 +941,7 @@ pub const Window = struct {
                 self.wm_unmapped = false;
                 self.readWmState();
                 self.refreshRandrCrtcs();
+                self.seedMappedPointer();
                 if (self.refreshOutputScale()) |ev| return ev;
                 return .expose;
             },
@@ -1924,6 +1925,37 @@ pub const Window = struct {
             .middle => self.held_middle,
             .secondary => self.held_secondary,
             .none => false,
+        };
+    }
+
+    fn seedMappedPointer(self: *Window) void {
+        if (self.pointer_inside) return;
+        const hover = self.queryPointerHover() orelse return;
+        self.pointer_inside = true;
+        const held = shared_event.pointerEnterHeldButton(
+            hover.state & x11_button1_mask != 0,
+            hover.state & x11_button3_mask != 0,
+            self.held_primary,
+            self.held_secondary,
+        );
+        if (held != .none) self.noteHeldButton(held, true);
+        const sequence = shared_event.pointerEnterSequence(held, hover.x, hover.y);
+        if (self.pending_pointer == null) self.pending_pointer = sequence.first;
+    }
+
+    fn queryPointerHover(self: *Window) ?struct { x: i32, y: i32, state: u16 } {
+        var req: [8]u8 = @splat(0);
+        req[0] = 38;
+        put16(req[2..4], 2);
+        put32(req[4..8], self.window);
+        writeAll(&self.conn, &req) catch return null;
+        const reply = readReplyStashing(self.gpa, &self.conn, &self.pending_events) catch return null;
+        const point = queryPointerWinPoint(reply);
+        if (!queryPointerReplyInside(point.same_screen, point.x, point.y, self.pixel_width, self.pixel_height)) return null;
+        return .{
+            .x = physicalPointToLogical(point.x, self.scale),
+            .y = physicalPointToLogical(point.y, self.scale),
+            .state = point.state,
         };
     }
 
@@ -3850,6 +3882,22 @@ fn combinedWmHidden(net_hidden: bool, icccm_hidden: bool, unmapped: bool, shaded
     return net_hidden or icccm_hidden or unmapped or shaded;
 }
 
+fn queryPointerWinPoint(reply: *const [32]u8) struct { same_screen: bool, x: i32, y: i32, state: u16 } {
+    return .{
+        .same_screen = reply[1] != 0,
+        .x = @as(i16, @bitCast(get16(reply[20..22]))),
+        .y = @as(i16, @bitCast(get16(reply[22..24]))),
+        .state = get16(reply[24..26]),
+    };
+}
+
+fn queryPointerReplyInside(same_screen: bool, win_x: i32, win_y: i32, pixel_w: u32, pixel_h: u32) bool {
+    if (!same_screen or win_x < 0 or win_y < 0) return false;
+    if (pixel_w != 0 and @as(u32, @intCast(win_x)) >= pixel_w) return false;
+    if (pixel_h != 0 and @as(u32, @intCast(win_y)) >= pixel_h) return false;
+    return true;
+}
+
 fn destroyNotifyCloses(destroyed: u32, toplevel: u32) bool {
     return destroyed != 0 and destroyed == toplevel;
 }
@@ -4512,6 +4560,21 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));
     try std.testing.expect(!x11NotifyModeIsGrab(0));
+    try std.testing.expect(queryPointerReplyInside(true, 10, 20, 320, 240));
+    try std.testing.expect(!queryPointerReplyInside(false, 10, 20, 320, 240));
+    try std.testing.expect(!queryPointerReplyInside(true, -1, 20, 320, 240));
+    try std.testing.expect(!queryPointerReplyInside(true, 320, 20, 320, 240));
+    try std.testing.expect(queryPointerReplyInside(true, 0, 0, 0, 0));
+    var pointer_reply: [32]u8 = @splat(0);
+    pointer_reply[1] = 1;
+    put16(pointer_reply[20..22], @bitCast(@as(i16, 40)));
+    put16(pointer_reply[22..24], @bitCast(@as(i16, 50)));
+    put16(pointer_reply[24..26], x11_button1_mask);
+    const parsed = queryPointerWinPoint(&pointer_reply);
+    try std.testing.expect(parsed.same_screen);
+    try std.testing.expectEqual(@as(i32, 40), parsed.x);
+    try std.testing.expectEqual(@as(i32, 50), parsed.y);
+    try std.testing.expectEqual(x11_button1_mask, parsed.state);
     try std.testing.expect(destroyNotifyCloses(40, 40));
     try std.testing.expect(!destroyNotifyCloses(41, 40));
     try std.testing.expect(!destroyNotifyCloses(40, 0));
