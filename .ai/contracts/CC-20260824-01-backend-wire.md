@@ -129,6 +129,11 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 25 leftovers in scope
+
+- Notification MONITOR full `734` is a command failure, like ban `478` and silence `511`
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 24 leftovers in scope
 
 - IRCX properties `906` BADVALUE is a command failure, not a raw 900–908 workflow dump
