@@ -135,6 +135,7 @@ pub const View = struct {
     room_tab_count: usize = 1,
     room_tab_first: usize = 0,
     can_moderate: bool = false,
+    wire_live: bool = true,
 
     pub fn init(gpa: std.mem.Allocator, initial_width: u32, initial_height: u32) !View {
         return .{
@@ -259,12 +260,12 @@ pub const View = struct {
                 self.hovered_context_item = null;
                 self.focused_context_item = null;
             },
-            .up => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse 0, false, self.can_moderate),
-            .down => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate),
-            .home => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate),
-            .end => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate),
+            .up => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse 0, false, self.can_moderate, self.wire_live),
+            .down => self.focused_context_item = nextEnabledContextItem(kind, self.focused_context_item orelse contextItemCount(kind) - 1, true, self.can_moderate, self.wire_live),
+            .home => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live),
+            .end => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate, self.wire_live),
             .enter => {
-                const item = self.focused_context_item orelse firstEnabledContextItem(kind, self.can_moderate);
+                const item = self.focused_context_item orelse firstEnabledContextItem(kind, self.can_moderate, self.wire_live);
                 self.context_menu = null;
                 self.hovered_context_item = null;
                 self.focused_context_item = null;
@@ -297,7 +298,7 @@ pub const View = struct {
             switch (key) {
                 .enter, .down => {
                     self.active_menu = self.hovered_menu orelse 0;
-                    self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate);
+                    self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
                     return .none;
                 },
                 else => return null,
@@ -311,13 +312,13 @@ pub const View = struct {
             .left, .right => {
                 const count: u8 = @intCast(menu_labels.len);
                 self.active_menu = if (key == .left) (menu + count - 1) % count else (menu + 1) % count;
-                self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate);
+                self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
             },
-            .up => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse 0, false, self.can_moderate),
-            .down => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse menuItemCount(menu) - 1, true, self.can_moderate),
-            .home => self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate),
-            .end => self.hovered_menu_item = lastEnabledMenuItem(menu, self.can_moderate),
-            .enter => return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate)),
+            .up => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse 0, false, self.can_moderate, self.wire_live),
+            .down => self.hovered_menu_item = nextEnabledMenuItem(menu, self.hovered_menu_item orelse menuItemCount(menu) - 1, true, self.can_moderate, self.wire_live),
+            .home => self.hovered_menu_item = firstEnabledMenuItem(menu, self.can_moderate, self.wire_live),
+            .end => self.hovered_menu_item = lastEnabledMenuItem(menu, self.can_moderate, self.wire_live),
+            .enter => return self.activateMenuItem(menu, self.hovered_menu_item orelse firstEnabledMenuItem(menu, self.can_moderate, self.wire_live)),
             else => return .none,
         }
         return .none;
@@ -391,7 +392,7 @@ pub const View = struct {
     fn prefillSettingsFromAppearance(self: *View) void {
         const theme = if (self.appearance.mode == .dark) "Dark studio" else "Light studio";
         const accent = switch (self.appearance.accent) {
-            .cobalt => "Cobalt",
+            .cobalt => "Vermillion",
             .violet => "Violet",
             .forest => "Forest",
         };
@@ -941,7 +942,7 @@ pub const View = struct {
             self.context_menu = null;
             self.hovered_context_item = null;
             if (item) |selected| {
-                if (!contextItemEnabled(kind, selected, self.can_moderate)) return .none;
+                if (!contextItemEnabled(kind, selected, self.can_moderate, self.wire_live)) return .none;
                 if (kind == .body_camera and selected == 3) return .send_expression;
                 self.invokeContextItem(kind, selected);
             }
@@ -1101,7 +1102,7 @@ pub const View = struct {
         self.context_x = x;
         self.context_y = y;
         self.hovered_context_item = null;
-        self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate);
+        self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live);
     }
 
     fn activateToolbar(self: *View, index: u8) Action {
@@ -1272,6 +1273,7 @@ pub const View = struct {
         ui.activateAppearance(self.appearance);
         defer ui.activateAppearance(.{});
         self.can_moderate = false;
+        self.wire_live = ui.statusTone(status) == .success;
         for (transcript.roster.items) |member| if (member.is_self and !member.departed) {
             self.can_moderate = member.role.canModerate();
             break;
@@ -1305,8 +1307,8 @@ pub const View = struct {
         if (self.shell.focus == .emotion) drawFocus(&self.canvas, layout.body_camera);
         if (self.hovered_toolbar) |index| drawToolbarTooltip(&self.canvas, layout, index);
         if (self.hovered_say_action) |index| drawSayActionTooltip(&self.canvas, layout, index);
-        if (self.active_menu) |menu| drawMenuPopup(&self.canvas, menu, self.hovered_menu_item, self.shell, self.can_moderate);
-        if (self.context_menu) |kind| drawContextPopup(&self.canvas, kind, self.context_x, self.context_y, self.hovered_context_item orelse self.focused_context_item, self.shell.emotion_frozen, self.can_moderate);
+        if (self.active_menu) |menu| drawMenuPopup(&self.canvas, menu, self.hovered_menu_item, self.shell, self.can_moderate, self.wire_live);
+        if (self.context_menu) |kind| drawContextPopup(&self.canvas, kind, self.context_x, self.context_y, self.hovered_context_item orelse self.focused_context_item, self.shell.emotion_frozen, self.can_moderate, self.wire_live);
         if (self.status_panel_open) drawStatusPanel(&self.canvas, status, transcript.activeMemberCount(), self.shell, self.appearance, self.status_detailed, self.hovered_status_action);
         if (self.active_dialog) |id| drawDialog(&self.canvas, dialogs.get(id), &self.dialog_editors, self.dialog_field, self.dialog_first_field, self.dialog_action_focus, self.hovered_dialog_field, self.hovered_dialog_browse, self.dialog_notice, self.hovered_dialog_button);
     }
@@ -1370,7 +1372,7 @@ pub const View = struct {
                 .bounds = popup.itemRect(item).?,
                 .label = menuItemLabel(menu, item),
                 .selected = self.hovered_menu_item == item,
-                .enabled = menuItemEnabled(menu, item, self.can_moderate),
+                .enabled = menuItemEnabled(menu, item, self.can_moderate, self.wire_live),
             });
         }
         if (self.context_menu) |kind| {
@@ -1384,7 +1386,7 @@ pub const View = struct {
                 .label = contextItemLabel(kind, item, self.shell.emotion_frozen),
                 .selected = self.focused_context_item == item,
                 .focused = self.focused_context_item == item,
-                .enabled = contextItemEnabled(kind, item, self.can_moderate),
+                .enabled = contextItemEnabled(kind, item, self.can_moderate, self.wire_live),
             });
         }
         if (self.active_dialog) |id| {
@@ -1575,8 +1577,7 @@ pub const View = struct {
         ui.drawPaneCountHeader(&self.canvas, rect, "CAST", count);
         const content = Rect{ .x = rect.x, .y = rect.y + 30, .w = rect.w, .h = @max(0, rect.h - 30) };
         if (transcript.roster.items.len == 0) {
-            const waiting = emptyPageCopy(status).waiting;
-            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 44 }, "Playbill empty", if (waiting) "Connect and take a panel" else "Join and take a panel");
+            ui.drawEmptyStateCallout(&self.canvas, .{ .x = content.x + 8, .y = content.y + 10, .w = @max(0, content.w - 16), .h = 52 }, "Playbill empty", emptyCastCopy(status));
             return;
         }
         const viewport = memberViewport(rect, icon_mode);
@@ -1760,7 +1761,7 @@ pub const View = struct {
     fn activateMenuItem(self: *View, menu: u8, item: u8) Action {
         self.active_menu = null;
         self.hovered_menu_item = null;
-        if (!menuItemEnabled(menu, item, self.can_moderate)) return .none;
+        if (!menuItemEnabled(menu, item, self.can_moderate, self.wire_live)) return .none;
         if (isConnectionMenuItem(menu, item)) return .connection;
         if (isQuitMenuItem(menu, item)) return .quit;
         if (menu == 1 and item < 3) return .{ .transcript_command = item };
@@ -1865,7 +1866,8 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
     };
 }
 
-fn menuItemHint(menu: u8, item: u8) []const u8 {
+fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
+    if ((menu == 4 or menu == 5) and !connected) return "Wire";
     return switch (menu) {
         0 => switch (item) {
             0, 1, 2 => "Open",
@@ -1895,7 +1897,8 @@ fn menuItemHint(menu: u8, item: u8) []const u8 {
     };
 }
 
-fn contextItemHint(kind: ContextKind, item: u8) []const u8 {
+fn contextItemHint(kind: ContextKind, item: u8, connected: bool) []const u8 {
+    if (kind == .member and !connected) return "Wire";
     return switch (kind) {
         .member => switch (item) {
             0 => "Say",
@@ -1924,7 +1927,7 @@ fn menuPopupRect(canvas_width: u32, menu: u8) Rect {
     var content_width: i32 = 210;
     var item: u8 = 0;
     while (item < menuItemCount(menu)) : (item += 1) {
-        const hint = menuItemHint(menu, item);
+        const hint = menuItemHint(menu, item, true);
         const hint_w: i32 = if (hint.len == 0) 0 else Canvas.uiTextWidth(hint) + 18;
         content_width = @max(content_width, Canvas.uiTextWidth(menuItemLabel(menu, item)) + 56 + hint_w);
     }
@@ -1958,7 +1961,7 @@ fn drawMenuBar(c: *Canvas, rect: Rect, active: ?u8, hovered: ?u8) void {
     }
 }
 
-fn drawMenuPopup(c: *Canvas, menu: u8, hovered: ?u8, shell: shell_mod.State, can_moderate: bool) void {
+fn drawMenuPopup(c: *Canvas, menu: u8, hovered: ?u8, shell: shell_mod.State, can_moderate: bool, connected: bool) void {
     const layout = ui.PopupLayout.menu(c.width, menuStart(menu), geometry.menu_height, menuPopupRect(c.width, menu).w, menuItemCount(menu));
     const rect = layout.rect;
     ui.drawPopupListSurface(c, layout);
@@ -1967,8 +1970,8 @@ fn drawMenuPopup(c: *Canvas, menu: u8, hovered: ?u8, shell: shell_mod.State, can
         const item_rect = layout.itemRect(item).?;
         if (menuStartsGroup(menu, item))
             ui.drawMenuGroupDivider(c, rect, item_rect.y);
-        const enabled = menuItemEnabled(menu, item, can_moderate);
-        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, menuItemLabel(menu, item), menuItemHint(menu, item), hovered == item, menuItemChecked(menu, item, shell), enabled);
+        const enabled = menuItemEnabled(menu, item, can_moderate, connected);
+        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, menuItemLabel(menu, item), menuItemHint(menu, item, connected), hovered == item, menuItemChecked(menu, item, shell), enabled);
     }
 }
 
@@ -1985,34 +1988,35 @@ fn menuStartsGroup(menu: u8, item: u8) bool {
     };
 }
 
-fn menuItemEnabled(menu: u8, item: u8, can_moderate: bool) bool {
+fn menuItemEnabled(menu: u8, item: u8, can_moderate: bool, connected: bool) bool {
+    if ((menu == 4 or menu == 5) and !connected) return false;
     if (can_moderate) return true;
     return !((menu == 4 and (item == 3 or item == 7 or item == 8)) or
         (menu == 5 and (item == 4 or item == 5)));
 }
 
-fn firstEnabledMenuItem(menu: u8, can_moderate: bool) u8 {
+fn firstEnabledMenuItem(menu: u8, can_moderate: bool, connected: bool) u8 {
     var item: u8 = 0;
-    while (item < menuItemCount(menu)) : (item += 1) if (menuItemEnabled(menu, item, can_moderate)) return item;
+    while (item < menuItemCount(menu)) : (item += 1) if (menuItemEnabled(menu, item, can_moderate, connected)) return item;
     return 0;
 }
 
-fn lastEnabledMenuItem(menu: u8, can_moderate: bool) u8 {
+fn lastEnabledMenuItem(menu: u8, can_moderate: bool, connected: bool) u8 {
     var item = menuItemCount(menu);
     while (item > 0) {
         item -= 1;
-        if (menuItemEnabled(menu, item, can_moderate)) return item;
+        if (menuItemEnabled(menu, item, can_moderate, connected)) return item;
     }
     return 0;
 }
 
-fn nextEnabledMenuItem(menu: u8, current: u8, forward: bool, can_moderate: bool) u8 {
+fn nextEnabledMenuItem(menu: u8, current: u8, forward: bool, can_moderate: bool, connected: bool) u8 {
     const count = menuItemCount(menu);
     var item = current;
     var checked: u8 = 0;
     while (checked < count) : (checked += 1) {
         item = if (forward) (item + 1) % count else (item + count - 1) % count;
-        if (menuItemEnabled(menu, item, can_moderate)) return item;
+        if (menuItemEnabled(menu, item, can_moderate, connected)) return item;
     }
     return current;
 }
@@ -2063,18 +2067,19 @@ fn contextPopupItem(width: u32, height: u32, kind: ContextKind, anchor_x: i32, a
     return layout.itemAt(x, y);
 }
 
-fn drawContextPopup(c: *Canvas, kind: ContextKind, anchor_x: i32, anchor_y: i32, hovered: ?u8, frozen: bool, can_moderate: bool) void {
+fn drawContextPopup(c: *Canvas, kind: ContextKind, anchor_x: i32, anchor_y: i32, hovered: ?u8, frozen: bool, can_moderate: bool, connected: bool) void {
     const layout = ui.PopupLayout.anchored(c.width, c.height, anchor_x, anchor_y, 196, contextItemCount(kind));
     ui.drawPopupListSurface(c, layout);
     var item: u8 = 0;
     while (item < contextItemCount(kind)) : (item += 1) {
         const item_rect = layout.itemRect(item).?;
-        const enabled = contextItemEnabled(kind, item, can_moderate);
-        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, contextItemLabel(kind, item, frozen), contextItemHint(kind, item), hovered == item, kind == .body_camera and item == 0 and frozen, enabled);
+        const enabled = contextItemEnabled(kind, item, can_moderate, connected);
+        ui.drawMenuItem(c, item_rect.x, item_rect.y, item_rect.w, contextItemLabel(kind, item, frozen), contextItemHint(kind, item, connected), hovered == item, kind == .body_camera and item == 0 and frozen, enabled);
     }
 }
 
-fn contextItemEnabled(kind: ContextKind, item: u8, can_moderate: bool) bool {
+fn contextItemEnabled(kind: ContextKind, item: u8, can_moderate: bool, connected: bool) bool {
+    if (kind == .member and !connected) return false;
     return kind != .member or item < 3 or can_moderate;
 }
 
@@ -2084,20 +2089,20 @@ fn contextSemanticId(kind: ContextKind, item: u8) []const u8 {
     return if (kind == .member) member[item] else camera[item];
 }
 
-fn firstEnabledContextItem(kind: ContextKind, can_moderate: bool) u8 {
-    return nextEnabledContextItem(kind, 0, true, can_moderate);
+fn firstEnabledContextItem(kind: ContextKind, can_moderate: bool, connected: bool) u8 {
+    return nextEnabledContextItem(kind, 0, true, can_moderate, connected);
 }
 
-fn lastEnabledContextItem(kind: ContextKind, can_moderate: bool) u8 {
-    return nextEnabledContextItem(kind, contextItemCount(kind) - 1, false, can_moderate);
+fn lastEnabledContextItem(kind: ContextKind, can_moderate: bool, connected: bool) u8 {
+    return nextEnabledContextItem(kind, contextItemCount(kind) - 1, false, can_moderate, connected);
 }
 
-fn nextEnabledContextItem(kind: ContextKind, start: u8, forward: bool, can_moderate: bool) u8 {
+fn nextEnabledContextItem(kind: ContextKind, start: u8, forward: bool, can_moderate: bool, connected: bool) u8 {
     const count = contextItemCount(kind);
     var item = start % count;
     var attempts: u8 = 0;
     while (attempts < count) : (attempts += 1) {
-        if (contextItemEnabled(kind, item, can_moderate)) return item;
+        if (contextItemEnabled(kind, item, can_moderate, connected)) return item;
         item = if (forward) (item + 1) % count else (item + count - 1) % count;
     }
     return 0;
@@ -2456,11 +2461,7 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     }
     if (input.len == 0) {
         const placeholder_x = edit.x + 18 + placeholderGap(focused) + if (mode_w > 0) mode_w + 6 else 0;
-        const tone = ui.statusTone(status);
-        const placeholder = if (tone == .failure or std.mem.indexOf(u8, status, "offline") != null)
-            "Connect, then ink the next balloon..."
-        else
-            "Ink the next balloon...";
+        const placeholder = composerPlaceholder(status);
         drawTextEllipsized(c, placeholder, placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - enter_w, ui.current.secondary);
     } else {
         const viewport = composerViewport(input, cursor, content_rect.w);
@@ -2529,7 +2530,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     ui.drawAnchoredPopoverSurface(c, panel, panel.x + 30);
     const tone = ui.statusTone(status);
     ui.drawStatusIdentity(c, .{ .x = panel.x + 16, .y = panel.y + 15, .w = 34, .h = 34 }, tone);
-    const heading = if (ui.statusTone(status) == .success) "On the wire" else "Waiting on the wire";
+    const heading = statusPanelHeading(status);
     ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, heading, status);
     ui.drawSectionRule(c, panel.x + 16, panel.y + 60, panel.w - 32);
 
@@ -2572,10 +2573,33 @@ const EmptyPageCopy = struct { title: []const u8, detail: []const u8, waiting: b
 
 fn emptyPageCopy(status: []const u8) EmptyPageCopy {
     const tone = ui.statusTone(status);
-    const waiting = tone != .success and (tone == .warning or tone == .failure or std.mem.indexOf(u8, status, "connecting") != null or std.mem.indexOf(u8, status, "registering") != null or std.mem.indexOf(u8, status, "offline") != null);
-    if (tone == .failure) return .{ .title = "Sunday page is waiting", .detail = "Connection failed - click Connect", .waiting = true };
-    if (waiting) return .{ .title = "Sunday page is waiting", .detail = "Connect to ink the first balloon", .waiting = true };
+    if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Connection failed - click Connect", .waiting = true };
+    if (std.mem.indexOf(u8, status, "offline") != null) return .{ .title = "Sunday page is offline", .detail = "Connect to ink the first balloon", .waiting = true };
+    if (tone != .success) return .{ .title = "Sunday page is waiting", .detail = "Waiting for the wire", .waiting = true };
     return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
+}
+
+fn emptyCastCopy(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .failure) return "Wire failed";
+    if (tone != .success) return "Connect first";
+    return "Join a room";
+}
+
+fn composerPlaceholder(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .failure) return "Connection failed - Connect, then ink...";
+    if (std.mem.indexOf(u8, status, "offline") != null) return "Connect, then ink the next balloon...";
+    if (tone != .success) return "Waiting on the wire...";
+    return "Ink the next balloon...";
+}
+
+fn statusPanelHeading(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "On the wire";
+    if (tone == .failure) return "Wire failed";
+    if (std.mem.indexOf(u8, status, "offline") != null) return "Offline";
+    return "Waiting on the wire";
 }
 
 fn drawEmptyBuffer(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8, columns: u8) void {
@@ -2794,7 +2818,40 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
             5 => "CAST",
             else => "",
         },
-        .setup, .servers => if (index == 0) "WIRE" else "",
+        .setup, .servers => switch (index) {
+            0 => "WIRE",
+            1 => "PORT",
+            2 => "TLS",
+            else => "",
+        },
+        .connection_features => switch (index) {
+            0 => "WIRE",
+            1 => "AUTH",
+            2 => "IRCX",
+            else => "",
+        },
+        .password => switch (index) {
+            0 => "ACCT",
+            1 => "AUTH",
+            else => "",
+        },
+        .room_list => switch (index) {
+            0 => "LIST",
+            1 => "JOIN",
+            else => "",
+        },
+        .user_list => if (index == 0) "CAST" else "",
+        else => "",
+    };
+}
+
+fn dialogDefaultHelper(id: dialogs.Id) []const u8 {
+    return switch (id) {
+        .setup, .servers => "Verified TLS on 6697 is the Sunday default",
+        .connection_features => "Features appear after the wire is live",
+        .room_list => "LISTX after the wire is live",
+        .user_list => "Pick a CAST member after the wire is live",
+        .motd => "MOTD arrives after the wire is live",
         else => "",
     };
 }
@@ -2811,7 +2868,8 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .settings => "Ink, Sunday page density, and the CAST",
         .character => "Choose who stands on the page",
         .background => "The paper behind every panel",
-        .setup, .servers => "Server and transport security",
+        .setup, .servers => "Server, port, and verified TLS",
+        .connection_features => "What this wire actually negotiated",
         .password => "Secure account sign-in",
         .sound => "Choose a sound and message",
         .comics_view => "How the page is arranged",
@@ -2825,7 +2883,7 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         },
     };
     ui.drawDialogSurface(c, rect, spec.title, group_text);
-    if (spec.id == .settings or spec.id == .setup or spec.id == .servers) {
+    if (spec.id == .settings or spec.id == .setup or spec.id == .servers or spec.id == .connection_features or spec.id == .password) {
         const well_top = dialog_layout.body_y - 8;
         const well_h = @max(0, dialog_layout.primary.y - well_top - 12);
         ui.drawInkPlate(c, rect.x + 12, well_top, rect.w - 24, well_h, 2, ui.current.layer);
@@ -2927,7 +2985,16 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
     }
 
     ui.drawDialogActionBar(c, rect, dialog_layout.primary.y - 8);
-    if (notice.len != 0) ui.drawNotice(c, rect.x + 14, dialog_layout.primary.y - 22, rect.w - 28, notice, .warning);
+    const helper = if (notice.len != 0) notice else dialogDefaultHelper(spec.id);
+    if (helper.len != 0) {
+        const tone: ui.NoticeTone = if (std.mem.indexOf(u8, helper, "failed") != null or std.mem.indexOf(u8, helper, "Connect before") != null or std.mem.indexOf(u8, helper, "must") != null)
+            .failure
+        else if (notice.len != 0)
+            .warning
+        else
+            .info;
+        ui.drawNotice(c, rect.x + 14, dialog_layout.primary.y - 22, rect.w - 28, helper, tone);
+    }
     drawDialogButton(c, dialog_layout.primary.x, dialog_layout.primary.y, dialog_layout.primary.w, dialogs.primaryLabel(spec.id), .primary, hovered_button == .primary or action_focus == .primary);
     if (dialogs.showsCancel(spec.id))
         drawDialogButton(c, dialog_layout.cancel.x, dialog_layout.cancel.y, dialog_layout.cancel.w, "Cancel", .secondary, hovered_button == .cancel or action_focus == .cancel);
@@ -3291,7 +3358,7 @@ test "settings menu opens application preferences instead of connection setup" {
         try std.testing.expectEqual(Action{ .menu = route.menu }, action);
         try std.testing.expectEqual(dialogs.Id.settings, view.active_dialog.?);
         try std.testing.expectEqualStrings("Light studio", view.dialogValueAt(0));
-        try std.testing.expectEqualStrings("Cobalt", view.dialogValueAt(1));
+        try std.testing.expectEqualStrings("Vermillion", view.dialogValueAt(1));
         try std.testing.expectEqualStrings("Standard", view.dialogValueAt(2));
         try std.testing.expectEqualStrings("Comic", view.dialogValueAt(3));
         try std.testing.expectEqualStrings("4 panels", view.dialogValueAt(4));
@@ -3762,4 +3829,58 @@ test "moderation menu actions are disabled until the local role permits them" {
     view.active_menu = 5;
     _ = view.handlePointer(.{ .kind = .down, .x = popup.x + 10, .y = popup.y + 8 + 4 * 29, .button = .primary }, 0, 1);
     try std.testing.expectEqual(dialogs.Id.kick, view.active_dialog.?);
+}
+
+test "room and member menus stay closed until the wire is live" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = false;
+    view.active_menu = 4;
+    const room = menuPopupRect(view.width(), 4);
+    _ = view.handlePointer(.{ .kind = .down, .x = room.x + 10, .y = room.y + 8, .button = .primary }, 0, 0);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.wire_live = true;
+    view.active_menu = 4;
+    _ = view.handlePointer(.{ .kind = .down, .x = room.x + 10, .y = room.y + 8, .button = .primary }, 0, 0);
+    try std.testing.expectEqual(dialogs.Id.room_list, view.active_dialog.?);
+}
+
+test "empty page, CAST, composer, and status copy follow the wire" {
+    const failed = emptyPageCopy("Connection failed - click for settings");
+    try std.testing.expectEqualStrings("Sunday page could not connect", failed.title);
+    try std.testing.expectEqualStrings("Connection failed - click Connect", failed.detail);
+    try std.testing.expect(failed.waiting);
+    try std.testing.expectEqualStrings("Wire failed", emptyCastCopy("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Connection failed - Connect, then ink...", composerPlaceholder("Connection failed - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed", statusPanelHeading("Connection failed - click for settings"));
+
+    const offline = emptyPageCopy("offline");
+    try std.testing.expectEqualStrings("Sunday page is offline", offline.title);
+    try std.testing.expectEqualStrings("Connect to ink the first balloon", offline.detail);
+    try std.testing.expectEqualStrings("Connect first", emptyCastCopy("offline"));
+    try std.testing.expectEqualStrings("Connect, then ink the next balloon...", composerPlaceholder("offline"));
+    try std.testing.expectEqualStrings("Offline", statusPanelHeading("offline"));
+
+    const waiting = emptyPageCopy("reconnecting");
+    try std.testing.expectEqualStrings("Sunday page is waiting", waiting.title);
+    try std.testing.expectEqualStrings("Waiting for the wire", waiting.detail);
+    try std.testing.expectEqualStrings("Waiting on the wire...", composerPlaceholder("reconnecting"));
+    try std.testing.expectEqualStrings("Waiting on the wire", statusPanelHeading("reconnecting"));
+
+    const live = emptyPageCopy("connected");
+    try std.testing.expectEqualStrings("Sunday page is open", live.title);
+    try std.testing.expectEqualStrings("Join a room", emptyCastCopy("connected"));
+    try std.testing.expectEqualStrings("Ink the next balloon...", composerPlaceholder("connected"));
+    try std.testing.expectEqualStrings("On the wire", statusPanelHeading("connected"));
+}
+
+test "member context stays closed until the wire is live" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = false;
+    view.openContextMenu(.member, 200, 200);
+    const popup = contextPopupRect(view.width(), view.height(), .member, 200, 200);
+    _ = view.handlePointer(.{ .kind = .down, .x = popup.x + 10, .y = popup.y + 8, .button = .primary }, 0, 1);
+    try std.testing.expect(view.active_dialog == null);
 }

@@ -2122,7 +2122,7 @@ fn prefillOpenedDialog(
         .settings => {
             try view.setDialogValueAt(0, if (view.appearance.mode == .dark) "Dark studio" else "Light studio");
             try view.setDialogValueAt(1, switch (view.appearance.accent) {
-                .cobalt => "Cobalt",
+                .cobalt => "Vermillion",
                 .violet => "Violet",
                 .forest => "Forest",
             });
@@ -2432,7 +2432,7 @@ fn applyDialogAction(
             return;
         };
         network.reconfigure(request.host, request.port, request.security, monotonicMilliseconds(io)) catch {
-            view.setDialogNotice("Could not start that connection. Check the server and security mode.");
+            view.setDialogNotice("Connection failed. Check server and TLS.");
             return;
         };
         resetChatConnectionState(state);
@@ -2450,7 +2450,7 @@ fn applyDialogAction(
     switch (id) {
         .settings => {
             const dark_mode = std.ascii.eqlIgnoreCase(view.dialogValueAt(0), "Dark studio");
-            const accent: u8 = if (std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Violet")) 1 else if (std.ascii.eqlIgnoreCase(view.dialogValueAt(1), "Forest")) 2 else 0;
+            const accent: u8 = cc.client.dialogs.accentIndex(view.dialogValueAt(1));
             const high_contrast = std.ascii.eqlIgnoreCase(view.dialogValueAt(2), "High contrast");
             const text_mode = std.ascii.eqlIgnoreCase(view.dialogValueAt(3), "Text");
             const comic_columns = comicColumnsFromDialog(view.dialogValueAt(4));
@@ -4233,6 +4233,12 @@ fn runToPng(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
 /// Render the shared desktop shell without requiring an X11, Wayland, or
 /// Win32 window. This is both a release-preview command and a deterministic
 /// visual regression surface for the modern UI library.
+fn preview_status(surface: []const u8) []const u8 {
+    if (std.mem.eql(u8, surface, "offline")) return "offline";
+    if (std.mem.eql(u8, surface, "failed")) return "Connection failed - click for settings";
+    return "reconnecting";
+}
+
 fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
     const compact = std.mem.eql(u8, surface, "compact") or std.mem.startsWith(u8, surface, "compact-");
     var view = try cc.client.view.View.init(gpa, if (compact) 640 else 960, if (compact) 480 else 720);
@@ -4345,6 +4351,10 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
         const layout = cc.client.geometry.Layout.compute(view.width(), view.height(), true, true);
         _ = view.handlePointer(.{ .kind = .down, .x = layout.body_camera.x + 30, .y = layout.body_camera.y + 60, .button = .secondary }, transcript.count(), transcript.roster.items.len);
     }
+    if (std.mem.eql(u8, surface, "failed")) {
+        view.openDialog(.setup);
+        view.setDialogNotice("Connection failed. Check server and TLS.");
+    }
     const preview_input = if (std.mem.eql(u8, surface, "composer"))
         "A polished input should keep the caret visible even when the message becomes wider than the available composer field."
     else if (std.mem.eql(u8, surface, "composer-multiline"))
@@ -4358,9 +4368,9 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             .{ .label = "#portable-ui" },
             .{ .label = "#source-parity", .unread = 7 },
         };
-        try view.renderTabs("reconnecting", &transcript, preview_input, preview_input.len, null, &tabs, tabs.len - 1);
+        try view.renderTabs(preview_status(surface), &transcript, preview_input, preview_input.len, null, &tabs, tabs.len - 1);
     } else {
-        try view.render("#root", "reconnecting", &transcript, preview_input, preview_input.len);
+        try view.render("#root", preview_status(surface), &transcript, preview_input, preview_input.len);
     }
     const png = try cc.render.png.encode(gpa, view.pixels(), view.width(), view.height());
     defer gpa.free(png);

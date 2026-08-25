@@ -175,7 +175,7 @@ pub fn fields(id: Id) []const Field {
         .setup, .servers => &.{ .{ .label = "Server", .hint = "Secure IRC endpoint" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "Security", .hint = "Verified TLS", .kind = .choice } },
         .settings => &.{
             .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
-            .{ .label = "Accent color", .hint = "Cobalt, violet, or forest", .kind = .choice },
+            .{ .label = "Accent color", .hint = "Vermillion, violet, or forest", .kind = .choice },
             .{ .label = "Contrast", .hint = "Ink weight on chrome", .kind = .choice },
             .{ .label = "Conversation view", .hint = "Sunday page or transcript", .kind = .choice },
             .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
@@ -233,7 +233,7 @@ pub fn fields(id: Id) []const Field {
         .connection_features => &.{ .{ .label = "Transport", .kind = .readonly }, .{ .label = "Authentication", .kind = .readonly }, .{ .label = "IRCX", .kind = .readonly }, .{ .label = "Enabled IRCv3 capabilities", .kind = .readonly } },
         .motd => &.{.{ .label = "Message of the day", .hint = "Server supplied", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room" }, .{ .label = "Invitation note" } },
-        .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later · printed page", .kind = .readonly } },
+        .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Channel", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "For example TOPIC,ONJOIN" }, .{ .label = "Value", .hint = "Empty deletes when setting" }, .{ .label = "Action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Nickname mask", .hint = "*!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
         .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "CHANNEL, MEMBER, SERVER, CONNECTION, SOCKET or USER" }, .{ .label = "Mask", .hint = "Optional" } },
@@ -258,7 +258,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         .setup, .servers => if (index == 2) &.{ "Verified TLS", "Plaintext (unsafe)" } else &.{},
         .settings => switch (index) {
             0 => &.{ "Light studio", "Dark studio" },
-            1 => &.{ "Cobalt", "Violet", "Forest" },
+            1 => &.{ "Vermillion", "Violet", "Forest" },
             2 => &.{ "Standard", "High contrast" },
             3 => &.{ "Comic", "Text" },
             4 => &.{ "4 panels", "3 panels", "2 panels", "1 panel", "5 panels", "6 panels" },
@@ -370,6 +370,14 @@ pub fn showsCancel(id: Id) bool {
     };
 }
 
+/// Dialog accent strings are chrome. Persistence stays numeric 0/1/2.
+/// Vermillion and leftover "Cobalt" both map to accent 0.
+pub fn accentIndex(label: []const u8) u8 {
+    if (std.ascii.eqlIgnoreCase(label, "Violet")) return 1;
+    if (std.ascii.eqlIgnoreCase(label, "Forest")) return 2;
+    return 0;
+}
+
 test "registry covers all forty Microsoft dialog templates plus portable dialogs" {
     try std.testing.expectEqual(@as(usize, 53), specs.len);
     try std.testing.expectEqual(@as(usize, 40), microsoft_dialog_count);
@@ -387,7 +395,15 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Color theme", fields(.settings)[0].label);
     try std.testing.expectEqualStrings("Server", fields(.setup)[0].label);
     try std.testing.expectEqualStrings("Light studio", choiceOptions(.settings, 0)[0]);
+    try std.testing.expectEqualStrings("Vermillion", choiceOptions(.settings, 1)[0]);
     try std.testing.expectEqualStrings("Verified TLS", choiceOptions(.setup, 2)[0]);
+}
+
+test "settings accent chrome maps vermillion and leftover cobalt to index 0" {
+    try std.testing.expectEqual(@as(u8, 0), accentIndex("Vermillion"));
+    try std.testing.expectEqual(@as(u8, 0), accentIndex("Cobalt"));
+    try std.testing.expectEqual(@as(u8, 1), accentIndex("Violet"));
+    try std.testing.expectEqual(@as(u8, 2), accentIndex("Forest"));
 }
 
 test "informational dialogs use one close action" {

@@ -1752,8 +1752,8 @@ pub fn drawEmptyStateCallout(c: *Canvas, rect: Rect, title: []const u8, detail: 
     fillRoundedRect(c, rect.x + 10, rect.y + @divTrunc(rect.h - 18, 2), 18, 18, 3, current.accent);
     _ = c.drawUiText("+", rect.x + 15, rect.y + @divTrunc(rect.h - 18, 2), current.layer);
     const content_w = rect.w - 52;
-    if (rect.w < 230 or rect.h < 38) {
-        drawEllipsized(c, title, rect.x + 40, rect.y + @divTrunc(rect.h - 17, 2), content_w, current.ink);
+    if (rect.h < 38) {
+        drawEllipsized(c, if (detail.len != 0) detail else title, rect.x + 40, rect.y + @divTrunc(rect.h - 17, 2), content_w, current.ink);
         return;
     }
     drawEllipsized(c, title, rect.x + 40, rect.y + 4, content_w, current.ink);
