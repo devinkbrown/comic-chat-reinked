@@ -98,7 +98,7 @@ pub const specs = [_]Spec{
     .{ .id = .comics_view, .resource = "IDD_COMICS_VIEW", .title = "Page layout", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .automation, .resource = "IDD_AUTOMATION_PAGE", .title = "Automation", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .rules, .resource = "IDD_RULESPAGE", .title = "Rules", .group = .automation, .source_w = 252, .source_h = 218 },
-    .{ .id = .edit_rule, .resource = "IDD_EDITRULE", .title = "Edit Rule", .group = .automation, .source_w = 265, .source_h = 260 },
+    .{ .id = .edit_rule, .resource = "IDD_EDITRULE", .title = "Edit rule", .group = .automation, .source_w = 265, .source_h = 260 },
     .{ .id = .channel_create, .resource = "IDD_CHANNELCREATE", .title = "Create room", .group = .rooms, .source_w = 186, .source_h = 194 },
     .{ .id = .channel_password, .resource = "IDD_CHANPASSWORD", .title = "Room password", .group = .rooms, .source_w = 173, .source_h = 86 },
     .{ .id = .file_transfer, .resource = "IDD_FILE_TRANSFER", .title = "File transfer", .group = .files, .source_w = 300, .source_h = 236 },
@@ -108,29 +108,29 @@ pub const specs = [_]Spec{
     .{ .id = .text_font, .resource = "IDD_TEXTFONTPAGE_IRC", .title = "Text font", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .choose_color, .resource = "IDD_CHOOSECOLOR", .title = "Choose color", .group = .connection, .source_w = 118, .source_h = 38 },
     .{ .id = .invitation, .resource = "IDD_INVITATION", .title = "Invitation", .group = .rooms, .source_w = 186, .source_h = 93 },
-    .{ .id = .advanced_event_params, .resource = "IDD_ADVANCEDEVENTPARAMS", .title = "Advanced Event Parameters", .group = .automation, .source_w = 186, .source_h = 85 },
-    .{ .id = .rule_sets, .resource = "IDD_RULESETSPAGE", .title = "Rule Sets", .group = .automation, .source_w = 252, .source_h = 218 },
-    .{ .id = .add_to_sets, .resource = "IDD_ADDTOSETS", .title = "Add to Rule Sets", .group = .automation, .source_w = 252, .source_h = 161 },
-    .{ .id = .rename_loaded_set, .resource = "IDD_RENAMELOADEDSET", .title = "Rename Loaded Set", .group = .automation, .source_w = 258, .source_h = 103 },
-    .{ .id = .rename_set, .resource = "IDD_RENAMESET", .title = "Rename Rule Set", .group = .automation, .source_w = 226, .source_h = 79 },
-    .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Logon Notifications", .group = .automation, .source_w = 252, .source_h = 218 },
-    .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Advanced Rule Settings", .group = .automation, .source_w = 186, .source_h = 95 },
-    .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Notification Users", .group = .automation, .source_w = 262, .source_h = 111 },
+    .{ .id = .advanced_event_params, .resource = "IDD_ADVANCEDEVENTPARAMS", .title = "Event parameters", .group = .automation, .source_w = 186, .source_h = 85 },
+    .{ .id = .rule_sets, .resource = "IDD_RULESETSPAGE", .title = "Rule sets", .group = .automation, .source_w = 252, .source_h = 218 },
+    .{ .id = .add_to_sets, .resource = "IDD_ADDTOSETS", .title = "Add to rule sets", .group = .automation, .source_w = 252, .source_h = 161 },
+    .{ .id = .rename_loaded_set, .resource = "IDD_RENAMELOADEDSET", .title = "Rename loaded set", .group = .automation, .source_w = 258, .source_h = 103 },
+    .{ .id = .rename_set, .resource = "IDD_RENAMESET", .title = "Rename rule set", .group = .automation, .source_w = 226, .source_h = 79 },
+    .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Logon notifications", .group = .automation, .source_w = 252, .source_h = 218 },
+    .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule settings", .group = .automation, .source_w = 186, .source_h = 95 },
+    .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Notification users", .group = .automation, .source_w = 262, .source_h = 111 },
     .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Servers", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Password", .group = .connection, .source_w = 198, .source_h = 127 },
-    .{ .id = .create_set, .resource = "IDD_CREATESET", .title = "Create Rule Set", .group = .automation, .source_w = 226, .source_h = 79 },
-    .{ .id = .open_conversation, .resource = "PORTABLE_OPEN_CONVERSATION", .title = "Open Conversation", .group = .files, .source_w = 300, .source_h = 108 },
-    .{ .id = .save_conversation, .resource = "PORTABLE_SAVE_CONVERSATION", .title = "Save Conversation", .group = .files, .source_w = 300, .source_h = 108 },
-    .{ .id = .export_image, .resource = "PORTABLE_EXPORT_IMAGE", .title = "Export Comic Image", .group = .files, .source_w = 300, .source_h = 108 },
-    .{ .id = .ircx_properties, .resource = "PORTABLE_IRCX_PROPERTIES", .title = "IRCX Properties", .group = .rooms, .source_w = 300, .source_h = 210 },
-    .{ .id = .room_access, .resource = "PORTABLE_ROOM_ACCESS", .title = "Room Access", .group = .rooms, .source_w = 300, .source_h = 236 },
-    .{ .id = .ircx_events, .resource = "PORTABLE_IRCX_EVENTS", .title = "IRCX Operator Events", .group = .rooms, .source_w = 300, .source_h = 184 },
-    .{ .id = .call_link, .resource = "PORTABLE_CALL_LINK", .title = "Call Link", .group = .connection, .source_w = 300, .source_h = 184 },
+    .{ .id = .create_set, .resource = "IDD_CREATESET", .title = "Create rule set", .group = .automation, .source_w = 226, .source_h = 79 },
+    .{ .id = .open_conversation, .resource = "PORTABLE_OPEN_CONVERSATION", .title = "Open conversation", .group = .files, .source_w = 300, .source_h = 108 },
+    .{ .id = .save_conversation, .resource = "PORTABLE_SAVE_CONVERSATION", .title = "Save conversation", .group = .files, .source_w = 300, .source_h = 108 },
+    .{ .id = .export_image, .resource = "PORTABLE_EXPORT_IMAGE", .title = "Export comic image", .group = .files, .source_w = 300, .source_h = 108 },
+    .{ .id = .ircx_properties, .resource = "PORTABLE_IRCX_PROPERTIES", .title = "Channel properties", .group = .rooms, .source_w = 300, .source_h = 210 },
+    .{ .id = .room_access, .resource = "PORTABLE_ROOM_ACCESS", .title = "Room access", .group = .rooms, .source_w = 300, .source_h = 236 },
+    .{ .id = .ircx_events, .resource = "PORTABLE_IRCX_EVENTS", .title = "Operator events", .group = .rooms, .source_w = 300, .source_h = 184 },
+    .{ .id = .call_link, .resource = "PORTABLE_CALL_LINK", .title = "Call link", .group = .connection, .source_w = 300, .source_h = 184 },
     .{ .id = .member_profile, .resource = "PORTABLE_MEMBER_PROFILE", .title = "Member profile", .group = .connection, .source_w = 300, .source_h = 132 },
-    .{ .id = .open_locator, .resource = "PORTABLE_OPEN_LOCATOR", .title = "Open Chat Locator", .group = .files, .source_w = 300, .source_h = 108 },
-    .{ .id = .recent_files, .resource = "PORTABLE_RECENT_FILES", .title = "Recent Conversations", .group = .files, .source_w = 340, .source_h = 150 },
-    .{ .id = .favorite_rooms, .resource = "PORTABLE_FAVORITE_ROOMS", .title = "Favorite Rooms", .group = .rooms, .source_w = 320, .source_h = 184 },
-    .{ .id = .print_preview, .resource = "PORTABLE_PRINT_PREVIEW", .title = "Print and PDF Preview", .group = .files, .source_w = 320, .source_h = 150 },
+    .{ .id = .open_locator, .resource = "PORTABLE_OPEN_LOCATOR", .title = "Open chat locator", .group = .files, .source_w = 300, .source_h = 108 },
+    .{ .id = .recent_files, .resource = "PORTABLE_RECENT_FILES", .title = "Recent conversations", .group = .files, .source_w = 340, .source_h = 150 },
+    .{ .id = .favorite_rooms, .resource = "PORTABLE_FAVORITE_ROOMS", .title = "Favorite rooms", .group = .rooms, .source_w = 320, .source_h = 184 },
+    .{ .id = .print_preview, .resource = "PORTABLE_PRINT_PREVIEW", .title = "Print and PDF preview", .group = .files, .source_w = 320, .source_h = 150 },
     .{ .id = .connection_features, .resource = "PORTABLE_CONNECTION_FEATURES", .title = "Connection features", .group = .connection, .source_w = 360, .source_h = 210 },
 };
 
@@ -202,7 +202,7 @@ pub fn fields(id: Id) []const Field {
         },
         .channel_properties => &.{ .{ .label = "Topic" }, .{ .label = "Room modes", .hint = "+nt" }, .{ .label = "Maximum users", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Apply", .hint = "Topic, modes and limits", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password" }},
-        .room_list => &.{ .{ .label = "LISTX query", .hint = "For example N=#root,>10" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "Result limit", .hint = "Optional; blank means unlimited" } },
+        .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "Result limit", .hint = "Optional; blank means unlimited" } },
         .user_list => &.{ .{ .label = "Member nickname", .hint = "Choose a visible room member" }, .{ .label = "Filter", .hint = "Optional nickname filter" } },
         .kick => &.{ .{ .label = "Member nickname", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban mask", .hint = "Optional" } },
         .ban => &.{.{ .label = "Ban mask", .hint = "nick!*@*" }},
@@ -356,9 +356,9 @@ pub fn primaryLabel(id: Id) []const u8 {
         .away => "Set away",
         .automation, .rules, .edit_rule, .rule_sets, .add_to_sets, .rename_loaded_set, .rename_set, .create_set, .advanced_event_params, .advanced_rule_settings => "Save rule",
         .notifications, .notification_users => "Save notifications",
-        .ircx_properties => "Run property action",
-        .room_access => "Apply access action",
-        .ircx_events => "Apply event action",
+        .ircx_properties => "Apply properties",
+        .room_access => "Apply access",
+        .ircx_events => "Apply events",
         .call_link => "Send call link",
         .member_profile => "Request profile",
         .about, .motd, .connection_features => "Close",
@@ -417,6 +417,11 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Join room", primaryLabel(.channel));
     try std.testing.expectEqualStrings("Save profile", primaryLabel(.personal));
     try std.testing.expectEqualStrings("Set away", primaryLabel(.away));
+    try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
+    try std.testing.expectEqualStrings("Channel properties", get(.ircx_properties).title);
+    try std.testing.expectEqualStrings("Operator events", get(.ircx_events).title);
+    try std.testing.expectEqualStrings("Room search", fields(.room_list)[0].label);
+    try std.testing.expectEqualStrings("Apply properties", primaryLabel(.ircx_properties));
 }
 
 test "settings accent chrome maps vermillion and leftover cobalt to index 0" {

@@ -117,6 +117,7 @@ pub const View = struct {
     hovered_room_tab: ?usize = null,
     hovered_room_overflow: bool = false,
     hovered_status_action: ?StatusActionHover = null,
+    focused_status_action: ?StatusActionHover = null,
     hovered_column_control: ?ColumnControlHover = null,
     hovered_member: ?usize = null,
     status_panel_open: bool = false,
@@ -198,8 +199,7 @@ pub const View = struct {
     /// the body camera keeps the source arrow-key and Home behavior.
     pub fn handleFocusedKey(self: *View, key: platform_event.Key, member_count: usize) bool {
         if (self.status_panel_open and key == .escape) {
-            self.status_panel_open = false;
-            self.hovered_status_action = null;
+            self.closeStatusPanel();
             return true;
         }
         switch (self.shell.focus) {
@@ -242,11 +242,27 @@ pub const View = struct {
                 else => return null,
             },
             .say_actions => switch (key) {
-                .left, .up => self.focused_say_action = (self.focused_say_action + @as(u8, @intCast(geometry.say_button_count)) - 1) % @as(u8, @intCast(geometry.say_button_count)),
-                .right, .down => self.focused_say_action = (self.focused_say_action + 1) % @as(u8, @intCast(geometry.say_button_count)),
-                .home => self.focused_say_action = 0,
-                .end => self.focused_say_action = @intCast(geometry.say_button_count - 1),
+                .left, .up => self.focused_say_action = nextEnabledSayAction(self.focused_say_action, false, self.wire_live),
+                .right, .down => self.focused_say_action = nextEnabledSayAction(self.focused_say_action, true, self.wire_live),
+                .home => self.focused_say_action = firstEnabledSayAction(self.wire_live),
+                .end => self.focused_say_action = lastEnabledSayAction(self.wire_live),
                 .enter => return self.activateSayAction(self.focused_say_action),
+                else => return null,
+            },
+            .status => switch (key) {
+                .enter => return self.activateFocusedStatus(),
+                .left, .up => {
+                    if (self.status_panel_open) self.focused_status_action = .connection;
+                },
+                .right, .down => {
+                    if (self.status_panel_open) self.focused_status_action = .settings;
+                },
+                .home => {
+                    if (self.status_panel_open) self.focused_status_action = .connection;
+                },
+                .end => {
+                    if (self.status_panel_open) self.focused_status_action = .settings;
+                },
                 else => return null,
             },
             else => return null,
@@ -341,6 +357,8 @@ pub const View = struct {
                         return .{ .room_tab = self.room_tab_first - 1 };
                     return null;
                 },
+                .home => if (self.room_tab_count > 0) return .{ .room_tab = 0 } else return null,
+                .end => if (self.room_tab_count > 0) return .{ .room_tab = self.room_tab_count - 1 } else return null,
                 else => return null,
             }
         };
@@ -989,18 +1007,15 @@ pub const View = struct {
             const status_layout = ui.StatusPanelLayout.init(self.canvas.width, self.canvas.height, self.status_detailed);
             const panel = status_layout.rect;
             if (!ui.contains(panel, pointer.x, pointer.y)) {
-                self.status_panel_open = false;
-                self.hovered_status_action = null;
+                self.closeStatusPanel();
                 return .none;
             }
             if (ui.contains(status_layout.connection, pointer.x, pointer.y)) {
-                self.status_panel_open = false;
-                self.hovered_status_action = null;
+                self.closeStatusPanel();
                 return .connection;
             }
             if (ui.contains(status_layout.settings, pointer.x, pointer.y)) {
-                self.status_panel_open = false;
-                self.hovered_status_action = null;
+                self.closeStatusPanel();
                 self.openDialog(.settings);
                 return .none;
             }
@@ -1113,8 +1128,13 @@ pub const View = struct {
                 break :emotion .none;
             },
             .status_window, .connection_status => status: {
+                self.shell.focus = .status;
                 self.status_panel_open = !self.status_panel_open;
-                if (!self.status_panel_open) self.hovered_status_action = null;
+                if (self.status_panel_open) {
+                    self.focused_status_action = .connection;
+                } else {
+                    self.closeStatusPanel();
+                }
                 self.active_menu = null;
                 break :status .none;
             },
@@ -1200,6 +1220,7 @@ pub const View = struct {
     }
 
     fn activateSayAction(self: *View, index: u8) Action {
+        if (!sayActionEnabled(index, self.wire_live)) return .none;
         self.focused_say_action = index;
         self.shell.focus = .say_actions;
         if (index == @intFromEnum(shell_mod.SayMode.sound)) {
@@ -1208,7 +1229,30 @@ pub const View = struct {
         }
         self.shell.setSayMode(@enumFromInt(index));
         self.shell.focus = .say_actions;
-        return .send;
+        return .none;
+    }
+
+    fn activateFocusedStatus(self: *View) Action {
+        if (!self.status_panel_open) {
+            self.status_panel_open = true;
+            self.focused_status_action = .connection;
+            return .none;
+        }
+        const action = self.focused_status_action orelse .connection;
+        self.closeStatusPanel();
+        return switch (action) {
+            .connection => .connection,
+            .settings => settings: {
+                self.openDialog(.settings);
+                break :settings .none;
+            },
+        };
+    }
+
+    fn closeStatusPanel(self: *View) void {
+        self.status_panel_open = false;
+        self.hovered_status_action = null;
+        self.focused_status_action = null;
     }
 
     fn invokeContextItem(self: *View, kind: ContextKind, item: u8) void {
@@ -1359,7 +1403,7 @@ pub const View = struct {
 
         drawMenuBar(&self.canvas, layout.menu, self.active_menu, self.hovered_menu);
         drawToolBar(&self.canvas, layout.toolbar, comic_mode, self.hovered_toolbar, if (self.shell.focus == .toolbar) self.focused_toolbar else null, self.wire_live);
-        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab, self.hovered_room_tab, self.hovered_room_overflow);
+        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab or self.shell.focus == .status, self.hovered_room_tab, self.hovered_room_overflow);
         drawSplitters(&self.canvas, layout, comic_mode);
 
         if (comic_mode) {
@@ -1372,14 +1416,14 @@ pub const View = struct {
             try self.drawMemberList(layout.members, transcript, self.shell.member_view == .icons, status);
             if (comic_mode) try self.drawBodyCamera(layout.body_camera, transcript);
         }
-        drawSayWindow(&self.canvas, layout, input, cursor, selection, self.shell.focus == .composer, self.hovered_composer, self.shell.say_mode, self.hovered_say_action, if (self.shell.focus == .say_actions) self.focused_say_action else null, status);
-        drawStatusBar(&self.canvas, layout.status, statusBarLabel(status), transcript.activeMemberCount(), self.hovered_status);
+        drawSayWindow(&self.canvas, layout, input, cursor, selection, self.shell.focus == .composer, self.hovered_composer, self.shell.say_mode, self.hovered_say_action, if (self.shell.focus == .say_actions) self.focused_say_action else null, status, self.wire_live);
+        drawStatusBar(&self.canvas, layout.status, statusBarLabel(status), transcript.activeMemberCount(), self.hovered_status, self.shell.focus == .status);
 
         if (self.shell.focus == .transcript) drawFocus(&self.canvas, layout.transcript);
         if (self.shell.focus == .members) drawFocus(&self.canvas, layout.members);
         if (self.shell.focus == .emotion) drawFocus(&self.canvas, layout.body_camera);
         if (self.hovered_toolbar) |index| drawToolbarTooltip(&self.canvas, layout, index, self.wire_live);
-        if (self.hovered_say_action) |index| drawSayActionTooltip(&self.canvas, layout, index);
+        if (self.hovered_say_action) |index| drawSayActionTooltip(&self.canvas, layout, index, self.wire_live);
         if (self.hovered_room_overflow) drawOverflowTooltip(&self.canvas, layout, comic_mode, tabs.len, self.room_tab_first);
         if (self.hovered_status_tab) drawStatusTabTooltip(&self.canvas, layout, status);
         if (self.hovered_status) drawStatusBarTooltip(&self.canvas, layout, status);
@@ -1387,7 +1431,7 @@ pub const View = struct {
         if (self.hovered_column_control) |_| drawColumnTooltip(&self.canvas, layout, self.shell.comic_columns);
         if (self.active_menu) |menu| drawMenuPopup(&self.canvas, menu, self.hovered_menu_item, self.shell, self.can_moderate, self.wire_live);
         if (self.context_menu) |kind| drawContextPopup(&self.canvas, kind, self.context_x, self.context_y, self.hovered_context_item orelse self.focused_context_item, self.shell.emotion_frozen, self.can_moderate, self.wire_live);
-        if (self.status_panel_open) drawStatusPanel(&self.canvas, status, transcript.activeMemberCount(), self.shell, self.appearance, self.status_detailed, self.hovered_status_action);
+        if (self.status_panel_open) drawStatusPanel(&self.canvas, status, transcript.activeMemberCount(), self.shell, self.appearance, self.status_detailed, self.hovered_status_action orelse self.focused_status_action);
         if (self.active_dialog) |id| drawDialog(&self.canvas, dialogs.get(id), &self.dialog_editors, self.dialog_field, self.dialog_first_field, self.dialog_action_focus, self.hovered_dialog_field, self.hovered_dialog_browse, self.dialog_notice, self.hovered_dialog_button);
     }
 
@@ -1444,8 +1488,8 @@ pub const View = struct {
             .selected = @as(i32, @intFromEnum(self.shell.say_mode)) == action_index,
             .focused = self.shell.focus == .say_actions and self.focused_say_action == action_index,
         });
-        snapshot.append(.{ .id = "status-tab", .role = .button, .bounds = .{ .x = layout.tabs.x, .y = layout.tabs.y, .w = 108, .h = layout.tabs.h }, .label = "Status", .selected = self.status_panel_open, .focused = self.hovered_status_tab });
-        snapshot.append(.{ .id = "status", .role = .button, .bounds = layout.status, .label = status, .focused = self.hovered_status });
+        snapshot.append(.{ .id = "status-tab", .role = .button, .bounds = .{ .x = layout.tabs.x, .y = layout.tabs.y, .w = 108, .h = layout.tabs.h }, .label = "Status", .selected = self.status_panel_open, .focused = self.shell.focus == .status });
+        snapshot.append(.{ .id = "status", .role = .button, .bounds = layout.status, .label = statusBarLabel(status), .focused = self.shell.focus == .status });
         if (self.status_panel_open) snapshot.append(.{ .id = "status-panel", .role = .dialog, .bounds = statusPanelRect(self.canvas.width, self.canvas.height, self.status_detailed), .label = "Connection and activity status", .focused = true });
         if (self.active_menu) |menu| {
             const popup = ui.PopupLayout.menu(self.canvas.width, menuStart(menu), geometry.menu_height, menuPopupRect(self.canvas.width, menu).w, menuItemCount(menu));
@@ -2332,6 +2376,41 @@ fn nextEnabledToolbar(current: u8, forward: bool, connected: bool) u8 {
     return current;
 }
 
+fn sayActionEnabled(index: u8, connected: bool) bool {
+    return switch (index) {
+        2, 4 => connected,
+        else => true,
+    };
+}
+
+fn nextEnabledSayAction(current: u8, forward: bool, connected: bool) u8 {
+    const count: u8 = @intCast(geometry.say_button_count);
+    var item = current;
+    var checked: u8 = 0;
+    while (checked < count) : (checked += 1) {
+        item = if (forward) (item + 1) % count else (item + count - 1) % count;
+        if (sayActionEnabled(item, connected)) return item;
+    }
+    return current;
+}
+
+fn firstEnabledSayAction(connected: bool) u8 {
+    var item: u8 = 0;
+    while (item < geometry.say_button_count) : (item += 1) {
+        if (sayActionEnabled(item, connected)) return item;
+    }
+    return 0;
+}
+
+fn lastEnabledSayAction(connected: bool) u8 {
+    var item: u8 = @intCast(geometry.say_button_count);
+    while (item > 0) {
+        item -= 1;
+        if (sayActionEnabled(item, connected)) return item;
+    }
+    return 0;
+}
+
 fn drawModernToolButton(c: *Canvas, glyph: ToolGlyph, x: i32, y: i32, selected: bool, hovered: bool, disabled: bool) i32 {
     const glyph_color = ui.drawCommandTileState(c, x, y, selected, hovered, disabled);
     ui.drawToolGlyph(c, glyph, x + 8, y + 8, glyph_color);
@@ -2599,7 +2678,7 @@ fn placeEditorCursor(editor: *input_mod.Editor, window: TextWindow, local_x: i32
     editor.selection_anchor = null;
 }
 
-fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor: usize, selection: ?TextSelection, focused: bool, hovered: bool, say_mode: shell_mod.SayMode, hovered_action: ?u8, focused_action: ?u8, status: []const u8) void {
+fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor: usize, selection: ?TextSelection, focused: bool, hovered: bool, say_mode: shell_mod.SayMode, hovered_action: ?u8, focused_action: ?u8, status: []const u8, connected: bool) void {
     const edit = layout.say_editor;
     ui.drawComposerSurface(c, layout.say);
     const editor_layout = ui.ComposerEditorLayout.init(edit);
@@ -2607,18 +2686,19 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     const content_rect = editor_layout.content;
     const mode = sayActionLabel(@intFromEnum(say_mode));
     const mode_w: i32 = if (edit.w >= 220 and input.len == 0) Canvas.uiTextWidth(mode) + 18 else 0;
-    const enter_w: i32 = if (edit.w >= 220 and input.len == 0) Canvas.uiTextWidth("Enter") + 20 else 0;
+    const send_w: i32 = if (edit.w >= 220) Canvas.uiTextWidth("Send") + 20 else 0;
     if (mode_w > 0) ui.drawComposerModeChip(c, .{ .x = edit.x + 14, .y = edit.y + 13, .w = mode_w, .h = 18 }, mode, focused);
-    if (enter_w > 0) {
-        ui.drawInkPlate(c, edit.right() - enter_w - 10, edit.y + 13, enter_w, 18, 2, if (focused) ui.current.accent else ui.current.layer);
-        drawTextEllipsized(c, "Enter", edit.right() - enter_w - 2, edit.y + 14, enter_w - 16, if (focused) ui.current.layer else ui.current.ink);
+    if (send_w > 0) {
+        ui.drawInkPlate(c, edit.right() - send_w - 10, edit.y + 13, send_w, 18, 2, if (focused) ui.current.accent else ui.current.layer);
+        drawTextEllipsized(c, "Send", edit.right() - send_w - 2, edit.y + 14, send_w - 16, if (focused) ui.current.layer else ui.current.ink);
     }
     if (input.len == 0) {
         const placeholder_x = edit.x + 18 + placeholderGap(focused) + if (mode_w > 0) mode_w + 6 else 0;
         const placeholder = composerPlaceholder(status);
-        drawTextEllipsized(c, placeholder, placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - enter_w, ui.current.secondary);
+        drawTextEllipsized(c, placeholder, placeholder_x, edit.y + 13, edit.right() - placeholder_x - 18 - send_w, ui.current.secondary);
     } else {
-        const viewport = composerViewport(input, cursor, content_rect.w);
+        const text_w = @max(0, content_rect.w - if (send_w > 0) send_w + 8 else 0);
+        const viewport = composerViewport(input, cursor, text_w);
         for (viewport.rows[0..viewport.count], 0..) |row, row_index| {
             const window = row.window;
             const text_y = editor_layout.rowY(row_index, viewport.count);
@@ -2631,7 +2711,7 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
                     ui.drawTextSelection(c, editor_layout.selectionRect(selection_x, text_y, selection_w));
                 }
             }
-            drawTextEllipsized(c, input[window.start..window.end], content_rect.x, text_y, content_rect.w, ui.current.ink);
+            drawTextEllipsized(c, input[window.start..window.end], content_rect.x, text_y, text_w, ui.current.ink);
             if (row.cursor_row and focused) {
                 const safe_cursor = std.math.clamp(@min(cursor, input.len), window.start, window.end);
                 const caret_x = editor_layout.caretX(content_rect.x + Canvas.uiTextWidth(input[window.start..safe_cursor]));
@@ -2646,17 +2726,18 @@ fn drawSayWindow(c: *Canvas, layout: geometry.Layout, input: []const u8, cursor:
     var x = layout.say_actions.x;
     for (glyphs, 0..) |glyph, index| {
         const selected = @intFromEnum(say_mode) == index;
-        const glyph_color = ui.drawActionTile(c, x, layout.say_actions.y, layout.say_action_size, layout.say_actions.h, selected, hovered_action == @as(u8, @intCast(index)));
+        const disabled = !sayActionEnabled(@intCast(index), connected);
+        const glyph_color = ui.drawActionTileState(c, x, layout.say_actions.y, layout.say_action_size, layout.say_actions.h, selected, hovered_action == @as(u8, @intCast(index)), disabled);
         ui.drawSayGlyph(c, glyph, x + @divTrunc(layout.say_action_size - 16, 2), layout.say_actions.y + 18, glyph_color);
         if (focused_action == @as(u8, @intCast(index))) ui.drawFocusRing(c, .{ .x = x, .y = layout.say_actions.y, .w = layout.say_action_size, .h = layout.say_actions.h });
         x += layout.say_action_size;
     }
 }
 
-fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
+fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8, connected: bool) void {
     if (index >= geometry.say_button_count) return;
     const label = sayActionLabel(index);
-    const hint = switch (index) {
+    const hint = if (!sayActionEnabled(index, connected)) "Connect first" else switch (index) {
         0 => "Talk",
         1 => "Think",
         2 => "Quiet",
@@ -2719,8 +2800,9 @@ fn drawColumnTooltip(c: *Canvas, layout: geometry.Layout, columns: u8) void {
     ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, "Panels", hint);
 }
 
-fn drawStatusBar(c: *Canvas, rect: Rect, status: []const u8, member_count: usize, hovered: bool) void {
-    ui.drawStatusBar(c, rect.x, rect.y, rect.w, rect.h, status, member_count, hovered);
+fn drawStatusBar(c: *Canvas, rect: Rect, status: []const u8, member_count: usize, hovered: bool, focused: bool) void {
+    ui.drawStatusBar(c, rect.x, rect.y, rect.w, rect.h, status, member_count, hovered or focused);
+    if (focused) ui.drawFocusRing(c, rect);
 }
 
 fn statusPanelRect(width: u32, height: u32, detailed: bool) Rect {
@@ -2735,7 +2817,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     const tone = ui.statusTone(status);
     ui.drawStatusIdentity(c, .{ .x = panel.x + 16, .y = panel.y + 15, .w = 34, .h = 34 }, tone);
     const heading = statusPanelHeading(status);
-    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, heading, status);
+    ui.drawContentHeading(c, .{ .x = panel.x + 62, .y = panel.y + 14, .w = panel.w - 82, .h = 36 }, heading, statusPanelDetail(status));
     ui.drawSectionRule(c, panel.x + 16, panel.y + 60, panel.w - 32);
 
     var members_buf: [32]u8 = undefined;
@@ -2808,12 +2890,29 @@ fn statusPanelHeading(status: []const u8) []const u8 {
     return "Waiting on the wire";
 }
 
+fn statusPanelDetail(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "Live";
+    if (tone == .failure) return failureStatusLabel(status);
+    if (std.mem.indexOf(u8, status, "offline") != null) return "Connect to ink the first balloon";
+    return "Waiting for the wire";
+}
+
 fn statusBarLabel(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .success) return "On the wire";
-    if (tone == .failure) return status;
+    if (tone == .failure) return failureStatusLabel(status);
     if (std.mem.indexOf(u8, status, "offline") != null) return "Sunday page is offline";
     return "Waiting on the wire";
+}
+
+fn failureStatusLabel(status: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, status, "(refused)") != null) return "Wire failed (refused) - click Connect";
+    if (std.mem.indexOf(u8, status, "(timeout)") != null) return "Wire failed (timeout) - click Connect";
+    if (std.mem.indexOf(u8, status, "(reset)") != null) return "Wire failed (reset) - click Connect";
+    if (std.mem.indexOf(u8, status, "(TLS)") != null) return "Wire failed (TLS) - click Connect";
+    if (std.mem.indexOf(u8, status, "(unreachable)") != null) return "Wire failed (unreachable) - click Connect";
+    return "Wire failed - click Connect";
 }
 
 fn drawEmptyBuffer(c: *Canvas, rect: Rect, title: []const u8, detail: []const u8, columns: u8) void {
@@ -3078,7 +3177,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
     return switch (id) {
         .setup, .servers => "Verified TLS on 6697 is the Sunday default",
         .connection_features => if (std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "",
-        .room_list => "LISTX after the wire is live",
+        .room_list => "Search rooms after the wire is live",
         .user_list => "Pick a CAST member after the wire is live",
         .channel, .channel_create => "Join after the wire is live",
         .whisper => "Whisper after the wire is live",
@@ -3535,6 +3634,7 @@ test "status and connect toolbar expose a prefilled connection workflow" {
     try std.testing.expect(view.hovered_status);
     try std.testing.expectEqual(Action.none, view.handlePointer(.{ .kind = .down, .x = layout.status.x + 24, .y = layout.status.y + 10, .button = .primary }, 0, 0));
     try std.testing.expect(view.status_panel_open);
+    try std.testing.expectEqual(shell_mod.Focus.status, view.shell.focus);
     const status_layout = ui.StatusPanelLayout.init(view.width(), view.height(), true);
     const connection = status_layout.connection;
     try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = connection.x + 5, .y = connection.y + 5 }, 0));
@@ -4140,6 +4240,10 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("On the wire", statusBarLabel("connected"));
     try std.testing.expectEqualStrings("Sunday page is offline", statusBarLabel("offline"));
     try std.testing.expectEqualStrings("Waiting on the wire", statusBarLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - click Connect", statusBarLabel("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Wire failed (refused) - click Connect", statusPanelDetail("Connection failed (refused) - click for settings"));
+    try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
+    try std.testing.expectEqualStrings("Search rooms after the wire is live", dialogHelper(.room_list, ""));
     try std.testing.expectEqualStrings("Wire", toolbarHint(0));
     try std.testing.expectEqualStrings("Join", toolbarHint(2));
     try std.testing.expectEqualStrings("CAST", toolbarHint(8));
@@ -4174,6 +4278,8 @@ test "overflow rooms expose hover tooltip keyboard and jump to the next hidden r
     view.room_tab_first = 0;
     view.shell.focus = .navigation;
     try std.testing.expectEqual(Action{ .room_tab = tabViewport(layout, true).capacity }, view.handleMenuKey(.right).?);
+    try std.testing.expectEqual(Action{ .room_tab = 0 }, view.handleMenuKey(.home).?);
+    try std.testing.expectEqual(Action{ .room_tab = 2 }, view.handleMenuKey(.end).?);
 
     const snapshot = view.semanticSnapshot("connected", &tabs, 0);
     var found_overflow = false;
@@ -4204,4 +4310,62 @@ test "wire-dead toolbar commands look disabled and are skipped" {
     try std.testing.expect(!toolbarCommandEnabled(2, false));
     try std.testing.expect(toolbarCommandEnabled(0, false));
     try std.testing.expect(toolbarCommandEnabled(5, false));
+}
+
+test "say actions set mode only and skip whisper and sound while offline" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const think_x = layout.say_actions.x + layout.say_action_size + 4;
+    try std.testing.expectEqual(Action.none, view.handlePointer(.{
+        .kind = .down,
+        .x = think_x,
+        .y = layout.say_actions.y + 8,
+        .button = .primary,
+    }, 0, 0));
+    try std.testing.expectEqual(shell_mod.SayMode.think, view.shell.say_mode);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.wire_live = false;
+    const whisper_x = layout.say_actions.x + 2 * layout.say_action_size + 4;
+    try std.testing.expectEqual(Action.none, view.handlePointer(.{
+        .kind = .down,
+        .x = whisper_x,
+        .y = layout.say_actions.y + 8,
+        .button = .primary,
+    }, 0, 0));
+    try std.testing.expectEqual(shell_mod.SayMode.think, view.shell.say_mode);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.shell.focus = .say_actions;
+    view.focused_say_action = 0;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(u8, 1), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.end).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
+    try std.testing.expect(!sayActionEnabled(2, false));
+    try std.testing.expect(!sayActionEnabled(4, false));
+    try std.testing.expect(sayActionEnabled(1, false));
+}
+
+test "status keyboard opens the panel and activates its actions" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expect(view.status_panel_open);
+    try std.testing.expectEqual(@as(?StatusActionHover, .connection), view.focused_status_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(?StatusActionHover, .settings), view.focused_status_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(dialogs.Id.settings, view.active_dialog.?);
+    try std.testing.expect(!view.status_panel_open);
+
+    view.active_dialog = null;
+    view.shell.focus = .status;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expectEqual(Action.connection, view.handleFocusedActionKey(.enter).?);
+    try std.testing.expect(!view.status_panel_open);
 }

@@ -18,6 +18,7 @@ pub const Focus = enum {
     say_actions,
     members,
     emotion,
+    status,
 };
 
 pub const State = struct {
@@ -44,21 +45,23 @@ pub const State = struct {
             .toolbar => .transcript,
             .transcript => .composer,
             .composer => .say_actions,
-            .say_actions => if (self.show_members) .members else if (self.show_navigation) .navigation else .toolbar,
-            .members => if (self.content_mode == .comic) .emotion else if (self.show_navigation) .navigation else .toolbar,
-            .emotion => if (self.show_navigation) .navigation else .transcript,
+            .say_actions => if (self.show_members) .members else .status,
+            .members => if (self.content_mode == .comic) .emotion else .status,
+            .emotion => .status,
+            .status => if (self.show_navigation) .navigation else .toolbar,
         };
     }
 
     pub fn cycleFocusBackward(self: *State) void {
         self.focus = switch (self.focus) {
-            .navigation => if (self.show_members and self.content_mode == .comic) .emotion else if (self.show_members) .members else .say_actions,
-            .toolbar => if (self.show_navigation) .navigation else if (self.show_members and self.content_mode == .comic) .emotion else if (self.show_members) .members else .say_actions,
+            .navigation => .status,
+            .toolbar => if (self.show_navigation) .navigation else .status,
             .transcript => .toolbar,
             .composer => .transcript,
             .say_actions => .composer,
             .members => .say_actions,
             .emotion => .members,
+            .status => if (self.show_members and self.content_mode == .comic) .emotion else if (self.show_members) .members else .say_actions,
         };
     }
 
@@ -273,6 +276,8 @@ test "focus follows visible Microsoft shell regions" {
     state.cycleFocus();
     try std.testing.expectEqual(Focus.emotion, state.focus);
     state.cycleFocus();
+    try std.testing.expectEqual(Focus.status, state.focus);
+    state.cycleFocus();
     try std.testing.expectEqual(Focus.navigation, state.focus);
     state.cycleFocus();
     try std.testing.expectEqual(Focus.toolbar, state.focus);
@@ -284,6 +289,8 @@ test "focus follows visible Microsoft shell regions" {
     try std.testing.expectEqual(Focus.say_actions, state.focus);
     state.toggleMembers();
     state.cycleFocus();
+    try std.testing.expectEqual(Focus.status, state.focus);
+    state.cycleFocus();
     try std.testing.expectEqual(Focus.navigation, state.focus);
     state.toggleNavigation();
     try std.testing.expectEqual(Focus.transcript, state.focus);
@@ -294,11 +301,13 @@ test "focus follows visible Microsoft shell regions" {
 test "text mode skips the comic-only emotion control" {
     var state: State = .{ .content_mode = .text, .focus = .members };
     state.cycleFocus();
-    try std.testing.expectEqual(Focus.navigation, state.focus);
+    try std.testing.expectEqual(Focus.status, state.focus);
 }
 
 test "reverse focus follows the same shell order" {
     var state: State = .{ .focus = .navigation };
+    state.cycleFocusBackward();
+    try std.testing.expectEqual(Focus.status, state.focus);
     state.cycleFocusBackward();
     try std.testing.expectEqual(Focus.emotion, state.focus);
     state.cycleFocusBackward();

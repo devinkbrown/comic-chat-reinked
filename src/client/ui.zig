@@ -1347,7 +1347,16 @@ pub fn drawConversationTab(c: *Canvas, rect: Rect, label: []const u8, unread: us
 }
 
 pub fn drawActionTile(c: *Canvas, x: i32, y: i32, width: i32, height: i32, selected: bool, hovered: bool) u32 {
+    return drawActionTileState(c, x, y, width, height, selected, hovered, false);
+}
+
+pub fn drawActionTileState(c: *Canvas, x: i32, y: i32, width: i32, height: i32, selected: bool, hovered: bool, disabled: bool) u32 {
     const inset = Rect{ .x = x + 5, .y = y + 7, .w = width - 10, .h = height - 14 };
+    if (disabled) {
+        drawInkPlate(c, inset.x, inset.y, inset.w, inset.h, 2, current.chrome);
+        c.fillRect(inset.x + stroke, inset.y + stroke, @max(0, inset.w - stroke * 2), 2, current.divider);
+        return current.divider;
+    }
     if (selected) {
         drawInkPlate(c, inset.x, inset.y, inset.w, inset.h, 2, current.accent);
         return current.layer;
@@ -1717,6 +1726,7 @@ pub fn drawStatusBar(c: *Canvas, x: i32, y: i32, width: i32, height: i32, status
 }
 
 pub fn statusTone(status: []const u8) NoticeTone {
+    if (std.mem.eql(u8, status, "On the wire")) return .success;
     if (std.mem.indexOf(u8, status, "connected") != null and std.mem.indexOf(u8, status, "reconnecting") == null) return .success;
     if (std.mem.indexOf(u8, status, "error") != null or std.mem.indexOf(u8, status, "failed") != null) return .failure;
     if (std.mem.indexOf(u8, status, "reconnect") != null or std.mem.indexOf(u8, status, "offline") != null) return .warning;
@@ -1840,6 +1850,7 @@ test "dialog layout keeps fields and actions inside the modal" {
 test "semantic feedback primitives classify status and button targets" {
     const layout = DialogLayout.init(640, 430, 252, 218, 2, 96, true);
     try std.testing.expectEqual(NoticeTone.success, statusTone("connected"));
+    try std.testing.expectEqual(NoticeTone.success, statusTone("On the wire"));
     try std.testing.expectEqual(NoticeTone.warning, statusTone("reconnecting"));
     try std.testing.expectEqual(NoticeTone.failure, statusTone("connection failed"));
     try std.testing.expectEqual(DialogButton.primary, dialogButtonAt(layout, layout.primary.x + 1, layout.primary.y + 1).?);
