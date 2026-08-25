@@ -4632,7 +4632,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
         2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
         301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 354, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
         322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
-        704, 705, 706, 710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733, 826, 827 => true,
+        704, 705, 706, 710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733, 778, 826, 827 => true,
         801...819, 824, 825, 900...905, 907, 908 => true,
         else => false,
     };
@@ -5151,9 +5151,13 @@ fn sendOnyxServiceSlash(
     const rest = std.mem.trim(u8, if (split < body.len) body[split + 1 ..] else "", " \t");
     var words: [16][]const u8 = undefined;
     var count: usize = 0;
+    var overflow = false;
     var it = std.mem.tokenizeAny(u8, rest, " \t");
     while (it.next()) |word| {
-        if (count == words.len) break;
+        if (count == words.len) {
+            overflow = true;
+            break;
+        }
         words[count] = word;
         count += 1;
     }
@@ -5162,6 +5166,10 @@ fn sendOnyxServiceSlash(
         try appendSessionNotice(workspace, "Connect before using that command.");
         return true;
     };
+    if (overflow and isOnyxServiceSlash(verb)) {
+        try appendSessionNotice(workspace, "That command has too many arguments.");
+        return true;
+    }
     if (std.ascii.eqlIgnoreCase(verb, "identify")) {
         if (count < 2) {
             try appendSessionNotice(workspace, "Usage: /identify <account> <password> [code]");
@@ -5811,6 +5819,51 @@ fn sendOnyxServiceSlash(
         };
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "listx")) {
+        client.listRooms(if (count > 0) words[0] else "", if (count > 1) words[1] else "", true) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "tempmode")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "sweep")) {
+            client.tempModeSweep() catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "add")) {
+            if (count < 4) {
+                try appendSessionNotice(workspace, "Usage: /tempmode add <#channel> <flag> [param] <duration>");
+                return true;
+            }
+            const duration = std.fmt.parseInt(u32, words[count - 1], 10) catch {
+                try appendSessionNotice(workspace, "Usage: /tempmode add <#channel> <flag> [param] <duration>");
+                return true;
+            };
+            const parameter: ?[]const u8 = if (count > 4) words[3] else null;
+            client.tempModeAdd(words[1], words[2], parameter, duration) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "cancel")) {
+            if (count < 3) {
+                try appendSessionNotice(workspace, "Usage: /tempmode cancel <#channel> <flag> [param]");
+                return true;
+            }
+            client.tempModeCancel(words[1], words[2], if (count > 3) words[3] else null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /tempmode add|cancel|sweep ...");
+        return true;
+    }
     if (!isOnyxServiceSlash(verb)) return false;
     var command_buf: [16]u8 = undefined;
     if (verb.len > command_buf.len) return false;
@@ -5861,6 +5914,7 @@ fn rejectServiceIrc(workspace: *cc.client.workspace.Workspace, err: anyerror) !v
         error.AccountRegistrationNotEnabled => "This server did not advertise account registration.",
         error.CapabilityNotEnabled => "This server did not advertise that command.",
         error.InvalidUtf8 => "That text is not valid UTF-8.",
+        error.TxBackpressure => "The connection is busy. Try again in a moment.",
         else => return err,
     };
     try appendSessionNotice(workspace, line);
@@ -5874,6 +5928,7 @@ fn requestJoinWithKey(
 ) !?[]const u8 {
     client.joinWithKey(channel, key) catch |err| switch (err) {
         error.InvalidIrcParameter => return sessionLimitFailureNotice(.join, workspace, channel, key),
+        error.TxBackpressure => return "The connection is busy. Try again in a moment.",
         else => return err,
     };
     return null;
@@ -5889,6 +5944,7 @@ fn requestCreateRoom(
 ) !?[]const u8 {
     client.create(channel, creation_modes, limit, key) catch |err| switch (err) {
         error.InvalidIrcParameter => return sessionLimitFailureNotice(.create, workspace, channel, key),
+        error.TxBackpressure => return "The connection is busy. Try again in a moment.",
         else => return err,
     };
     return null;
@@ -5901,6 +5957,7 @@ fn requestNickChange(
 ) !?[]const u8 {
     client.changeNick(nick_value) catch |err| switch (err) {
         error.InvalidIrcParameter => return sessionLimitFailureNotice(.nick, workspace, "", ""),
+        error.TxBackpressure => return "The connection is busy. Try again in a moment.",
         else => return err,
     };
     return null;
@@ -5991,6 +6048,7 @@ fn dialogIrcNotice(err: anyerror, notice: []const u8) ?[]const u8 {
     return switch (err) {
         error.InvalidIrcParameter => notice,
         error.InvalidUtf8 => "That text is not valid UTF-8.",
+        error.TxBackpressure => "The connection is busy. Try again in a moment.",
         else => null,
     };
 }
@@ -7190,6 +7248,10 @@ fn handleInputKey(
                     try transcript.addWithOptions("Server", "That message is not valid UTF-8.", .{ .modes = cc.proto.udi.bm_action });
                     return true;
                 },
+                error.TxBackpressure => {
+                    try transcript.addWithOptions("Server", "The connection is busy. Try again in a moment.", .{ .modes = cc.proto.udi.bm_action });
+                    return true;
+                },
                 else => return err,
             };
             try transcript.addWireMessage(nick, comic_message.items, is_private, null);
@@ -7686,6 +7748,7 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("325"));
     try std.testing.expect(isVisibleServerWorkflowReply("364"));
     try std.testing.expect(isVisibleServerWorkflowReply("717"));
+    try std.testing.expect(isVisibleServerWorkflowReply("778"));
     try std.testing.expect(isVisibleServerWorkflowReply("824"));
     try std.testing.expect(isVisibleServerWorkflowReply("305"));
     try std.testing.expect(isVisibleServerWorkflowReply("306"));
@@ -7795,6 +7858,8 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("pins"));
     try std.testing.expect(isOnyxServiceSlash("successor"));
     try std.testing.expect(isOnyxServiceSlash("accept"));
+    try std.testing.expect(isOnyxServiceSlash("listx"));
+    try std.testing.expect(isOnyxServiceSlash("tempmode"));
     try std.testing.expect(isOnyxServiceReply("SUCCESSOR"));
     try std.testing.expect(isVisibleServerWorkflowReply("SUCCESSOR"));
     try std.testing.expect(isOnyxQuerySlash("umode"));
@@ -7851,6 +7916,7 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(!isOnyxServiceSlash("users"));
     try std.testing.expect(!isOnyxServiceSlash("stats"));
     try std.testing.expectEqualStrings("That text is not valid UTF-8.", dialogIrcNotice(error.InvalidUtf8, "nope").?);
+    try std.testing.expectEqualStrings("The connection is busy. Try again in a moment.", dialogIrcNotice(error.TxBackpressure, "nope").?);
     try std.testing.expectEqualStrings("nope", dialogIrcNotice(error.InvalidIrcParameter, "nope").?);
     try std.testing.expect(dialogIrcNotice(error.OutOfMemory, "nope") == null);
     try std.testing.expect(isVisibleServerWorkflowReply("REGISTER"));
@@ -8511,6 +8577,14 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT -bob") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accept"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT *") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/listx N=#root,>10 25"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "LISTX N=#root,>10 25") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tempmode add #root +m 60"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEMPMODE ADD #root +m 60") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tempmode sweep"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEMPMODE SWEEP") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ison a b c d e f g h i j k l m n o p q"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[workspace.find("#root").?].transcript.lines.items[workspace.rooms.items[workspace.find("#root").?].transcript.lines.items.len - 1].text, "too many arguments") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
     try std.testing.expect(!client.projectsSessionChannels());
 

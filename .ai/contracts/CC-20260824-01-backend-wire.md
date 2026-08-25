@@ -175,6 +175,15 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 43 leftovers in scope
+
+- `/listx` uses `listRooms` (LISTX query/limit validation); `/tempmode` uses
+  `tempModeAdd`/`Cancel`/`Sweep`; inbound `778` stays visible
+- Service slashes with more than 16 arguments notice instead of silent
+  truncation; `TxBackpressure` stays English
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 42 leftovers in scope
 
 - `/accept` uses the live client method (`ACCEPT +nick` / `-nick` / `*`)
