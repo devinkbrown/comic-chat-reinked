@@ -2268,7 +2268,7 @@ fn prefillOpenedDialog(
                 try connected.appendEnabledCapabilities(&capabilities, view.gpa);
                 try view.setDialogValueAt(3, if (capabilities.items.len == 0) "None yet" else capabilities.items);
             } else {
-                try view.setDialogValueAt(3, "Waiting on the wire");
+                try view.setDialogValueAt(3, "Hold on the wire");
             }
         },
         .rule_sets => {
@@ -2530,7 +2530,7 @@ fn applyDialogAction(
         },
         .room_list => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before browsing rooms.");
+                view.setDialogNotice("Connect first to browse rooms.");
                 return;
             };
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
@@ -2562,7 +2562,7 @@ fn applyDialogAction(
         },
         .invitation => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before accepting an invitation.");
+                view.setDialogNotice("Connect first to accept an invitation.");
                 return;
             };
             const index = workspace.ensure(value) catch {
@@ -2574,7 +2574,7 @@ fn applyDialogAction(
         },
         .channel_password => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before unlocking a room.");
+                view.setDialogNotice("Connect first to unlock a room.");
                 return;
             };
             try client.joinWithKey(room.name, value);
@@ -2649,7 +2649,7 @@ fn applyDialogAction(
         },
         .channel_properties => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before changing room properties.");
+                view.setDialogNotice("Connect first to change room properties.");
                 return;
             };
             try client.setTopic(room.name, value);
@@ -2662,11 +2662,11 @@ fn applyDialogAction(
         },
         .ircx_properties => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Named properties need a live Sunday connection.");
+                view.setDialogNotice("Connect first.");
                 return;
             }
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before using room properties.");
+                view.setDialogNotice("Connect first to use room properties.");
                 return;
             };
             const entity = if (value.len == 0) room.name else value;
@@ -2695,11 +2695,11 @@ fn applyDialogAction(
         },
         .room_access => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Room access needs a live Sunday connection.");
+                view.setDialogNotice("Connect first.");
                 return;
             }
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before changing room access.");
+                view.setDialogNotice("Connect first to change room access.");
                 return;
             };
             const operation = value;
@@ -2739,11 +2739,11 @@ fn applyDialogAction(
         },
         .ircx_events => {
             if (!state.ircx_data) {
-                view.setDialogNotice("Room events need a live Sunday connection.");
+                view.setDialogNotice("Connect first.");
                 return;
             }
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before managing room events.");
+                view.setDialogNotice("Connect first to manage room events.");
                 return;
             };
             const operation = value;
@@ -2767,7 +2767,7 @@ fn applyDialogAction(
             const count = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(2), " \t"), 10) catch 8;
             const interval = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(3), " \t"), 10) catch 10;
             if (count == 0 or interval == 0) {
-                view.setDialogNotice("Repeat limits must be positive numbers.");
+                view.setDialogNotice("Repeat cap must be a positive number.");
                 return;
             }
             if (hasWireControl(view.dialogValueAt(1))) {
@@ -2783,7 +2783,7 @@ fn applyDialogAction(
                 return;
             }
             if (hasWireControl(view.dialogValueAt(4))) {
-                view.setDialogNotice("Automation action values must stay on one line.");
+                view.setDialogNotice("Action text must stay on one line.");
                 return;
             }
             try preferences.upsertRule(.{
@@ -2846,7 +2846,7 @@ fn applyDialogAction(
         },
         .rename_loaded_set, .rename_set => {
             preferences.renameRuleSet(value, view.dialogValueAt(1)) catch {
-                view.setDialogNotice("Choose an existing set and enter a new name.");
+                view.setDialogNotice("Choose an existing set and enter a new set name.");
                 return;
             };
             try preferences.saveFile(io, network.runtime.preferences_path);
@@ -2860,7 +2860,7 @@ fn applyDialogAction(
         },
         .advanced_event_params => {
             const maximum = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(1), " \t"), 10) catch {
-                view.setDialogNotice("Repeat limit must be a number.");
+                view.setDialogNotice("Repeat cap must be a number.");
                 return;
             };
             const interval = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(2), " \t"), 10) catch {
@@ -2915,7 +2915,7 @@ fn applyDialogAction(
                 state.notification_previous.clearRetainingCapacity();
             } else if (std.ascii.eqlIgnoreCase(operation, "Join room")) {
                 const client = maybe_client orelse {
-                    view.setDialogNotice("Connect before joining a room.");
+                    view.setDialogNotice("Connect first to join a room.");
                     return;
                 };
                 const target_room = std.mem.trim(u8, view.dialogValueAt(3), " \t");
@@ -2940,7 +2940,7 @@ fn applyDialogAction(
                     view.shell.setSayMode(.whisper);
                 } else if (cc.client.dialogs.matchesAny(operation, &.{ "Invite CAST", "Invite to current room" })) {
                     const client = maybe_client orelse {
-                        view.setDialogNotice("Connect before sending an invitation.");
+                        view.setDialogNotice("Connect first to send an invitation.");
                         return;
                     };
                     try client.invite(member, room.name);
@@ -2950,7 +2950,7 @@ fn applyDialogAction(
         .file_transfer => try applyFileTransferDialog(gpa, io, view, maybe_client, state, room),
         .call_link => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before sending a call link.");
+                view.setDialogNotice("Connect first to send a call link.");
                 return;
             };
             const link = view.dialogValueAt(1);
@@ -2966,7 +2966,7 @@ fn applyDialogAction(
         },
         .member_profile => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before requesting a CAST profile.");
+                view.setDialogNotice("Connect first to request a CAST profile.");
                 return;
             };
             if (selectRosterMember(&room.transcript, value) == null) {
@@ -2978,7 +2978,7 @@ fn applyDialogAction(
         },
         .sound => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before sending a sound.");
+                view.setDialogNotice("Connect first to send a sound.");
                 return;
             };
             if (std.mem.indexOfAny(u8, value, "\r\n\x00\x01") != null) {
@@ -3292,7 +3292,7 @@ fn applyFileTransferDialog(
     }
 
     const client = maybe_client orelse {
-        view.setDialogNotice("Connect before sending a file.");
+        view.setDialogNotice("Connect first to send a file.");
         return;
     };
     const target = std.mem.trim(u8, view.dialogValueAt(1), " \t");
@@ -4416,7 +4416,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
                 try view.setDialogValueAt(0, "Off the wire");
                 try view.setDialogValueAt(1, "Off the wire");
                 try view.setDialogValueAt(2, "Hold");
-                try view.setDialogValueAt(3, "Waiting on the wire");
+                try view.setDialogValueAt(3, "Hold on the wire");
             },
             .file_transfer => {
                 try view.setDialogValueAt(0, "Receive offer");

@@ -231,6 +231,7 @@ pub const View = struct {
                 .up => self.shell.moveEmotion(0, -1),
                 .down => self.shell.moveEmotion(0, 1),
                 .home => self.shell.neutralEmotion(),
+                .end => self.shell.outerEmotion(),
                 .escape => {
                     self.shell.focus = .composer;
                     return true;
@@ -333,7 +334,7 @@ pub const View = struct {
             .emotion => switch (key) {
                 .enter => return .send_expression,
                 .char => |code| if (code == ' ') return .send_expression else return .none,
-                .left, .right, .up, .down, .home, .escape, .tab, .page_up, .page_down => return null,
+                .left, .right, .up, .down, .home, .end, .escape, .tab, .page_up, .page_down => return null,
                 else => return .none,
             },
             else => return null,
@@ -3123,7 +3124,7 @@ fn emptyPageCopy(status: []const u8) EmptyPageCopy {
     const tone = ui.statusTone(status);
     if (tone == .failure) return .{ .title = "Sunday page could not connect", .detail = "Wire failed - open Wire setup", .waiting = true };
     if (isOfflineStatus(status)) return .{ .title = "Sunday page is offline", .detail = "Connect to ink the first balloon", .waiting = true };
-    if (tone != .success) return .{ .title = "Sunday page is waiting", .detail = "Waiting for the wire", .waiting = true };
+    if (tone != .success) return .{ .title = "Sunday page is on hold", .detail = "Hold for the wire", .waiting = true };
     return .{ .title = "Sunday page is open", .detail = "Ink the first balloon and press Enter", .waiting = false };
 }
 
@@ -3138,7 +3139,7 @@ fn composerPlaceholder(status: []const u8) []const u8 {
     const tone = ui.statusTone(status);
     if (tone == .failure) return "Wire failed - Connect, then ink...";
     if (isOfflineStatus(status)) return "Connect, then ink the next balloon...";
-    if (tone != .success) return "Waiting on the wire...";
+    if (tone != .success) return "Hold on the wire...";
     return "Ink the next balloon...";
 }
 
@@ -3161,7 +3162,7 @@ fn statusPanelHeading(status: []const u8) []const u8 {
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
     if (std.mem.eql(u8, status, "connecting")) return "Connecting to the wire";
-    return "Waiting on the wire";
+    return "Hold on the wire";
 }
 
 fn statusPanelDetail(status: []const u8) []const u8 {
@@ -3170,7 +3171,7 @@ fn statusPanelDetail(status: []const u8) []const u8 {
     if (tone == .failure) return failureStatusLabel(status);
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Choose another sign-in name";
     if (isOfflineStatus(status)) return "Connect to ink the first balloon";
-    return "Waiting for the wire";
+    return "Hold for the wire";
 }
 
 fn statusBarLabel(status: []const u8) []const u8 {
@@ -3183,7 +3184,7 @@ fn statusBarLabel(status: []const u8) []const u8 {
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
     if (std.mem.eql(u8, status, "connecting")) return "Connecting to the wire";
-    return "Waiting on the wire";
+    return "Hold on the wire";
 }
 
 fn isOfflineStatus(status: []const u8) bool {
@@ -3540,8 +3541,8 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .comics_view => "Sunday page or conversation",
         .character => "Who stands on the page",
         .background => "The paper behind every panel",
-        .password => "Account name and password for this wire",
-        .automation => "Greeting and repeat limits",
+        .password => "Wire account and password for this wire",
+        .automation => "Greeting and repeat cap",
         .rules, .edit_rule => "When something happens on the page",
         .rule_sets => "Create, import, or export a rule set",
         .add_to_sets => "Add a rule to an open set",
@@ -3619,7 +3620,7 @@ fn dialogGroupText(id: dialogs.Id) []const u8 {
         .create_set => "Name a new rule set",
         .advanced_event_params => "How often this rule may fire",
         .advanced_rule_settings => "Enable matching and case",
-        .automation => "Greeting and repeat limits",
+        .automation => "Greeting and repeat cap",
         .room_access => "Grant, deny, or show room access",
         .ircx_properties => "Read or write named room properties",
         .ircx_events => "Watch room, CAST, server, or wire events",
@@ -3744,7 +3745,7 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
     const first_value = if (editors.len != 0) editors[0].text() else "";
     const helper = if (notice.len != 0) notice else dialogHelper(spec.id, first_value);
     if (helper.len != 0) {
-        const tone: ui.NoticeTone = if (std.mem.indexOf(u8, helper, "failed") != null or std.mem.indexOf(u8, helper, "Connect before") != null or std.mem.indexOf(u8, helper, "must") != null)
+        const tone: ui.NoticeTone = if (std.mem.indexOf(u8, helper, "failed") != null or std.mem.indexOf(u8, helper, "Connect first") != null or std.mem.indexOf(u8, helper, "Connect before") != null or std.mem.indexOf(u8, helper, "needs a live") != null or std.mem.indexOf(u8, helper, "must") != null)
             .failure
         else if (notice.len != 0)
             .warning
@@ -4700,10 +4701,11 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Sunday page is offline", statusPanelHeading("offline"));
 
     const waiting = emptyPageCopy("reconnecting");
-    try std.testing.expectEqualStrings("Sunday page is waiting", waiting.title);
-    try std.testing.expectEqualStrings("Waiting for the wire", waiting.detail);
-    try std.testing.expectEqualStrings("Waiting on the wire...", composerPlaceholder("reconnecting"));
-    try std.testing.expectEqualStrings("Waiting on the wire", statusPanelHeading("reconnecting"));
+    try std.testing.expectEqualStrings("Sunday page is on hold", waiting.title);
+    try std.testing.expectEqualStrings("Hold for the wire", waiting.detail);
+    try std.testing.expectEqualStrings("Hold on the wire...", composerPlaceholder("reconnecting"));
+    try std.testing.expectEqualStrings("Hold on the wire", statusPanelHeading("reconnecting"));
+    try std.testing.expectEqualStrings("Hold for the wire", statusPanelDetail("reconnecting"));
 
     const live = emptyPageCopy("connected");
     try std.testing.expectEqualStrings("Sunday page is open", live.title);
@@ -4714,7 +4716,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Sunday page is offline - open Wire setup", statusBarLabel("offline"));
     try std.testing.expectEqualStrings("Sunday page is offline - open Wire setup", statusBarLabel("Disconnected"));
     try std.testing.expectEqualStrings("Off", statusTabLabel("Disconnected"));
-    try std.testing.expectEqualStrings("Waiting on the wire", statusBarLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Hold on the wire", statusBarLabel("reconnecting"));
     try std.testing.expectEqualStrings("Wire failed (refused) - open Wire setup", statusBarLabel("Connection failed (refused) - click for settings"));
     try std.testing.expectEqualStrings("Wire failed (refused) - open Wire setup", statusPanelDetail("Connection failed (refused) - click for settings"));
     try std.testing.expectEqualStrings("Live", statusPanelDetail("connected"));
@@ -4812,7 +4814,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("H", memberRoleChip(.halfop));
     try std.testing.expectEqualStrings("OP", memberRoleChip(.operator));
     try std.testing.expectEqualStrings("OWN", memberRoleChip(.owner));
-    try std.testing.expectEqualStrings("Account name and password for this wire", dialogHelper(.password, ""));
+    try std.testing.expectEqualStrings("Wire account and password for this wire", dialogHelper(.password, ""));
     try std.testing.expectEqualStrings("How often this rule may fire", dialogHelper(.advanced_event_params, ""));
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 12, true));
     try std.testing.expectEqualStrings("Moderate", contextItemHint(.member, 3, true));
@@ -4834,7 +4836,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Off the wire"));
     try std.testing.expectEqualStrings("What this wire is offering", dialogHelper(.connection_features, "Verified TLS"));
     try std.testing.expectEqualStrings("Used on the wire and the Sunday page", dialogGroupText(.nickname));
-    try std.testing.expectEqualStrings("Greeting and repeat limits", dialogGroupText(.automation));
+    try std.testing.expectEqualStrings("Greeting and repeat cap", dialogGroupText(.automation));
 }
 
 test "invitation password and wire list route from existing menus" {
@@ -5081,6 +5083,20 @@ test "emotion keyboard sends the current expression" {
     try std.testing.expectEqual(Action.send_expression, view.handleFocusedActionKey(.enter).?);
     try std.testing.expectEqual(Action.send_expression, view.handleFocusedActionKey(.{ .char = ' ' }).?);
     try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.right));
+}
+
+test "emotion Home and End jump to first and last intensity" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .emotion;
+    view.shell.emotion_radius = 48;
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.home));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.end));
+    try std.testing.expect(view.handleFocusedKey(.end, 0));
+    try std.testing.expect(view.shell.emotion_x != 0 or view.shell.emotion_y != 0);
+    try std.testing.expect(view.handleFocusedKey(.home, 0));
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_x);
+    try std.testing.expectEqual(@as(i16, 0), view.shell.emotion_y);
 }
 
 test "dialog Home and End jump to the first and last choice" {

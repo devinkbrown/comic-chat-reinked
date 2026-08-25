@@ -190,6 +190,24 @@ pub const State = struct {
         self.focus = .emotion;
     }
 
+    pub fn outerEmotion(self: *State) void {
+        if (self.emotion_frozen) return;
+        const radius: i32 = @max(1, @as(i32, self.emotion_radius));
+        var x: i32 = self.emotion_x;
+        var y: i32 = self.emotion_y;
+        if (x == 0 and y == 0) {
+            x = radius;
+        } else {
+            const scale_den = @max(@abs(x), @abs(y));
+            x = @divTrunc(x * radius, scale_den);
+            y = @divTrunc(y * radius, scale_den);
+            if (@as(i64, x) * x + @as(i64, y) * y > @as(i64, radius) * radius) {
+                if (@abs(x) >= @abs(y)) y = 0 else x = 0;
+            }
+        }
+        self.setEmotionPoint(x, y, radius);
+    }
+
     pub fn toggleEmotionFreeze(self: *State) void {
         self.emotion_frozen = !self.emotion_frozen;
         self.focus = .emotion;
@@ -361,6 +379,12 @@ test "member roving and body camera keyboard controls stay bounded" {
     state.neutralEmotion();
     try std.testing.expectEqual(@as(i16, 0), state.emotion_x);
     try std.testing.expectEqual(@as(i16, 0), state.emotion_y);
+    state.outerEmotion();
+    try std.testing.expectEqual(@as(i16, 48), state.emotion_x);
+    try std.testing.expectEqual(@as(i16, 0), state.emotion_y);
+    state.emotion_frozen = true;
+    state.outerEmotion();
+    try std.testing.expectEqual(@as(i16, 48), state.emotion_x);
 }
 
 test "explicit member visibility keeps focus on a visible region" {

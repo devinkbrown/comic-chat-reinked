@@ -154,7 +154,7 @@ pub fn prompt(id: Id) ?[]const u8 {
         .password => "Account password",
         .channel_password => "Room password",
         .choose_color => "Ink value",
-        .sound => "Sound name",
+        .sound => "Sound",
         .set_text_font, .text_font => "Font name and size",
         .rename_loaded_set, .rename_set, .create_set => "Rule set name",
         .advanced_event_params => "Rule limits",
@@ -193,7 +193,7 @@ pub fn fields(id: Id) []const Field {
         },
         .background => &.{ .{ .label = "Backdrop name", .kind = .choice }, .{ .label = "Preview", .hint = "Bundled background", .kind = .preview } },
         .nickname => &.{.{ .label = "Sign-in name", .hint = "Visible on the Sunday page" }},
-        .password => &.{ .{ .label = "Account", .hint = "Wire account name" }, .{ .label = "Account password", .hint = "Account password", .kind = .password } },
+        .password => &.{ .{ .label = "Wire account", .hint = "Wire account name" }, .{ .label = "Account password", .hint = "Account password", .kind = .password } },
         .channel => &.{ .{ .label = "Room name", .hint = "#room" }, .{ .label = "Room password", .hint = "If the room is locked", .kind = .password } },
         .channel_create => &.{
             .{ .label = "Room name", .hint = "#room" },
@@ -211,17 +211,17 @@ pub fn fields(id: Id) []const Field {
         .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
         .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Choose an online CAST member" }, .{ .label = "CAST action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
-        .sound => &.{ .{ .label = "Sound file", .kind = .choice }, .{ .label = "With balloon", .hint = "Optional" } },
+        .sound => &.{ .{ .label = "Sound", .kind = .choice }, .{ .label = "With balloon", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
         .choose_color => &.{ .{ .label = "Ink value", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current ink", .kind = .preview } },
-        .comics_view => &.{ .{ .label = "Page mode", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
-        .automation => &.{ .{ .label = "Greeting mode", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving CAST" }, .{ .label = "Repeat limit", .hint = "8" }, .{ .label = "Repeat window", .hint = "Seconds" } },
-        .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Filter", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action value", .hint = "Message, room or sound" } },
-        .rule_sets => &.{ .{ .label = "Set action", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Import or export file", .hint = "Optional .ccrules path" } },
+        .comics_view => &.{ .{ .label = "Page view", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
+        .automation => &.{ .{ .label = "Greeting how", .kind = .choice }, .{ .label = "Greeting", .hint = "Use %nick% for the arriving CAST" }, .{ .label = "Repeat cap", .hint = "8" }, .{ .label = "Repeat window", .hint = "Seconds" } },
+        .rules, .edit_rule => &.{ .{ .label = "Rule name", .hint = "Short label" }, .{ .label = "Event", .kind = .choice }, .{ .label = "Match text", .hint = "Optional text or name pattern" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Action text", .hint = "Message, room or sound" } },
+        .rule_sets => &.{ .{ .label = "Set action", .kind = .choice }, .{ .label = "Rule set name" }, .{ .label = "Rule file", .hint = "Optional .ccrules path" } },
         .add_to_sets => &.{ .{ .label = "Rule name" }, .{ .label = "Rule set" } },
-        .rename_loaded_set, .rename_set => &.{ .{ .label = "Current rule set" }, .{ .label = "New name" } },
+        .rename_loaded_set, .rename_set => &.{ .{ .label = "Open set" }, .{ .label = "New set name" } },
         .create_set => &.{.{ .label = "Rule set name" }},
-        .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat limit", .hint = "0 means unlimited" }, .{ .label = "Repeat window", .hint = "Seconds; 0 means any interval" } },
+        .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat cap", .hint = "0 means unlimited" }, .{ .label = "Repeat window", .hint = "Seconds; 0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Rule on", .kind = .choice }, .{ .label = "Match case", .kind = .choice } },
         .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Wire", .hint = "Optional wire" }, .{ .label = "Notice", .kind = .choice } },
         .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
@@ -237,8 +237,8 @@ pub fn fields(id: Id) []const Field {
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Note", .hint = "Optional" } },
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Property action", .kind = .choice } },
-        .room_access => &.{ .{ .label = "Access action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout", .hint = "Minutes; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
-        .ircx_events => &.{ .{ .label = "Event action", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Filter", .hint = "Optional; one word" } },
+        .room_access => &.{ .{ .label = "Access action", .kind = .choice }, .{ .label = "Access", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout", .hint = "Minutes; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
+        .ircx_events => &.{ .{ .label = "Event action", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Event filter", .hint = "Optional; one word" } },
         .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Secure link", .hint = "Portable secure-link invitation", .kind = .readonly } },
         .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Profile", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
@@ -549,7 +549,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Ban pattern", fields(.ban)[0].label);
     try std.testing.expectEqualStrings("Host / size", fields(.file_transfer)[3].label);
     try std.testing.expectEqualStrings("Name pattern", fields(.room_access)[2].label);
-    try std.testing.expectEqualStrings("Filter", fields(.ircx_events)[2].label);
+    try std.testing.expectEqualStrings("Event filter", fields(.ircx_events)[2].label);
     try std.testing.expectEqualStrings("Bulletin", get(.motd).title);
     try std.testing.expectEqualStrings("Bulletin", fields(.motd)[0].label);
     try std.testing.expectEqualStrings("Sign-in", fields(.connection_features)[1].label);
@@ -569,15 +569,26 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Online CAST", get(.notification_users).title);
     try std.testing.expectEqualStrings("Choose an online CAST member", fields(.notification_users)[1].hint);
     try std.testing.expectEqualStrings("Rename open set", get(.rename_loaded_set).title);
-    try std.testing.expectEqualStrings("Page mode", fields(.comics_view)[0].label);
+    try std.testing.expectEqualStrings("Page view", fields(.comics_view)[0].label);
     try std.testing.expectEqualStrings("Sunday page or conversation", fields(.settings)[3].hint);
     try std.testing.expectEqualStrings("Sunday page or conversation", fields(.comics_view)[0].hint);
     try std.testing.expectEqualStrings("Rule limits", get(.advanced_event_params).title);
-    try std.testing.expectEqualStrings("Repeat limit", fields(.automation)[2].label);
+    try std.testing.expectEqualStrings("Repeat cap", fields(.automation)[2].label);
     try std.testing.expectEqualStrings("Repeat window", fields(.automation)[3].label);
     try std.testing.expectEqualStrings("Seconds", fields(.automation)[3].hint);
-    try std.testing.expectEqualStrings("Repeat limit", fields(.advanced_event_params)[1].label);
+    try std.testing.expectEqualStrings("Repeat cap", fields(.advanced_event_params)[1].label);
     try std.testing.expectEqualStrings("Repeat window", fields(.advanced_event_params)[2].label);
+    try std.testing.expectEqualStrings("Wire account", fields(.password)[0].label);
+    try std.testing.expectEqualStrings("Greeting how", fields(.automation)[0].label);
+    try std.testing.expectEqualStrings("Match text", fields(.rules)[2].label);
+    try std.testing.expectEqualStrings("Action text", fields(.rules)[4].label);
+    try std.testing.expectEqualStrings("Action", fields(.rules)[3].label);
+    try std.testing.expectEqualStrings("Rule file", fields(.rule_sets)[2].label);
+    try std.testing.expectEqualStrings("Open set", fields(.rename_set)[0].label);
+    try std.testing.expectEqualStrings("New set name", fields(.rename_set)[1].label);
+    try std.testing.expectEqualStrings("Access", fields(.room_access)[1].label);
+    try std.testing.expectEqualStrings("Sound", fields(.sound)[0].label);
+    try std.testing.expectEqualStrings("Chime.wav", choiceOptions(.sound, 0)[0]);
     try std.testing.expectEqualStrings("Account password", fields(.password)[1].label);
     try std.testing.expectEqualStrings("Also ban", fields(.kick)[2].label);
     try std.testing.expectEqualStrings("Name filter", fields(.user_list)[1].label);
@@ -611,6 +622,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Action", fields(.rules)[3].label);
     try std.testing.expectEqualStrings("Account password", prompt(.password).?);
     try std.testing.expectEqualStrings("Room password", prompt(.channel_password).?);
+    try std.testing.expectEqualStrings("Sound", prompt(.sound).?);
 }
 
 test "room access Sunday labels map back to ACCESS wire tokens" {
@@ -647,6 +659,18 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Save notifications", &.{ "Apply CAST", "Save notifications" }));
     try std.testing.expect(matchesAny("Invitation note", &.{ "Note", "Invitation note" }));
     try std.testing.expect(matchesAny("Name filter", &.{ "Filter", "Name filter" }));
+    try std.testing.expect(matchesAny("Greeting mode", &.{ "Greeting how", "Greeting mode" }));
+    try std.testing.expect(matchesAny("Repeat limit", &.{ "Repeat cap", "Repeat limit" }));
+    try std.testing.expect(matchesAny("Action value", &.{ "Action text", "Action value" }));
+    try std.testing.expect(matchesAny("Level", &.{ "Access", "Level" }));
+    try std.testing.expect(matchesAny("Page mode", &.{ "Page view", "Page mode" }));
+    try std.testing.expect(matchesAny("Sound file", &.{ "Sound", "Sound file" }));
+    try std.testing.expect(matchesAny("Import or export file", &.{ "Rule file", "Import or export file" }));
+    try std.testing.expect(matchesAny("Current rule set", &.{ "Open set", "Current rule set" }));
+    try std.testing.expect(matchesAny("New name", &.{ "New set name", "New name" }));
+    try std.testing.expect(matchesAny("Account", &.{ "Wire account", "Account" }));
+    try std.testing.expect(matchesAny("Sound name", &.{ "Sound", "Sound name" }));
+    try std.testing.expect(matchesAny("Connect before browsing rooms.", &.{ "Connect first to browse rooms.", "Connect before browsing rooms." }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 
