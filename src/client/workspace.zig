@@ -4,6 +4,7 @@ const std = @import("std");
 const session = @import("../comic/session.zig");
 const input = @import("input.zig");
 const irc_message = @import("../net/message.zig");
+const irc_map = @import("../net/irc_map.zig");
 
 pub const max_rooms: usize = 64;
 
@@ -65,6 +66,9 @@ pub const Workspace = struct {
     rooms: std.ArrayList(Room) = .empty,
     active: ?usize = null,
     clipboard: std.ArrayList(u8) = .empty,
+    casemapping: irc_map.CaseMapping = .rfc1459,
+    prefixes: irc_map.PrefixMap = .default,
+    chantypes: irc_map.ChanTypes = .default,
 
     pub fn init(gpa: std.mem.Allocator, self_nick: []const u8) !Workspace {
         return .{ .gpa = gpa, .self_nick = try gpa.dupe(u8, self_nick) };
@@ -79,18 +83,19 @@ pub const Workspace = struct {
     }
 
     pub fn find(self: *const Workspace, name: []const u8) ?usize {
-        for (self.rooms.items, 0..) |room, index| if (ircCaseEqual(room.name, name)) return index;
+        for (self.rooms.items, 0..) |room, index| if (irc_map.eql(self.casemapping, room.name, name)) return index;
         return null;
     }
 
     pub fn ensure(self: *Workspace, name: []const u8) !usize {
-        if (!validRoomName(name)) return error.InvalidRoomName;
+        if (!irc_map.isChannelName(self.chantypes, name)) return error.InvalidRoomName;
         if (self.find(name)) |index| return index;
         if (self.rooms.items.len >= max_rooms) return error.TooManyRooms;
         const owned_name = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(owned_name);
         var transcript = session.Transcript.init(self.gpa);
         errdefer transcript.deinit();
+        transcript.applyIsupport(self.casemapping, self.prefixes);
         try transcript.setSelf(self.self_nick);
         try self.rooms.append(self.gpa, .{ .name = owned_name, .transcript = transcript, .editor = input.Editor.init(self.gpa) });
         if (self.active == null) self.active = self.rooms.items.len - 1;
@@ -138,7 +143,7 @@ pub const Workspace = struct {
 
     pub fn rename(self: *Workspace, old_name: []const u8, new_name: []const u8) !bool {
         const index = self.find(old_name) orelse return false;
-        if (!validRoomName(new_name)) return error.InvalidRoomName;
+        if (!irc_map.isChannelName(self.chantypes, new_name)) return error.InvalidRoomName;
         if (self.find(new_name)) |existing| {
             if (existing == index) return false;
             return false;
@@ -159,34 +164,22 @@ pub const Workspace = struct {
         for (self.rooms.items) |*room| room.markDisconnected();
     }
 
+    pub fn applyIsupport(self: *Workspace, casemapping: irc_map.CaseMapping, prefixes: irc_map.PrefixMap, chantypes: irc_map.ChanTypes) void {
+        self.casemapping = casemapping;
+        self.prefixes = prefixes;
+        self.chantypes = chantypes;
+        for (self.rooms.items) |*room| room.transcript.applyIsupport(casemapping, prefixes);
+    }
+
+    pub fn resetIsupport(self: *Workspace) void {
+        self.applyIsupport(.rfc1459, .default, .default);
+    }
+
     pub fn setClipboard(self: *Workspace, text: []const u8) !void {
         self.clipboard.clearRetainingCapacity();
         try self.clipboard.appendSlice(self.gpa, text);
     }
 };
-
-fn validRoomName(name: []const u8) bool {
-    return name.len >= 2 and name.len <= 200 and (name[0] == '#' or name[0] == '&') and
-        std.mem.indexOfAny(u8, name, " ,\r\n\x00") == null;
-}
-
-/// RFC 1459 casemapping used by traditional IRC channel identifiers.
-fn ircCaseEqual(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |left, right| if (ircFold(left) != ircFold(right)) return false;
-    return true;
-}
-
-fn ircFold(value: u8) u8 {
-    return switch (value) {
-        'A'...'Z' => value + ('a' - 'A'),
-        '[' => '{',
-        ']' => '}',
-        '\\' => '|',
-        '^' => '~',
-        else => value,
-    };
-}
 
 test "workspace owns, activates, counts, and removes multiple rooms" {
     var workspace = try Workspace.init(std.testing.allocator, "alex");
@@ -242,4 +235,14 @@ test "workspace uses RFC 1459 channel casemapping" {
     defer workspace.deinit();
     const index = try workspace.ensure("#[room]\\^x");
     try std.testing.expectEqual(index, try workspace.ensure("#{ROOM}|~X"));
+}
+
+test "workspace applies advertised ascii casemapping and CHANTYPES" {
+    var workspace = try Workspace.init(std.testing.allocator, "alex");
+    defer workspace.deinit();
+    workspace.applyIsupport(.ascii, .default, irc_map.ChanTypes.parse("#"));
+    const index = try workspace.ensure("#[room]");
+    try std.testing.expectEqual(@as(?usize, null), workspace.find("#{ROOM}"));
+    try std.testing.expectEqual(index, try workspace.ensure("#[ROOM]"));
+    try std.testing.expectError(error.InvalidRoomName, workspace.ensure("&local"));
 }

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const message = @import("message.zig");
+const irc_map = @import("irc_map.zig");
 
 pub const Limits = struct {
     max_open_batches: usize = 32,
@@ -69,6 +70,9 @@ pub const State = struct {
     read_markers: std.ArrayList(ReadMarker) = .empty,
     metadata: std.ArrayList(Metadata) = .empty,
     isupport_tokens: std.ArrayList(IsupportToken) = .empty,
+    casemapping: irc_map.CaseMapping = .rfc1459,
+    prefixes: irc_map.PrefixMap = .default,
+    chantypes: irc_map.ChanTypes = .default,
     redacted_ids: std.ArrayList([]u8) = .empty,
     pending_echoes: std.ArrayList(Echo) = .empty,
     outstanding_labels: std.ArrayList(Label) = .empty,
@@ -120,7 +124,7 @@ pub const State = struct {
 
     pub fn identity(self: *const State, nick: []const u8) ?*const Identity {
         for (self.identities.items) |*entry| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, nick)) return entry;
+            if (irc_map.eql(self.casemapping, entry.nick, nick)) return entry;
         }
         return null;
     }
@@ -209,7 +213,7 @@ pub const State = struct {
         } else if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
             if (msg.param(0)) |new_nick| {
                 try self.renameIdentity(source_nick, new_nick);
-                if (source_nick.len != 0 and std.ascii.eqlIgnoreCase(source_nick, self.self_nick)) {
+                if (source_nick.len != 0 and irc_map.eql(self.casemapping, source_nick, self.self_nick)) {
                     const owned = try self.gpa.dupe(u8, new_nick);
                     self.gpa.free(self.self_nick);
                     self.self_nick = owned;
@@ -242,12 +246,12 @@ pub const State = struct {
 
         if ((std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or
             std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) and
-            std.ascii.eqlIgnoreCase(source_nick, self.self_nick))
+            irc_map.eql(self.casemapping, source_nick, self.self_nick))
         {
             const target = msg.param(0) orelse "";
             const text = msg.param(1) orelse "";
             for (self.pending_echoes.items, 0..) |entry, index| {
-                if (!std.ascii.eqlIgnoreCase(entry.target, target) or !std.mem.eql(u8, entry.text, text)) continue;
+                if (!irc_map.eql(self.casemapping, entry.target, target) or !std.mem.eql(u8, entry.text, text)) continue;
                 const matched = self.pending_echoes.orderedRemove(index);
                 self.gpa.free(matched.target);
                 self.gpa.free(matched.text);
@@ -259,7 +263,7 @@ pub const State = struct {
 
     fn ensureIdentity(self: *State, nick: []const u8) !*Identity {
         for (self.identities.items) |*entry| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, nick)) return entry;
+            if (irc_map.eql(self.casemapping, entry.nick, nick)) return entry;
         }
         if (nick.len == 0) return error.InvalidIdentityEvent;
         if (self.identities.items.len >= self.limits.max_state_entries) return error.StateBackpressure;
@@ -341,6 +345,22 @@ pub const State = struct {
             const value = if (equals < raw.len) raw[equals + 1 ..] else null;
             try self.putIsupport(name, value);
         }
+        self.refreshAdvertisedMaps();
+    }
+
+    fn refreshAdvertisedMaps(self: *State) void {
+        self.casemapping = if (self.isupport("CASEMAPPING")) |token|
+            irc_map.parseCaseMapping(token.value orelse "")
+        else
+            .rfc1459;
+        self.prefixes = if (self.isupport("PREFIX")) |token|
+            if (token.value) |value| irc_map.PrefixMap.parse(value) orelse .default else .default
+        else
+            .default;
+        self.chantypes = if (self.isupport("CHANTYPES")) |token|
+            if (token.value) |value| irc_map.ChanTypes.parse(value) else .default
+        else
+            .default;
     }
 
     fn putIsupport(self: *State, name: []const u8, value: ?[]const u8) !void {
@@ -374,8 +394,8 @@ pub const State = struct {
         var old_index: ?usize = null;
         var new_index: ?usize = null;
         for (self.identities.items, 0..) |entry, index| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, old_nick)) old_index = index;
-            if (std.ascii.eqlIgnoreCase(entry.nick, new_nick)) new_index = index;
+            if (irc_map.eql(self.casemapping, entry.nick, old_nick)) old_index = index;
+            if (irc_map.eql(self.casemapping, entry.nick, new_nick)) new_index = index;
         }
         const source_index = old_index orelse return;
         if (new_index) |target_index| {
@@ -818,6 +838,12 @@ test "capability state tracks identity, rename, marker, metadata, and standard r
     try std.testing.expectEqualStrings("https://example/icon.png", state.isupport("draft/icon").?.value.?);
     _ = try state.observe(&message.parse(":irc 005 self -UTF8ONLY :are supported"));
     try std.testing.expect(state.isupport("UTF8ONLY") == null);
+    _ = try state.observe(&message.parse(":irc 005 self CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& :are supported"));
+    try std.testing.expectEqual(irc_map.CaseMapping.ascii, state.casemapping);
+    try std.testing.expect(state.prefixes.isSymbol('*'));
+    try std.testing.expect(state.prefixes.isMode('Y'));
+    try std.testing.expect(!state.prefixes.isSymbol('~'));
+    try std.testing.expect(state.chantypes.contains('#'));
 }
 
 test "echo dedupe, redaction tombstones, and labels are bounded owned state" {

@@ -66,6 +66,7 @@ pub const net = struct {
     pub const ircv3 = @import("net/ircv3.zig");
     pub const sasl = @import("net/sasl.zig");
     pub const features = @import("net/features.zig");
+    pub const irc_map = @import("net/irc_map.zig");
     pub const connection_policy = @import("net/connection_policy.zig");
     pub const sts_store = @import("net/sts_store.zig");
     pub const session_store = @import("net/session_store.zig");
@@ -127,6 +128,7 @@ test {
     _ = @import("net/ircv3.zig");
     _ = @import("net/sasl.zig");
     _ = @import("net/features.zig");
+    _ = @import("net/irc_map.zig");
     _ = @import("net/connection_policy.zig");
     _ = @import("net/sts_store.zig");
     _ = @import("net/session_store.zig");

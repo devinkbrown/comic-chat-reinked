@@ -1751,9 +1751,13 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
         gpa.free(value);
         state.last_key_channel = null;
     }
-    if (workspace) |rooms| rooms.markDisconnected();
+    if (workspace) |rooms| {
+        rooms.markDisconnected();
+        rooms.resetIsupport();
+    }
     // Silence masks and away text survive reconnect so they can be resent
-    // after 001 without a dedicated dialog or disk file.
+    // after 001 without a dedicated dialog or disk file. PREFIX/CASEMAPPING
+    // come back on the next 005.
 }
 
 fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
@@ -3814,8 +3818,8 @@ fn processWorkspaceMessages(
             std.mem.eql(u8, msg.command, "301"))
         {
             for (workspace.rooms.items) |*room| redraw = (try room.transcript.observeIrc(&msg, room.name, nick)) or redraw;
-        } else if (messageRoom(&msg)) |room_name| {
-            if (room_name.len > 1 and (room_name[0] == '#' or room_name[0] == '&')) {
+        } else if (messageRoom(&msg, workspace)) |room_name| {
+            if (room_name.len > 1 and workspace.chantypes.contains(room_name[0])) {
                 const room_index = try workspace.ensure(room_name);
                 redraw = (try workspace.rooms.items[room_index].transcript.observeIrc(&msg, room_name, nick)) or redraw;
             }
@@ -3906,6 +3910,8 @@ fn processWorkspaceMessages(
             if (workspaceTranscriptRoom(workspace, channel)) |active_room| try appendServerWorkflowReply(&active_room.transcript, &msg);
             if (std.ascii.eqlIgnoreCase(msg.command, "FAIL")) state.status = "command failed";
             redraw = true;
+        } else if (std.mem.eql(u8, msg.command, "470")) {
+            redraw = (try applyChannelForward(workspace, client, state, &msg)) or redraw;
         } else if (isJoinDeniedNumeric(msg.command)) {
             redraw = (try applyJoinDenied(workspace, client, state, &msg)) or redraw;
         } else if (isNickFailureNumeric(msg.command)) {
@@ -3933,6 +3939,9 @@ fn processWorkspaceMessages(
         }
         if (std.mem.eql(u8, msg.command, "271") or std.ascii.eqlIgnoreCase(msg.command, "SILENCE")) {
             observeSilenceState(workspace.gpa, state, &msg);
+        }
+        if (std.mem.eql(u8, msg.command, "005")) {
+            applyClientIsupport(workspace, client);
         }
         if (isVisibleServerWorkflowReply(msg.command)) {
             if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
@@ -4044,8 +4053,8 @@ fn processWorkspaceMessages(
             redraw = true;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) {
             const target = msg.param(0) orelse continue;
-            const resolved = stripStatusmsgTarget(target);
-            const is_private = std.ascii.eqlIgnoreCase(resolved, nick);
+            const resolved = stripStatusmsgTargetWith(target, workspace.prefixes, workspace.chantypes);
+            const is_private = cc.net.irc_map.eql(workspace.casemapping, resolved, nick);
             const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
             const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
             var room = &workspace.rooms.items[room_index];
@@ -4097,8 +4106,8 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch
         return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE");
     return switch (code) {
-        2, 3, 4, 42, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266, 271, 272 => true,
-        307, 311, 312, 313, 314, 317, 318, 319, 330, 335, 338, 378, 379 => true,
+        2, 3, 4, 10, 20, 42, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266, 271, 272, 276 => true,
+        307, 308, 310, 311, 312, 313, 314, 317, 318, 319, 320, 330, 335, 338, 351, 378, 379, 391 => true,
         322, 323, 329, 341, 346, 347, 348, 349, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
         710, 711, 712, 713, 714, 715, 732, 733, 734 => true,
         801...819, 900...908, 913...925 => true,
@@ -4107,11 +4116,24 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
 }
 
 fn stripStatusmsgTarget(target: []const u8) []const u8 {
+    return stripStatusmsgTargetWith(target, .default, .default);
+}
+
+fn stripStatusmsgTargetWith(
+    target: []const u8,
+    prefixes: cc.net.irc_map.PrefixMap,
+    chantypes: cc.net.irc_map.ChanTypes,
+) []const u8 {
     if (target.len < 2) return target;
-    if (std.mem.indexOfScalar(u8, "+@%~&", target[0]) == null) return target;
+    if (!prefixes.isSymbol(target[0])) return target;
     const rest = target[1..];
-    if (rest[0] == '#' or rest[0] == '&') return rest;
+    if (chantypes.contains(rest[0])) return rest;
     return target;
+}
+
+fn applyClientIsupport(workspace: *cc.client.workspace.Workspace, client: *cc.net.client.Client) void {
+    const features = client.featureState() orelse return;
+    workspace.applyIsupport(features.casemapping, features.prefixes, features.chantypes);
 }
 
 fn workspaceRoomForIncoming(
@@ -4119,10 +4141,10 @@ fn workspaceRoomForIncoming(
     target: []const u8,
     self_nick: []const u8,
 ) ?usize {
-    const resolved = stripStatusmsgTarget(target);
-    if (resolved.len > 1 and (resolved[0] == '#' or resolved[0] == '&'))
+    const resolved = stripStatusmsgTargetWith(target, workspace.prefixes, workspace.chantypes);
+    if (resolved.len > 1 and workspace.chantypes.contains(resolved[0]))
         return workspace.ensure(resolved) catch null;
-    if (std.ascii.eqlIgnoreCase(resolved, self_nick)) return workspace.active;
+    if (cc.net.irc_map.eql(workspace.casemapping, resolved, self_nick)) return workspace.active;
     return workspace.find(resolved) orelse workspace.active;
 }
 
@@ -4235,15 +4257,21 @@ fn applyLiveChannelKey(
 ) !bool {
     if (!std.ascii.eqlIgnoreCase(msg.command, "MODE") or msg.param_count < 2) return false;
     const channel = msg.params[0];
-    if (channel.len < 2 or (channel[0] != '#' and channel[0] != '&')) return false;
+    if (!cc.net.irc_map.isChannelName(workspace.chantypes, channel)) return false;
     const modes = msg.params[1];
     var adding = true;
     var parameter_index: usize = 2;
     var changed = false;
-    for (modes) |mode| switch (mode) {
-        '+' => adding = true,
-        '-' => adding = false,
-        'k' => {
+    for (modes) |mode| {
+        if (mode == '+') {
+            adding = true;
+            continue;
+        }
+        if (mode == '-') {
+            adding = false;
+            continue;
+        }
+        if (mode == 'k') {
             const key = if (adding and parameter_index < msg.param_count) msg.params[parameter_index] else "";
             if (parameter_index < msg.param_count) parameter_index += 1;
             if (workspace.find(channel)) |room_index| {
@@ -4251,15 +4279,14 @@ fn applyLiveChannelKey(
                 changed = true;
             }
             client.setRestorationKey(channel, key);
-        },
-        'q', 'a', 'o', 'h', 'v', 'b', 'e', 'I' => {
+            continue;
+        }
+        if (workspace.prefixes.isMode(mode) or std.mem.indexOfScalar(u8, "beI", mode) != null) {
             if (parameter_index < msg.param_count) parameter_index += 1;
-        },
-        'l' => {
-            if (adding and parameter_index < msg.param_count) parameter_index += 1;
-        },
-        else => {},
-    };
+            continue;
+        }
+        if (mode == 'l' and adding and parameter_index < msg.param_count) parameter_index += 1;
+    }
     return changed;
 }
 
@@ -4280,7 +4307,15 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "482") or
         std.mem.eql(u8, command, "501") or
         std.mem.eql(u8, command, "502") or
-        std.mem.eql(u8, command, "511");
+        std.mem.eql(u8, command, "511") or
+        std.mem.eql(u8, command, "431") or
+        std.mem.eql(u8, command, "443") or
+        std.mem.eql(u8, command, "451") or
+        std.mem.eql(u8, command, "461") or
+        std.mem.eql(u8, command, "462") or
+        std.mem.eql(u8, command, "479") or
+        std.mem.eql(u8, command, "484") or
+        std.mem.eql(u8, command, "485");
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
@@ -4409,6 +4444,40 @@ fn applySelfLeftChannel(
         }
     }
     refreshJoinedState(workspace, state, "left room");
+    return true;
+}
+
+fn applyChannelForward(
+    workspace: *cc.client.workspace.Workspace,
+    client: *cc.net.client.Client,
+    state: *ChatState,
+    msg: *const cc.net.message.Message,
+) !bool {
+    const from = msg.param(1) orelse return false;
+    const maybe_to = msg.param(2);
+    const to = if (maybe_to) |value|
+        if (value.len > 1 and workspace.chantypes.contains(value[0])) value else null
+    else
+        null;
+    if (to == null) return applyJoinDenied(workspace, client, state, msg);
+    const dest = to.?;
+    client.renameRestoration(from, dest);
+    if (workspace.find(from)) |from_index| {
+        var source = &workspace.rooms.items[from_index];
+        source.joined = false;
+        const dest_index = workspace.ensure(dest) catch from_index;
+        if (dest_index != from_index) {
+            if (source.join_key) |key| try workspace.rooms.items[dest_index].setJoinKey(workspace.gpa, key);
+            if (source.client_data) |data| try workspace.rooms.items[dest_index].setClientData(workspace.gpa, data);
+            _ = workspace.activate(dest_index);
+        }
+    } else _ = workspace.ensure(dest) catch {};
+    var buf: [280]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "Forwarded from {s} to {s}", .{ from, dest }) catch "Room forwarded.";
+    if (workspace.find(dest) orelse workspace.active) |index| {
+        try workspace.rooms.items[index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
+    }
+    refreshJoinedState(workspace, state, "joining");
     return true;
 }
 
@@ -4972,7 +5041,7 @@ fn runPersistentRules(
     return suppress;
 }
 
-fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
+fn messageRoom(msg: *const cc.net.message.Message, workspace: *const cc.client.workspace.Workspace) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(msg.command, "353")) {
         if (msg.param_count < 2) return null;
         return msg.params[msg.param_count - 2];
@@ -4989,7 +5058,10 @@ fn messageRoom(msg: *const cc.net.message.Message) ?[]const u8 {
         std.ascii.eqlIgnoreCase(msg.command, "WHISPER") or
         std.ascii.eqlIgnoreCase(msg.command, "TAGMSG") or
         std.ascii.eqlIgnoreCase(msg.command, "EDIT") or
-        std.ascii.eqlIgnoreCase(msg.command, "REDACT")) return if (msg.param(0)) |target| stripStatusmsgTarget(target) else null;
+        std.ascii.eqlIgnoreCase(msg.command, "REDACT")) return if (msg.param(0)) |target|
+        stripStatusmsgTargetWith(target, workspace.prefixes, workspace.chantypes)
+    else
+        null;
     if (std.mem.eql(u8, msg.command, "331") or
         std.mem.eql(u8, msg.command, "332") or
         std.mem.eql(u8, msg.command, "333") or
@@ -5518,6 +5590,9 @@ test "topic replies land in the matching room" {
 }
 
 test "live roster room lookup includes MODE KICK and topic numerics" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
     const kick = cc.net.message.parse(":op!u@h KICK #root alice :out");
     const mode = cc.net.message.parse(":op!u@h MODE #root +o alice");
     const topic = cc.net.message.parse(":server 332 me #root :hi");
@@ -5525,17 +5600,17 @@ test "live roster room lookup includes MODE KICK and topic numerics" {
     const modes = cc.net.message.parse(":server 324 me #root +nt");
     const invite_only = cc.net.message.parse(":server 473 me #root :Cannot join channel (+i)");
     const notice = cc.net.message.parse(":alice!u@h NOTICE #root :heads up");
-    try std.testing.expectEqualStrings("#root", messageRoom(&kick).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&mode).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&topic).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&no_topic).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&modes).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&invite_only).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&notice).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&kick, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&mode, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&topic, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&no_topic, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&modes, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&invite_only, &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&notice, &workspace).?);
     const statusmsg = cc.net.message.parse(":alice!u@h PRIVMSG @#root :ops only");
-    try std.testing.expectEqualStrings("#root", messageRoom(&statusmsg).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&statusmsg, &workspace).?);
     const plus_status = cc.net.message.parse(":alice!u@h NOTICE +#root :voices");
-    try std.testing.expectEqualStrings("#root", messageRoom(&plus_status).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&plus_status, &workspace).?);
 }
 
 test "channel mode and invite lines land in the matching room" {
@@ -5727,6 +5802,18 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("272"));
     try std.testing.expect(isVisibleServerWorkflowReply("335"));
     try std.testing.expect(isVisibleServerWorkflowReply("379"));
+    try std.testing.expect(isVisibleServerWorkflowReply("010"));
+    try std.testing.expect(isVisibleServerWorkflowReply("020"));
+    try std.testing.expect(isVisibleServerWorkflowReply("276"));
+    try std.testing.expect(isVisibleServerWorkflowReply("308"));
+    try std.testing.expect(isVisibleServerWorkflowReply("310"));
+    try std.testing.expect(isVisibleServerWorkflowReply("320"));
+    try std.testing.expect(isVisibleServerWorkflowReply("351"));
+    try std.testing.expect(isVisibleServerWorkflowReply("391"));
+    try std.testing.expect(isCommandFailureNumeric("431"));
+    try std.testing.expect(isCommandFailureNumeric("443"));
+    try std.testing.expect(isCommandFailureNumeric("451"));
+    try std.testing.expect(isCommandFailureNumeric("461"));
     try std.testing.expect(isVisibleServerWorkflowReply("SILENCE"));
     try std.testing.expect(isVisibleServerWorkflowReply("346"));
     try std.testing.expect(isVisibleServerWorkflowReply("348"));
@@ -5978,9 +6065,9 @@ test "silence, modern events, and leftover session numerics stay live" {
     try std.testing.expectEqualStrings("alice edited a message: corrected text", workspace.rooms.items[root].transcript.lines.items[4].text);
     try std.testing.expect(try appendModernEventLine(&workspace, &cc.net.message.parse(":alice!u@h REDACT #root msgid-1 :off-topic")));
     try std.testing.expectEqualStrings("alice redacted a message (off-topic)", workspace.rooms.items[root].transcript.lines.items[5].text);
-    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h TAGMSG #root")).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h EDIT #root msgid-1 :text")).?);
-    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h REDACT #root msgid-1")).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h TAGMSG #root"), &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h EDIT #root msgid-1 :text"), &workspace).?);
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h REDACT #root msgid-1"), &workspace).?);
 
     observeSilenceState(gpa, &state, &cc.net.message.parse(":server 271 me *!*@bad.example"));
     observeSilenceState(gpa, &state, &cc.net.message.parse(":me!u@h SILENCE +nick!*@*"));
@@ -6024,6 +6111,58 @@ test "silence, modern events, and leftover session numerics stay live" {
     try std.testing.expect(!containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[3].bytes, "SILENCE +quiet!*@*\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[4].bytes, "AWAY :back later") != null);
+}
+
+test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
+    const gpa = std.testing.allocator;
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+        .features = try cc.net.features.State.init(gpa, "me", .{}),
+    };
+    defer {
+        if (client.features) |*owned_features| owned_features.deinit();
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    if (client.features) |*owned_features|
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& :are supported"));
+    applyClientIsupport(&workspace, &client);
+    try std.testing.expectEqual(cc.net.irc_map.CaseMapping.ascii, workspace.casemapping);
+    try std.testing.expect(workspace.prefixes.isSymbol('*'));
+    try std.testing.expect(!workspace.prefixes.isSymbol('~'));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTargetWith("*#root", workspace.prefixes, workspace.chantypes));
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h PRIVMSG *#root :ops"), &workspace).?);
+
+    const old = try workspace.ensure("#old");
+    workspace.rooms.items[old].joined = true;
+    try workspace.rooms.items[old].setJoinKey(gpa, "secret");
+    try client.join("#old");
+    try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #old #vault :Forwarding")));
+    const vault = workspace.find("#vault").?;
+    try std.testing.expectEqualStrings("secret", workspace.rooms.items[vault].join_key.?);
+    try std.testing.expect(!workspace.rooms.items[old].joined);
+    try std.testing.expect(client.restoresChannel("#vault"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[vault].transcript.lines.items[0].text, "Forwarded from #old to #vault") != null);
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expectEqual(cc.net.irc_map.CaseMapping.rfc1459, workspace.casemapping);
+    try std.testing.expect(workspace.prefixes.isSymbol('~'));
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

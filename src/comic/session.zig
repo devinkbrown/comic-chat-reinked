@@ -6,6 +6,7 @@ const dcc = @import("../proto/dcc.zig");
 const formatting = @import("formatting.zig");
 const original_page = @import("original_page.zig");
 const irc_message = @import("../net/message.zig");
+const irc_map = @import("../net/irc_map.zig");
 const udi = @import("../proto/udi.zig");
 
 pub const avatars = [_][]const u8{
@@ -372,6 +373,8 @@ pub const Transcript = struct {
     last_bdrop2_base: ?[]u8 = null,
     names_generation: u32 = 0,
     names_sync_active: bool = false,
+    casemapping: irc_map.CaseMapping = .rfc1459,
+    prefixes: irc_map.PrefixMap = .default,
 
     pub fn init(gpa: std.mem.Allocator) Transcript {
         return .{ .gpa = gpa };
@@ -455,7 +458,7 @@ pub const Transcript = struct {
     ) !bool {
         if (std.ascii.eqlIgnoreCase(msg.command, "353")) {
             const names_channel = namesReplyChannel(msg) orelse return false;
-            if (!std.ascii.eqlIgnoreCase(names_channel, channel)) return false;
+            if (!irc_map.eql(self.casemapping, names_channel, channel)) return false;
             if (!self.names_sync_active) {
                 self.names_generation +%= 1;
                 self.names_sync_active = true;
@@ -466,9 +469,9 @@ pub const Transcript = struct {
                 var nick = decorated;
                 var role: MemberRole = .member;
                 var status_modes: u8 = 0;
-                while (nick.len > 0 and isNickStatus(nick[0])) {
-                    role = highestRole(role, roleForPrefix(nick[0]));
-                    status_modes |= modeBitForPrefix(nick[0]);
+                while (nick.len > 0 and self.prefixes.isSymbol(nick[0])) {
+                    role = highestRole(role, roleForMode(self.prefixes.modeForSymbol(nick[0]).?));
+                    status_modes |= self.prefixes.bitForSymbol(nick[0]);
                     nick = nick[1..];
                 }
                 const bang = std.mem.indexOfScalar(u8, nick, '!') orelse nick.len;
@@ -477,7 +480,7 @@ pub const Transcript = struct {
                 const existing = self.findRosterIndex(nick);
                 const index = try self.ensureParticipant(
                     nick,
-                    std.ascii.eqlIgnoreCase(nick, self_nick),
+                    irc_map.eql(self.casemapping, nick, self_nick),
                 );
                 if (existing == null or self.roster.items[index].departed) changed = true;
                 self.roster.items[index].departed = false;
@@ -491,7 +494,7 @@ pub const Transcript = struct {
 
         if (std.ascii.eqlIgnoreCase(msg.command, "366")) {
             const names_channel = endOfNamesChannel(msg) orelse return false;
-            if (!std.ascii.eqlIgnoreCase(names_channel, channel)) return false;
+            if (!irc_map.eql(self.casemapping, names_channel, channel)) return false;
             if (!self.names_sync_active) {
                 self.names_generation +%= 1;
             }
@@ -509,14 +512,14 @@ pub const Transcript = struct {
 
         if (std.ascii.eqlIgnoreCase(msg.command, "JOIN")) {
             const joined_channel = msg.param(0) orelse return false;
-            if (!std.ascii.eqlIgnoreCase(joined_channel, channel)) return false;
+            if (!irc_map.eql(self.casemapping, joined_channel, channel)) return false;
             const prefix = msg.prefix orelse return false;
             const nick = nickFromPrefix(prefix);
             if (nick.len == 0) return false;
             const existing = self.findRosterIndex(nick);
             const index = try self.ensureParticipant(
                 nick,
-                std.ascii.eqlIgnoreCase(nick, self_nick),
+                irc_map.eql(self.casemapping, nick, self_nick),
             );
             const changed = existing == null or self.roster.items[index].departed;
             self.roster.items[index].departed = false;
@@ -528,52 +531,61 @@ pub const Transcript = struct {
 
         if (std.ascii.eqlIgnoreCase(msg.command, "MODE")) {
             if (msg.param_count < 2) return false;
-            if (!std.ascii.eqlIgnoreCase(msg.params[0], channel)) return false;
+            if (!irc_map.eql(self.casemapping, msg.params[0], channel)) return false;
             const modes = msg.params[1];
             var adding = true;
             var parameter_index: usize = 2;
             var changed = false;
-            for (modes) |mode| switch (mode) {
-                '+' => adding = true,
-                '-' => adding = false,
-                'q', 'a', 'o', 'h', 'v' => {
+            for (modes) |mode| {
+                if (mode == '+') {
+                    adding = true;
+                    continue;
+                }
+                if (mode == '-') {
+                    adding = false;
+                    continue;
+                }
+                if (self.prefixes.isMode(mode)) {
                     if (parameter_index >= msg.param_count) continue;
                     const nick = msg.params[parameter_index];
                     parameter_index += 1;
                     const index = self.findRosterIndex(nick) orelse continue;
-                    const bit = modeBit(mode);
+                    const bit = self.prefixes.bitForMode(mode);
                     const old_modes = self.roster.items[index].status_modes;
                     if (adding)
                         self.roster.items[index].status_modes |= bit
                     else
                         self.roster.items[index].status_modes &= ~bit;
                     if (old_modes != self.roster.items[index].status_modes) changed = true;
-                    const replacement = highestRoleForModes(self.roster.items[index].status_modes);
+                    const replacement = self.highestRoleForModes(self.roster.items[index].status_modes);
                     if (replacement != self.roster.items[index].role) {
                         self.roster.items[index].role = replacement;
                         changed = true;
                     }
-                },
-                'b', 'e', 'I', 'k' => {
-                    if (parameter_index < msg.param_count) parameter_index += 1;
-                },
-                'l' => {
-                    if (adding and parameter_index < msg.param_count) parameter_index += 1;
-                },
-                else => {},
-            };
+                    continue;
+                }
+                switch (mode) {
+                    'b', 'e', 'I', 'k' => {
+                        if (parameter_index < msg.param_count) parameter_index += 1;
+                    },
+                    'l' => {
+                        if (adding and parameter_index < msg.param_count) parameter_index += 1;
+                    },
+                    else => {},
+                }
+            }
             return changed;
         }
 
         if (std.ascii.eqlIgnoreCase(msg.command, "KICK")) {
             if (msg.param_count < 2) return false;
-            if (!std.ascii.eqlIgnoreCase(msg.params[0], channel)) return false;
+            if (!irc_map.eql(self.casemapping, msg.params[0], channel)) return false;
             return self.markDeparted(msg.params[1]);
         }
 
         if (std.ascii.eqlIgnoreCase(msg.command, "PART")) {
             const parted_channel = msg.param(0) orelse return false;
-            if (!std.ascii.eqlIgnoreCase(parted_channel, channel)) return false;
+            if (!irc_map.eql(self.casemapping, parted_channel, channel)) return false;
             const prefix = msg.prefix orelse return false;
             return self.markDeparted(nickFromPrefix(prefix));
         }
@@ -587,7 +599,7 @@ pub const Transcript = struct {
             const prefix = msg.prefix orelse return false;
             const nick = nickFromPrefix(prefix);
             if (nick.len == 0) return false;
-            const index = try self.ensureParticipant(nick, std.ascii.eqlIgnoreCase(nick, self_nick));
+            const index = try self.ensureParticipant(nick, irc_map.eql(self.casemapping, nick, self_nick));
             const away = if (msg.param(0)) |text| text.len != 0 else false;
             if (self.roster.items[index].away == away) return false;
             self.roster.items[index].away = away;
@@ -600,7 +612,7 @@ pub const Transcript = struct {
 
         if (std.mem.eql(u8, msg.command, "301")) {
             const nick = msg.param(1) orelse return false;
-            const index = try self.ensureParticipant(nick, std.ascii.eqlIgnoreCase(nick, self_nick));
+            const index = try self.ensureParticipant(nick, irc_map.eql(self.casemapping, nick, self_nick));
             if (self.roster.items[index].away) return false;
             self.roster.items[index].away = true;
             return true;
@@ -853,9 +865,23 @@ pub const Transcript = struct {
         return true;
     }
 
+    pub fn applyIsupport(self: *Transcript, casemapping: irc_map.CaseMapping, prefixes: irc_map.PrefixMap) void {
+        self.casemapping = casemapping;
+        self.prefixes = prefixes;
+    }
+
+    fn highestRoleForModes(self: *const Transcript, modes: u8) MemberRole {
+        var index: usize = 0;
+        while (index < self.prefixes.len) : (index += 1) {
+            if (modes & self.prefixes.bitForIndex(index) == 0) continue;
+            return roleForMode(self.prefixes.modes[index]);
+        }
+        return .member;
+    }
+
     fn findRosterIndex(self: *const Transcript, nick: []const u8) ?usize {
         for (self.roster.items, 0..) |entry, index| {
-            if (std.ascii.eqlIgnoreCase(entry.nick, nick)) return index;
+            if (irc_map.eql(self.casemapping, entry.nick, nick)) return index;
         }
         return null;
     }
@@ -953,62 +979,18 @@ fn isChannelPrefix(ch: u8) bool {
     return ch == '#' or ch == '&' or ch == '+' or ch == '!';
 }
 
-fn isNickStatus(ch: u8) bool {
-    return ch == '~' or ch == '&' or ch == '@' or ch == '%' or ch == '+';
-}
-
-fn roleForPrefix(ch: u8) MemberRole {
-    return switch (ch) {
-        '~', '&' => .owner,
-        '@' => .operator,
-        '%' => .halfop,
-        '+' => .voice,
-        else => .member,
-    };
-}
-
-fn modeBitForPrefix(ch: u8) u8 {
-    return switch (ch) {
-        '~' => modeBit('q'),
-        '&' => modeBit('a'),
-        '@' => modeBit('o'),
-        '%' => modeBit('h'),
-        '+' => modeBit('v'),
-        else => 0,
-    };
-}
-
 fn roleForMode(mode: u8) MemberRole {
     return switch (mode) {
-        'q', 'a' => .owner,
+        'Y', 'Q', 'q', 'a' => .owner,
         'o' => .operator,
         'h' => .halfop,
         'v' => .voice,
-        else => .member,
+        else => .owner,
     };
 }
 
 fn highestRole(a: MemberRole, b: MemberRole) MemberRole {
     return if (@intFromEnum(a) >= @intFromEnum(b)) a else b;
-}
-
-fn modeBit(mode: u8) u8 {
-    return switch (mode) {
-        'q' => 1 << 5,
-        'a' => 1 << 4,
-        'o' => 1 << 3,
-        'h' => 1 << 2,
-        'v' => 1 << 1,
-        else => 0,
-    };
-}
-
-fn highestRoleForModes(modes: u8) MemberRole {
-    if (modes & (modeBit('q') | modeBit('a')) != 0) return .owner;
-    if (modes & modeBit('o') != 0) return .operator;
-    if (modes & modeBit('h') != 0) return .halfop;
-    if (modes & modeBit('v') != 0) return .voice;
-    return .member;
 }
 
 fn saturatingAdd(a: u32, b: u32) u32 {
@@ -1281,6 +1263,27 @@ test "nick collision merge keeps an active member present" {
     try std.testing.expect(transcript.findRosterIndex("Old") == null);
     try std.testing.expect(!transcript.roster.items[transcript.findRosterIndex("Alice").?].departed);
     try std.testing.expect(transcript.roster.items[transcript.findRosterIndex("Alice").?].away);
+}
+
+test "live roster applies advertised Onyx PREFIX symbols" {
+    const gpa = std.testing.allocator;
+    var transcript = Transcript.init(gpa);
+    defer transcript.deinit();
+    transcript.applyIsupport(.ascii, irc_map.PrefixMap.parse("(YQqov)*!.@+").?);
+    try transcript.setSelf("Me");
+    var names = irc_message.parse(":server 353 Me = #room :*Me !Alice .Bob @Carol +Dave Eve %Keep");
+    try std.testing.expect(try transcript.observeIrc(&names, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Me").?].role);
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Alice").?].role);
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Bob").?].role);
+    try std.testing.expectEqual(MemberRole.operator, transcript.roster.items[transcript.findRosterIndex("Carol").?].role);
+    try std.testing.expectEqual(MemberRole.voice, transcript.roster.items[transcript.findRosterIndex("Dave").?].role);
+    try std.testing.expectEqual(MemberRole.member, transcript.roster.items[transcript.findRosterIndex("Eve").?].role);
+    try std.testing.expectEqual(MemberRole.member, transcript.roster.items[transcript.findRosterIndex("%Keep").?].role);
+    try std.testing.expect(transcript.findRosterIndex("*Me") == null);
+    var promote = irc_message.parse(":server MODE #room +Q Eve");
+    try std.testing.expect(try transcript.observeIrc(&promote, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Eve").?].role);
 }
 
 test "page break insertion and selected line removal preserve ownership and tallies" {

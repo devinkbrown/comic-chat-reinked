@@ -9,6 +9,7 @@ const irc = @import("irc.zig");
 const ircv3 = @import("ircv3.zig");
 const sasl = @import("sasl.zig");
 const features_mod = @import("features.zig");
+const irc_map = @import("irc_map.zig");
 const policy = @import("connection_policy.zig");
 const sts_store = @import("sts_store.zig");
 const session_store = @import("session_store.zig");
@@ -1424,8 +1425,9 @@ pub const Client = struct {
 
     pub fn restoresChannel(self: *const Client, channel: []const u8) bool {
         const restoration = self.restoration orelse return false;
+        const mapping = if (self.features) |*state| state.casemapping else .rfc1459;
         for (restoration.targets.items) |entry| {
-            if (std.ascii.eqlIgnoreCase(entry.channel, channel)) return true;
+            if (irc_map.eql(mapping, entry.channel, channel)) return true;
         }
         return false;
     }
@@ -1454,7 +1456,8 @@ pub const Client = struct {
         var key: []const u8 = "";
         var after: ?[]const u8 = null;
         for (restoration.targets.items) |entry| {
-            if (!std.ascii.eqlIgnoreCase(entry.channel, old_channel)) continue;
+            const mapping = if (self.features) |*state| state.casemapping else .rfc1459;
+            if (!irc_map.eql(mapping, entry.channel, old_channel)) continue;
             if (entry.key) |value| {
                 if (value.len > key_storage.len) return;
                 @memcpy(key_storage[0..value.len], value);
@@ -1492,7 +1495,8 @@ pub const Client = struct {
         const target = msg.param(0) orelse return;
         var found = false;
         for (restoration.targets.items) |entry| {
-            if (std.ascii.eqlIgnoreCase(entry.channel, target)) {
+            const mapping = if (self.features) |*state| state.casemapping else .rfc1459;
+            if (irc_map.eql(mapping, entry.channel, target)) {
                 found = true;
                 break;
             }

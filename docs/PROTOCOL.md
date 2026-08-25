@@ -288,7 +288,9 @@ semantic policy; the daemon's generic client-tag relay itself is authorized by
 iterator. `msgid`, bot/oper tags, UTF8ONLY, CLIENTTAGDENY,
 CHATHISTORY, MSGREFTYPES, MONITOR, WHOX, BOT, NETWORK, and draft ICON
 advertisements are either interpreted by feature state or retained in the
-ISUPPORT map. WEBIRC and WebSocket are separate gateway/transport modes, not
+ISUPPORT map. Advertised `PREFIX`, `CASEMAPPING`, and `CHANTYPES` are applied
+to live NAMES/MODE decorations, nick/channel comparison, and STATUSMSG
+targets instead of remaining stored-only. WEBIRC and WebSocket are separate gateway/transport modes, not
 IRC capabilities, and are intentionally outside the native TCP/TLS transport.
 The deprecated `tls` STARTTLS capability and deprecated DH SASL mechanisms are
 deliberately not requested: the connection begins with verified TLS, and the

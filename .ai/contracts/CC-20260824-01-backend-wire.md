@@ -71,6 +71,13 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Show leftover live numerics 042, 271, 272, 335, 379 and send failures 439, 511
 - Skip SASL EXTERNAL, NetMeeting, onyx/e2ee, remote art, and PR #11 UI
 
+## Wave 11 leftovers in scope
+
+- Apply advertised `PREFIX` / `CASEMAPPING` / `CHANTYPES` on the live path (Onyx `ascii` + `(YQqov)*!.@+`)
+- Forward `470` room redirects without dropping the destination or join key
+- Show leftover live numerics 010, 020, 276, 308, 310, 320, 351, 391 and send failures 431, 443, 451, 461, 462, 479, 484, 485
+- Reset ISUPPORT maps on disconnect so the next 005 can replace them
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules
