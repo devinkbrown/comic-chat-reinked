@@ -1106,6 +1106,7 @@ pub const Window = struct {
             self.output_scale = self.currentOutputScale();
             if (self.configured and previous != self.output_scale) {
                 self.refreshFallbackCursor();
+                self.installToplevelIcon() catch {};
                 return Event.expose;
             }
             return null;
@@ -1841,6 +1842,7 @@ pub const Window = struct {
         self.output_scale = self.currentOutputScale();
         if (self.configured and previous != self.output_scale) {
             self.refreshFallbackCursor();
+            self.installToplevelIcon() catch {};
             return Event.expose;
         }
         return null;

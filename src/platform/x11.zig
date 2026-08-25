@@ -191,6 +191,7 @@ const XConn = struct {
     mime_text_latin1: u32 = 0,
     mime_text_latin1_alt: u32 = 0,
     mime_text_latin9: u32 = 0,
+    mime_text_latin2: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -1004,6 +1005,7 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1, "ISO-8859-1")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin1_alt, "ISO-8859-1")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9, "ISO-8859-15")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2, "ISO-8859-2")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1085,6 +1087,11 @@ pub const Window = struct {
         }
         if (target == self.conn.mime_text_latin9) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-15") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (target == self.conn.mime_text_latin2) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-2") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
@@ -1580,6 +1587,7 @@ pub const Window = struct {
         self.scale_source = source;
         if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
         self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, new_scale, env, &self.pending_events) catch 0;
+        setNetWmIcon(self.gpa, &self.conn, self.window) catch {};
         setSizeHints(&self.conn, self.window, self.pixel_width, self.pixel_height, new_scale) catch {};
         const w = physicalToLogical(self.pixel_width, new_scale);
         const h = physicalToLogical(self.pixel_height, new_scale);
@@ -2533,6 +2541,7 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_latin1 = try internAtom(conn, "text/plain;charset=ISO-8859-1");
     conn.mime_text_latin1_alt = try internAtom(conn, "text/plain;charset=iso-8859-1");
     conn.mime_text_latin9 = try internAtom(conn, "text/plain;charset=ISO-8859-15");
+    conn.mime_text_latin2 = try internAtom(conn, "text/plain;charset=ISO-8859-2");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3103,6 +3112,8 @@ fn changeProperty32(conn: *XConn, window: u32, property: u32, typ: u32, values: 
 }
 
 fn changePropertyCardinals(conn: *XConn, window: u32, property: u32, values: []const u32) !void {
+    // `_NET_WM_ICON` at 16/32/64/128 is ~22k CARD32s; the old 16k cap
+    // rejected a single 128px mark.
     const header_units: usize = 6;
     const max_units = @max(@as(usize, conn.max_request_units), min_max_request_units);
     if (values.len + header_units > max_units or values.len + header_units > std.math.maxInt(u16)) {
@@ -3228,7 +3239,7 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
-    if (isLatin1Atom(conn, atom) or atom == conn.mime_text_latin9) return 3;
+    if (isLatin1Atom(conn, atom) or atom == conn.mime_text_latin9 or atom == conn.mime_text_latin2) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3283,7 +3294,8 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         target == conn.mime_text_utf8_alt or isUriListAtom(conn, target) or
         target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
         isDesktopFileAtom(conn, target) or target == conn.compound_text or
-        isLatin1Atom(conn, target) or target == conn.mime_text_latin9 or isMarkdownAtom(conn, target);
+        isLatin1Atom(conn, target) or target == conn.mime_text_latin9 or
+        target == conn.mime_text_latin2 or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3575,6 +3587,7 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_latin1 = 122,
         .mime_text_latin1_alt = 123,
         .mime_text_latin9 = 124,
+        .mime_text_latin2 = 127,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -3602,8 +3615,10 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 124));
     try std.testing.expect(isClipboardTextTarget(&conn, 125));
     try std.testing.expect(isClipboardTextTarget(&conn, 126));
+    try std.testing.expect(isClipboardTextTarget(&conn, 127));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 122));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 124));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 127));
     try std.testing.expectEqual(@as(u8, 1), textAtomRank(&conn, 125));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 

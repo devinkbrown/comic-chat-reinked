@@ -116,9 +116,9 @@ hash.
   move to `(-1,-1)` to clear hover. NumLock XOR Shift selects keypad
   digits on both backends. X11 Mod3 Mode_switch selects group 2.
   Receive-only `COMPOUND_TEXT` decodes to UTF-8, including `ESC - B`
-  ISO-8859-2. Invalid UTF-8 clipboard bytes decode as Latin-1.
-  Receive-only ISO-8859-1/15 `text/plain` charset MIME and Markdown
-  decode to UTF-8. Extra KDE5 / Mozilla-priv file MIME yields a local
+  ISO-8859-2 and `ESC - b` ISO-8859-15. Invalid UTF-8 clipboard bytes
+  decode as Latin-1. Receive-only ISO-8859-1/2/15 `text/plain` charset
+  MIME and Markdown decode to UTF-8. Extra KDE5 / Mozilla-priv file MIME yields a local
   path. Receive-only `text/html` strips tags to plain text.
   Clipboard text normalizes
   CR/LF to LF. `notify-send` uses `--urgency=normal` and
@@ -148,10 +148,10 @@ hash.
   activated exposes). X11 FocusIn and leaving hidden expose.
   When advertised, Wayland requests server-side decorations and
   re-requests SSD once if the compositor configures client-side mode.
-  `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON` at 16/32/64/128, and
+  `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON` at 16/32/64/128 (reinstalled on scale change), and
   `notify` sets urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn.
   Wayland uses `wp_cursor_shape_v1` or a scaled shm arrow and
-  `xdg_toplevel_icon_v1` (32@1 plus 64@2) when advertised. Wayland consumes
+  `xdg_toplevel_icon_v1` (32@1 plus 64@2, reinstalled on integer scale change) when advertised. Wayland consumes
   `XDG_ACTIVATION_TOKEN` via `xdg_activation_v1` and requests a fresh token
   for `xdg-open`; X11 sets `_NET_STARTUP_ID`
   from that token or `DESKTOP_STARTUP_ID`, sends the startup-notification

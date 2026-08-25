@@ -611,6 +611,10 @@ pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
                 try appendCodepoint(&out, gpa, iso88592Codepoint(bytes[i]));
                 i += 1;
             },
+            .latin9 => {
+                try appendCodepoint(&out, gpa, iso885915Codepoint(bytes[i]));
+                i += 1;
+            },
             .utf8 => {
                 const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
                 if (i + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[i .. i + n])) {
@@ -626,7 +630,7 @@ pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
 }
 
-const CompoundCharset = enum { latin1, latin2, utf8, ascii };
+const CompoundCharset = enum { latin1, latin2, latin9, utf8, ascii };
 
 const CompoundEscape = struct {
     consumed: usize,
@@ -652,7 +656,11 @@ fn parseCompoundEscape(text: []const u8) CompoundEscape {
     if (text[1] == '-' and text.len >= 3) {
         return .{
             .consumed = 3,
-            .cset = if (text[2] == 'B') .latin2 else .latin1,
+            .cset = switch (text[2]) {
+                'B' => .latin2,
+                'b' => .latin9,
+                else => .latin1,
+            },
             .skip = false,
         };
     }
@@ -1604,6 +1612,9 @@ test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n se
     const latin2 = try compoundTextToUtf8(gpa, "\x1b-B" ++ "\xb1");
     defer gpa.free(latin2);
     try std.testing.expectEqualStrings("ą", latin2);
+    const latin9 = try compoundTextToUtf8(gpa, "\x1b-b" ++ "\xa4");
+    defer gpa.free(latin9);
+    try std.testing.expectEqualStrings("€", latin9);
 }
 
 test "notify-send uses a normal urgency hint" {
