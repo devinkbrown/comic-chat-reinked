@@ -1858,6 +1858,7 @@ test "semantic feedback primitives classify status and button targets" {
     try std.testing.expectEqual(NoticeTone.success, statusTone("connected"));
     try std.testing.expectEqual(NoticeTone.success, statusTone("On the wire"));
     try std.testing.expectEqual(NoticeTone.warning, statusTone("reconnecting"));
+    try std.testing.expectEqual(NoticeTone.warning, statusTone("nickname in use"));
     try std.testing.expectEqual(NoticeTone.failure, statusTone("connection failed"));
     try std.testing.expectEqual(DialogButton.primary, dialogButtonAt(layout, layout.primary.x + 1, layout.primary.y + 1).?);
     try std.testing.expectEqual(DialogButton.cancel, dialogButtonAt(layout, layout.cancel.x + 1, layout.cancel.y + 1).?);
