@@ -571,50 +571,34 @@ fn largestPaperInkRun(image: Image) ?Bounds {
     // is not split off.
     var best_y0 = min_y;
     var best_y1 = min_y;
-    var y = min_y;
-    while (y < max_y) {
-        var has_ink = false;
-        var col = best_x0;
-        while (col < best_x1) : (col += 1) {
-            if (paperInkPixel(image, col, y)) {
-                has_ink = true;
-                break;
-            }
-        }
-        if (!has_ink) {
-            y += 1;
-            continue;
-        }
-        var y1 = y + 1;
-        var empty: u32 = 0;
-        while (y1 < max_y) {
-            var row_ink = false;
-            col = best_x0;
+    var band_start: ?u32 = null;
+    var last_ink = min_y;
+    y = min_y;
+    while (y <= max_y) : (y += 1) {
+        var row_ink = false;
+        if (y < max_y) {
+            var col = best_x0;
             while (col < best_x1) : (col += 1) {
-                if (paperInkPixel(image, col, y1)) {
+                if (paperInkPixel(image, col, y)) {
                     row_ink = true;
                     break;
                 }
             }
-            if (row_ink) {
-                empty = 0;
-                y1 += 1;
-                continue;
-            }
-            empty += 1;
-            if (empty > 2) {
-                y1 -= empty;
-                break;
-            }
-            y1 += 1;
         }
-        if (y1 > max_y) y1 = max_y;
-        if (empty > 0 and y1 + empty <= max_y) y1 -= empty;
-        if (y1 - y > best_y1 - best_y0) {
-            best_y0 = y;
-            best_y1 = y1;
+        if (row_ink) {
+            if (band_start == null) band_start = y;
+            last_ink = y;
+            continue;
         }
-        y = y1 + 1;
+        if (band_start) |start| {
+            if (y < max_y and y <= last_ink + 2) continue;
+            const end = last_ink + 1;
+            if (end > start and end - start > best_y1 - best_y0) {
+                best_y0 = start;
+                best_y1 = end;
+            }
+            band_start = null;
+        }
     }
     if (best_y1 <= best_y0) return .{ .x = best_x0, .y = min_y, .w = best_x1 - best_x0, .h = max_y - min_y };
     return .{ .x = best_x0, .y = best_y0, .w = best_x1 - best_x0, .h = best_y1 - best_y0 };
