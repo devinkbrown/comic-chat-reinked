@@ -512,7 +512,7 @@ pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
 }
 
 /// Receive-only `text/plain;charset=...` (ISO-8859-1/2/3/4/5/6/7/8/9/15 and
-/// Windows-1251/1252). Other charsets fall back to `clipboardBytesToUtf8`.
+/// Windows-1250/1251/1252). Other charsets fall back to `clipboardBytesToUtf8`.
 pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: []const u8) ![]u8 {
     if (isUtf8Charset(charset) or isAsciiCharset(charset)) {
         return clipboardBytesToUtf8(gpa, bytes);
@@ -529,6 +529,7 @@ pub fn decodePlainByCharset(gpa: std.mem.Allocator, bytes: []const u8, charset: 
     if (isIso88598Charset(charset)) return iso88598ToUtf8(gpa, bytes);
     if (isWindows1252Charset(charset)) return windows1252ToUtf8(gpa, bytes);
     if (isWindows1251Charset(charset)) return windows1251ToUtf8(gpa, bytes);
+    if (isWindows1250Charset(charset)) return windows1250ToUtf8(gpa, bytes);
     return clipboardBytesToUtf8(gpa, bytes);
 }
 
@@ -556,7 +557,8 @@ pub fn isLatinPlainMime(mime: []const u8) bool {
         isIso88595Charset(charset) or isIso88597Charset(charset) or
         isIso88593Charset(charset) or isIso88594Charset(charset) or
         isIso88596Charset(charset) or isIso88598Charset(charset) or
-        isWindows1252Charset(charset) or isWindows1251Charset(charset);
+        isWindows1252Charset(charset) or isWindows1251Charset(charset) or
+        isWindows1250Charset(charset);
 }
 
 pub fn decodePlainMime(gpa: std.mem.Allocator, mime: []const u8, bytes: []const u8) ![]u8 {
@@ -651,6 +653,13 @@ fn isWindows1251Charset(charset: []const u8) bool {
         std.ascii.eqlIgnoreCase(charset, "windows1251") or
         std.ascii.eqlIgnoreCase(charset, "cp1251") or
         std.ascii.eqlIgnoreCase(charset, "cp-1251");
+}
+
+fn isWindows1250Charset(charset: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(charset, "windows-1250") or
+        std.ascii.eqlIgnoreCase(charset, "windows1250") or
+        std.ascii.eqlIgnoreCase(charset, "cp1250") or
+        std.ascii.eqlIgnoreCase(charset, "cp-1250");
 }
 
 /// Receive-only ICCCM COMPOUND_TEXT. Default charset is ISO-8859-1. `ESC % G`
@@ -873,6 +882,13 @@ fn windows1251ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
 }
 
+fn windows1250ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendCodepoint(&out, gpa, windows1250Codepoint(c));
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
 fn appendLatin1(out: *std.ArrayList(u8), gpa: std.mem.Allocator, c: u8) !void {
     try appendCodepoint(out, gpa, c);
 }
@@ -981,6 +997,30 @@ fn iso88598Codepoint(c: u8) u21 {
         else => 0xfffd,
     };
 }
+
+fn windows1250Codepoint(c: u8) u21 {
+    if (c < 0x80) return c;
+    return windows1250_80[c - 0x80];
+}
+
+const windows1250_80 = [_]u21{
+    0x20ac, 0x0081, 0x201a, 0x0083, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x0088, 0x2030, 0x0160, 0x2039, 0x015a, 0x0164, 0x017d, 0x0179,
+    0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x0098, 0x2122, 0x0161, 0x203a, 0x015b, 0x0165, 0x017e, 0x017a,
+    0x00a0, 0x02c7, 0x02d8, 0x0141, 0x00a4, 0x0104, 0x00a6, 0x00a7,
+    0x00a8, 0x00a9, 0x015e, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x017b,
+    0x00b0, 0x00b1, 0x02db, 0x0142, 0x00b4, 0x00b5, 0x00b6, 0x00b7,
+    0x00b8, 0x0105, 0x015f, 0x00bb, 0x013d, 0x02dd, 0x013e, 0x017c,
+    0x0154, 0x00c1, 0x00c2, 0x0102, 0x00c4, 0x0139, 0x0106, 0x00c7,
+    0x010c, 0x00c9, 0x0118, 0x00cb, 0x011a, 0x00cd, 0x00ce, 0x010e,
+    0x0110, 0x0143, 0x0147, 0x00d3, 0x00d4, 0x0150, 0x00d6, 0x00d7,
+    0x0158, 0x016e, 0x00da, 0x0170, 0x00dc, 0x00dd, 0x0162, 0x00df,
+    0x0155, 0x00e1, 0x00e2, 0x0103, 0x00e4, 0x013a, 0x0107, 0x00e7,
+    0x010d, 0x00e9, 0x0119, 0x00eb, 0x011b, 0x00ed, 0x00ee, 0x010f,
+    0x0111, 0x0144, 0x0148, 0x00f3, 0x00f4, 0x0151, 0x00f6, 0x00f7,
+    0x0159, 0x016f, 0x00fa, 0x0171, 0x00fc, 0x00fd, 0x0163, 0x02d9,
+};
 
 fn windows1251Codepoint(c: u8) u21 {
     if (c >= 0xc0) return 0x0410 + @as(u21, c - 0xc0);
@@ -2033,6 +2073,13 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     defer gpa.free(yo_1251);
     try std.testing.expectEqualStrings("Ё", yo_1251);
     try std.testing.expect(isLatinPlainMime("text/plain;charset=windows-1251"));
+    const caron = try decodePlainByCharset(gpa, "\x8a", "windows-1250");
+    defer gpa.free(caron);
+    try std.testing.expectEqualStrings("Š", caron);
+    const caron_cp = try decodePlainByCharset(gpa, "\x8a", "cp1250");
+    defer gpa.free(caron_cp);
+    try std.testing.expectEqualStrings("Š", caron_cp);
+    try std.testing.expect(isLatinPlainMime("text/plain;charset=windows-1250"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=latin3"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=arabic"));
     try std.testing.expect(isLatinPlainMime("text/plain;charset=hebrew"));

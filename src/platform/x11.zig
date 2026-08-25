@@ -32,18 +32,19 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15, Windows-1251/1252, and Markdown MIME,
+//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/15, Windows-1250/1251/1252, and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear,
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
-//!     FocusIn/leaving-hidden expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
+//!     FocusIn/leaving-hidden/gaining `_NET_WM_STATE_FOCUSED` expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
 //!     while NET hidden, ICCCM iconic, unmapped, shaded, or fully obscured; MapNotify exposes), a scaled
 //!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 plus ICCCM `WM_HINTS`
 //!     icon pixmap/mask at 32@1 / 64@2 (reinstalled on scale change), urgency on `notify` (cleared on
-//!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
+//!     FocusIn), EWMH ping/type/icon name/user time (`_NET_WM_USER_TIME` plus
+//!     `_NET_WM_USER_TIME_WINDOW`) /startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
 //!     for `xdg-open`, EnterNotify cursor restore and pointer move
 //!     (grab/ungrab and pointer-focus details ignored), wheel releases ignored,
@@ -64,6 +65,8 @@ const image_depth = 24;
 const z_pixmap = 2;
 
 const input_output = 1;
+const input_only = 2;
+const atom_window = 33;
 
 const event_key_press: u32 = 1 << 0;
 const event_button_press: u32 = 1 << 2;
@@ -149,6 +152,7 @@ const XConn = struct {
     net_startup_info_begin: u32 = 0,
     net_wm_ping: u32 = 0,
     net_wm_user_time: u32 = 0,
+    net_wm_user_time_window: u32 = 0,
     net_wm_window_type: u32 = 0,
     net_wm_window_type_normal: u32 = 0,
     net_wm_allowed_actions: u32 = 0,
@@ -180,6 +184,7 @@ const XConn = struct {
     net_wm_state_attention: u32 = 0,
     net_wm_state_hidden: u32 = 0,
     net_wm_state_shaded: u32 = 0,
+    net_wm_state_focused: u32 = 0,
     utf16_string: u32 = 0,
     mime_text_html: u32 = 0,
     mime_text_html_utf8: u32 = 0,
@@ -220,6 +225,8 @@ const XConn = struct {
     mime_text_cp1252_alt: u32 = 0,
     mime_text_cp1251: u32 = 0,
     mime_text_cp1251_alt: u32 = 0,
+    mime_text_cp1250: u32 = 0,
+    mime_text_cp1250_alt: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -457,7 +464,9 @@ pub const Window = struct {
     cursor_id: u32,
     icon_pixmap: u32,
     icon_mask: u32,
+    user_time_window: u32,
     wm_urgent: bool,
+    wm_focused: bool,
     wm_hidden: bool,
     wm_net_hidden: bool,
     wm_icccm_hidden: bool,
@@ -529,7 +538,9 @@ pub const Window = struct {
             .cursor_id = 0,
             .icon_pixmap = 0,
             .icon_mask = 0,
+            .user_time_window = 0,
             .wm_urgent = false,
+            .wm_focused = false,
             .wm_hidden = false,
             .wm_net_hidden = false,
             .wm_icccm_hidden = false,
@@ -576,6 +587,7 @@ pub const Window = struct {
         try setWmClass(&self.conn, self.window, "comicchat", "Reinked");
         try setNetWmPid(&self.conn, self.window);
         try setNetStartupId(&self.conn, self.window, env);
+        self.installUserTimeWindow();
         try setNetWmWindowType(&self.conn, self.window);
         try setAllowedActions(&self.conn, self.window);
         try setWmLocaleName(&self.conn, self.window, env);
@@ -604,6 +616,7 @@ pub const Window = struct {
         if (self.icon_pixmap != 0) freePixmap(&self.conn, self.icon_pixmap) catch {};
         if (self.icon_mask != 0) freePixmap(&self.conn, self.icon_mask) catch {};
         if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
+        if (self.user_time_window != 0) destroyWindow(&self.conn, self.user_time_window) catch {};
         self.conn.stream.close(self.conn.io);
         self.threaded.deinit();
         self.pending_chars.deinit(self.gpa);
@@ -877,8 +890,9 @@ pub const Window = struct {
                 }
                 if (window == self.window and atom == self.conn.net_wm_state) {
                     const was_hidden = self.wm_hidden;
+                    const was_focused = self.wm_focused;
                     self.readNetWmState();
-                    if (was_hidden and !self.wm_hidden) return .expose;
+                    if (netStateExpose(was_hidden, self.wm_hidden, was_focused, self.wm_focused)) return .expose;
                 }
                 if (window == self.window and atom == self.conn.wm_state) {
                     const was_hidden = self.wm_hidden;
@@ -919,8 +933,9 @@ pub const Window = struct {
                     if (self.takeXdndDrop(event)) |ev| return ev;
                 } else if (typ == self.conn.net_wm_state) {
                     const was_hidden = self.wm_hidden;
+                    const was_focused = self.wm_focused;
                     self.applyNetWmStateMessage(event);
-                    if (was_hidden and !self.wm_hidden) return .expose;
+                    if (netStateExpose(was_hidden, self.wm_hidden, was_focused, self.wm_focused)) return .expose;
                 } else if (typ == self.conn.wm_change_state) {
                     const was_hidden = self.wm_hidden;
                     self.applyWmChangeState(event);
@@ -1079,6 +1094,8 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1252_alt, "windows-1252")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1251, "windows-1251")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1251_alt, "windows-1251")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1250, "windows-1250")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_cp1250_alt, "windows-1250")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1210,6 +1227,11 @@ pub const Window = struct {
         }
         if (isCp1251Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1251") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isCp1250Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "windows-1250") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
@@ -1366,7 +1388,22 @@ pub const Window = struct {
     fn noteUserTime(self: *Window, time: u32) void {
         if (time != 0) self.last_user_time = time;
         if (self.conn.net_wm_user_time == 0 or time == 0) return;
-        changeProperty32(&self.conn, self.window, self.conn.net_wm_user_time, atom_cardinal, &.{time}) catch {};
+        const target = userTimePropertyWindow(self.window, self.user_time_window);
+        changeProperty32(&self.conn, target, self.conn.net_wm_user_time, atom_cardinal, &.{time}) catch {};
+        if (target != self.window) {
+            changeProperty32(&self.conn, self.window, self.conn.net_wm_user_time, atom_cardinal, &.{time}) catch {};
+        }
+    }
+
+    fn installUserTimeWindow(self: *Window) void {
+        if (self.conn.net_wm_user_time_window == 0) return;
+        const id = self.conn.allocId() catch return;
+        createUserTimeWindow(&self.conn, self.window, id) catch return;
+        changeProperty32(&self.conn, self.window, self.conn.net_wm_user_time_window, atom_window, &.{id}) catch {
+            destroyWindow(&self.conn, id) catch {};
+            return;
+        };
+        self.user_time_window = id;
     }
 
     fn claimFocus(self: *Window, time: u32) void {
@@ -1906,6 +1943,9 @@ pub const Window = struct {
             if (add) self.wm_shaded = true;
             if (remove) self.wm_shaded = false;
             self.syncHidden();
+        } else if (atom == self.conn.net_wm_state_focused) {
+            if (add) self.wm_focused = true;
+            if (remove) self.wm_focused = false;
         }
     }
 
@@ -1915,6 +1955,7 @@ pub const Window = struct {
         if (atom == self.conn.net_wm_state_fullscreen) return self.wm_fullscreen;
         if (atom == self.conn.net_wm_state_hidden) return self.wm_net_hidden;
         if (atom == self.conn.net_wm_state_shaded) return self.wm_shaded;
+        if (atom == self.conn.net_wm_state_focused) return self.wm_focused;
         return false;
     }
 
@@ -1953,6 +1994,7 @@ pub const Window = struct {
         self.wm_fullscreen = false;
         self.wm_net_hidden = false;
         self.wm_shaded = false;
+        self.wm_focused = false;
         var off: usize = 0;
         while (off + 4 <= bytes.len) : (off += 4) {
             const atom = get32(bytes[off..][0..4]);
@@ -1961,6 +2003,7 @@ pub const Window = struct {
             if (atom == self.conn.net_wm_state_fullscreen) self.wm_fullscreen = true;
             if (atom == self.conn.net_wm_state_hidden) self.wm_net_hidden = true;
             if (atom == self.conn.net_wm_state_shaded) self.wm_shaded = true;
+            if (atom == self.conn.net_wm_state_focused) self.wm_focused = true;
         }
         self.syncHidden();
     }
@@ -2155,6 +2198,35 @@ fn createWindow(conn: *XConn, window: u32, w: u16, h: u16) !void {
     put32(req[36..40], values[1]);
     put32(req[40..44], values[2]);
     try writeAll(conn, &req);
+}
+
+fn createUserTimeWindow(conn: *XConn, parent: u32, window: u32) !void {
+    var req: [32]u8 = @splat(0);
+    req[0] = 1;
+    req[1] = 0; // InputOnly depth
+    put16(req[2..4], 8);
+    put32(req[4..8], window);
+    put32(req[8..12], parent);
+    put16(req[16..18], 1);
+    put16(req[18..20], 1);
+    put16(req[22..24], input_only);
+    try writeAll(conn, &req);
+}
+
+fn destroyWindow(conn: *XConn, window: u32) !void {
+    var req: [8]u8 = @splat(0);
+    req[0] = 4;
+    put16(req[2..4], 2);
+    put32(req[4..8], window);
+    try writeAll(conn, &req);
+}
+
+fn userTimePropertyWindow(toplevel: u32, time_window: u32) u32 {
+    return if (time_window != 0) time_window else toplevel;
+}
+
+fn netStateExpose(was_hidden: bool, hidden: bool, was_focused: bool, focused: bool) bool {
+    return (was_hidden and !hidden) or (!was_focused and focused);
 }
 
 fn createGc(conn: *XConn, gc: u32, drawable: u32) !void {
@@ -2643,6 +2715,7 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_startup_info_begin = try internAtom(conn, "_NET_STARTUP_INFO_BEGIN");
     conn.net_wm_ping = try internAtom(conn, "_NET_WM_PING");
     conn.net_wm_user_time = try internAtom(conn, "_NET_WM_USER_TIME");
+    conn.net_wm_user_time_window = try internAtom(conn, "_NET_WM_USER_TIME_WINDOW");
     conn.net_wm_window_type = try internAtom(conn, "_NET_WM_WINDOW_TYPE");
     conn.net_wm_window_type_normal = try internAtom(conn, "_NET_WM_WINDOW_TYPE_NORMAL");
     conn.text = try internAtom(conn, "TEXT");
@@ -2674,6 +2747,7 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_state_attention = try internAtom(conn, "_NET_WM_STATE_DEMANDS_ATTENTION");
     conn.net_wm_state_hidden = try internAtom(conn, "_NET_WM_STATE_HIDDEN");
     conn.net_wm_state_shaded = try internAtom(conn, "_NET_WM_STATE_SHADED");
+    conn.net_wm_state_focused = try internAtom(conn, "_NET_WM_STATE_FOCUSED");
     conn.utf16_string = try internAtom(conn, "UTF16_STRING");
     conn.mime_text_html = try internAtom(conn, "text/html");
     conn.mime_text_html_utf8 = try internAtom(conn, "text/html;charset=utf-8");
@@ -2714,6 +2788,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_cp1252_alt = try internAtom(conn, "text/plain;charset=cp1252");
     conn.mime_text_cp1251 = try internAtom(conn, "text/plain;charset=windows-1251");
     conn.mime_text_cp1251_alt = try internAtom(conn, "text/plain;charset=cp1251");
+    conn.mime_text_cp1250 = try internAtom(conn, "text/plain;charset=windows-1250");
+    conn.mime_text_cp1250_alt = try internAtom(conn, "text/plain;charset=cp1250");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3446,7 +3522,8 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
     if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom) or isLatin5Atom(conn, atom) or
         isCyrillicAtom(conn, atom) or isGreekAtom(conn, atom) or isLatin3Atom(conn, atom) or isLatin4Atom(conn, atom) or
-        isArabicAtom(conn, atom) or isHebrewAtom(conn, atom) or isCp1252Atom(conn, atom) or isCp1251Atom(conn, atom)) return 3;
+        isArabicAtom(conn, atom) or isHebrewAtom(conn, atom) or isCp1252Atom(conn, atom) or isCp1251Atom(conn, atom) or
+        isCp1250Atom(conn, atom)) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3513,6 +3590,10 @@ fn isCp1251Atom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_cp1251 or atom == conn.mime_text_cp1251_alt);
 }
 
+fn isCp1250Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_cp1250 or atom == conn.mime_text_cp1250_alt);
+}
+
 fn x11NotifyModeIsGrab(mode: u8) bool {
     return mode == notify_mode_grab or mode == notify_mode_ungrab;
 }
@@ -3558,7 +3639,8 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         isCyrillicAtom(conn, target) or isGreekAtom(conn, target) or
         isLatin3Atom(conn, target) or isLatin4Atom(conn, target) or
         isArabicAtom(conn, target) or isHebrewAtom(conn, target) or
-        isCp1252Atom(conn, target) or isCp1251Atom(conn, target) or isMarkdownAtom(conn, target);
+        isCp1252Atom(conn, target) or isCp1251Atom(conn, target) or
+        isCp1250Atom(conn, target) or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3824,6 +3906,12 @@ test "ICCCM WM_STATE treats only NormalState as visible" {
     try std.testing.expectEqual(@as(u32, 1 | 2 | (1 << 2) | (1 << 5)), wmHintsFlags(false, true));
     try std.testing.expectEqual(@as(u32, 1 | 2 | (1 << 8)), wmHintsFlags(true, false));
     try std.testing.expectEqual(@as(u32, 1 | 2 | (1 << 2) | (1 << 5) | (1 << 8)), wmHintsFlags(true, true));
+    try std.testing.expectEqual(@as(u32, 9), userTimePropertyWindow(7, 9));
+    try std.testing.expectEqual(@as(u32, 7), userTimePropertyWindow(7, 0));
+    try std.testing.expect(netStateExpose(true, false, false, false));
+    try std.testing.expect(netStateExpose(false, false, false, true));
+    try std.testing.expect(!netStateExpose(false, false, true, true));
+    try std.testing.expect(!netStateExpose(true, true, true, false));
 }
 
 test "clipboard text targets include ICCCM and GTK MIME atoms" {
@@ -3883,6 +3971,8 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_cp1252_alt = 146,
         .mime_text_cp1251 = 147,
         .mime_text_cp1251_alt = 148,
+        .mime_text_cp1250 = 149,
+        .mime_text_cp1250_alt = 150,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -3972,6 +4062,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isCp1251Atom(&conn, 147));
     try std.testing.expect(isClipboardTextTarget(&conn, 147));
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 147));
+    try std.testing.expect(isCp1250Atom(&conn, 149));
+    try std.testing.expect(isClipboardTextTarget(&conn, 149));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 149));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
     try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));
