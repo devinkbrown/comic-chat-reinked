@@ -109,6 +109,12 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Clear the current notify-online snapshot on disconnect so stale presence does not survive
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, and PR #11 UI
 
+## Wave 16 leftovers in scope
+
+- Treat 489 SECUREONLY (`+S`) as a join denial when the target room is not joined, so restoration is forgotten
+- Keep 489 as a command failure when the room is already joined (voice/send)
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules

@@ -4458,9 +4458,12 @@ fn isJoinDeniedNumeric(command: []const u8) bool {
 
 fn isJoinDeniedReply(msg: *const cc.net.message.Message, workspace: *const cc.client.workspace.Workspace) bool {
     if (isJoinDeniedNumeric(msg.command)) return true;
-    if (!std.mem.eql(u8, msg.command, "437")) return false;
     const target = msg.param(1) orelse return false;
-    return cc.net.irc_map.isChannelName(workspace.chantypes, target);
+    if (!cc.net.irc_map.isChannelName(workspace.chantypes, target)) return false;
+    if (std.mem.eql(u8, msg.command, "437")) return true;
+    if (!std.mem.eql(u8, msg.command, "489")) return false;
+    if (workspace.find(target)) |index| return !workspace.rooms.items[index].joined;
+    return true;
 }
 
 fn anyRoomJoined(workspace: *const cc.client.workspace.Workspace) bool {
@@ -5706,6 +5709,14 @@ test "live roster room lookup includes MODE KICK and topic numerics" {
     const oper_only = cc.net.message.parse(":server 520 me #root :Cannot join channel (+O)");
     try std.testing.expect(isJoinDeniedReply(&oper_only, &workspace));
     try std.testing.expectEqualStrings("#root", messageRoom(&oper_only, &workspace).?);
+    const secure = cc.net.message.parse(":server 489 me #root :Cannot join channel (+S) - TLS required");
+    try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
+    try std.testing.expectEqualStrings("#root", messageRoom(&secure, &workspace).?);
+    const root = try workspace.ensure("#root");
+    try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
+    workspace.rooms.items[root].joined = true;
+    try std.testing.expect(!isJoinDeniedReply(&secure, &workspace));
+    try std.testing.expect(isCommandFailureNumeric("489"));
 }
 
 test "channel mode and invite lines land in the matching room" {
@@ -5797,6 +5808,12 @@ test "self leave and join denial clear membership without a live socket" {
     try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &throttled));
     try std.testing.expect(!workspace.rooms.items[root].joined);
     try std.testing.expect(!client.restoresChannel("#root"));
+
+    try client.join("#secure");
+    const secure = cc.net.message.parse(":server 489 me #secure :Cannot join channel (+S) - TLS required");
+    try std.testing.expect(isJoinDeniedReply(&secure, &workspace));
+    try std.testing.expect(try applyJoinDenied(&workspace, &client, &state, &secure));
+    try std.testing.expect(!client.restoresChannel("#secure"));
 }
 
 test "unknown CTCP is consumed while ACTION and SOUND stay speech" {
