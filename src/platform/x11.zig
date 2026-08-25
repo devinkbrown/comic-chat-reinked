@@ -1950,7 +1950,7 @@ pub const Window = struct {
         put32(req[4..8], self.window);
         writeAll(&self.conn, &req) catch return null;
         const reply = readReplyStashing(self.gpa, &self.conn, &self.pending_events) catch return null;
-        const point = queryPointerWinPoint(reply);
+        const point = queryPointerWinPoint(&reply);
         if (!queryPointerReplyInside(point.same_screen, point.x, point.y, self.pixel_width, self.pixel_height)) return null;
         return .{
             .x = physicalPointToLogical(point.x, self.scale),
