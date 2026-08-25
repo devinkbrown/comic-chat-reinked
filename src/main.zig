@@ -3886,6 +3886,8 @@ fn processWorkspaceMessages(
             }
             state.join_requested = true;
             state.status = "joining";
+            if (workspaceTranscriptRoom(workspace, channel)) |welcome_room|
+                try appendServerWorkflowReply(&welcome_room.transcript, &msg);
             redraw = true;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "NICK")) {
             const who = if (msg.prefix) |prefix| cc.comic.session.nickFromPrefix(prefix) else "";
@@ -4014,7 +4016,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch return std.ascii.eqlIgnoreCase(command, "PROP");
     return switch (code) {
         2, 3, 4, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266 => true,
-        311, 312, 313, 314, 317, 318, 319, 330 => true,
+        307, 311, 312, 313, 314, 317, 318, 319, 330, 338, 378 => true,
         322, 323, 341, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
         710, 711, 712, 713, 714, 715, 732, 733, 734 => true,
         801...819, 900...908, 913...925 => true,
@@ -4182,6 +4184,8 @@ fn applyLiveChannelKey(
 fn isCommandFailureNumeric(command: []const u8) bool {
     return std.mem.eql(u8, command, "401") or
         std.mem.eql(u8, command, "404") or
+        std.mem.eql(u8, command, "412") or
+        std.mem.eql(u8, command, "417") or
         std.mem.eql(u8, command, "421") or
         std.mem.eql(u8, command, "441") or
         std.mem.eql(u8, command, "442") or
@@ -5481,7 +5485,12 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("250"));
     try std.testing.expect(isVisibleServerWorkflowReply("265"));
     try std.testing.expect(isVisibleServerWorkflowReply("330"));
+    try std.testing.expect(isVisibleServerWorkflowReply("307"));
+    try std.testing.expect(isVisibleServerWorkflowReply("338"));
+    try std.testing.expect(isVisibleServerWorkflowReply("378"));
     try std.testing.expect(isVisibleServerWorkflowReply("422"));
+    try std.testing.expect(isCommandFailureNumeric("412"));
+    try std.testing.expect(isCommandFailureNumeric("417"));
     try std.testing.expect(isVisibleServerWorkflowReply("732"));
     try std.testing.expect(isVisibleServerWorkflowReply("734"));
     try std.testing.expect(isVisibleServerWorkflowReply("904"));
