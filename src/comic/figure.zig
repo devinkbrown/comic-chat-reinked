@@ -1156,6 +1156,64 @@ test "leftover Color and HD bodycam figures stay standing with local color" {
     }
 }
 
+test "leftover dest emotion-wheel surprised and angry bodycam stay standing with local color" {
+    // The live bodycam mood dial uses chromeBodyForSourcePose. Angry and
+    // surprised have empty text rules, so leftover dest chromeBody(text)
+    // never selected them.
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+    };
+    const moods = [_]emotion_mod.Emotion{ .surprised, .angry };
+    for (blobs) |avb_data| {
+        for (moods) |mood| {
+            const pose = try poseStateForEmotion(gpa, avb_data, mood, 255);
+            var body = try chromeBodyForSourcePose(gpa, avb_data, pose);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 140);
+            try std.testing.expect(body.height + 16 > body.width);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
+    }
+}
+
 fn countOpaque(image: Image) usize {
     var count: usize = 0;
     for (image.pixels) |pixel| {
@@ -1635,7 +1693,7 @@ test "leftover Color pose cards keep one paper-ink column-run" {
         @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
     };
-    const emotions = [_]u16{ 9, 8, 7, 2, 4, 10 };
+    const emotions = [_]u16{ 9, 8, 7, 6, 2, 4, 10 };
     for (blobs) |avb_data| {
         for (emotions) |emotion| {
             var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, emotion, 0);

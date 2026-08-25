@@ -2988,3 +2988,40 @@ test "leftover dest wave dests keep dest-only paint on unused rooms" {
         }
     }
 }
+
+test "leftover dest emotion-wheel surprised and angry dests keep dest-only paint" {
+    const gpa = std.testing.allocator;
+    const emotion_mod = @import("emotion.zig");
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color", "hugh hd", "xeno hd" };
+    const moods = [_]emotion_mod.Emotion{ .surprised, .angry };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            const dest_avb = avatarByName(dest) orelse return error.TestUnexpectedResult;
+            for (moods) |mood| {
+                const pose = try figure.poseStateForEmotion(gpa, dest_avb, mood, 255);
+                var image = try renderWithOptions(gpa, &.{.{
+                    .speaker = dest,
+                    .text = tall,
+                    .pose_state = pose,
+                }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
+        }
+    }
+}
