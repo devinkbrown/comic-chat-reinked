@@ -1031,17 +1031,23 @@ pub const View = struct {
                 else if (dialogs.fieldAcceptsText(id, self.dialog_field))
                     if (modifiers.shift) editor.extendRight() else editor.right();
             },
-            .home => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
-                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
-                    self.setDialogChoiceExtreme(id, self.dialog_field, false)
-                else if (dialogs.fieldAcceptsText(id, self.dialog_field))
+            .home => {
+                if (self.dialog_action_focus != null or self.dialog_browse_focus or dialogJumpsFieldExtreme(id, self.dialog_field)) {
+                    self.focusDialogExtreme(id, false);
+                } else if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
+                    self.setDialogChoiceExtreme(id, self.dialog_field, false);
+                } else if (dialogs.fieldAcceptsText(id, self.dialog_field)) {
                     if (modifiers.shift) editor.extendHome() else editor.home();
+                }
             },
-            .end => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
-                if (dialogs.fields(id)[self.dialog_field].kind == .choice)
-                    self.setDialogChoiceExtreme(id, self.dialog_field, true)
-                else if (dialogs.fieldAcceptsText(id, self.dialog_field))
+            .end => {
+                if (self.dialog_action_focus != null or self.dialog_browse_focus or dialogJumpsFieldExtreme(id, self.dialog_field)) {
+                    self.focusDialogExtreme(id, true);
+                } else if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
+                    self.setDialogChoiceExtreme(id, self.dialog_field, true);
+                } else if (dialogs.fieldAcceptsText(id, self.dialog_field)) {
                     if (modifiers.shift) editor.extendEnd() else editor.end();
+                }
             },
             .up => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
                 if (dialogs.fields(id)[self.dialog_field].kind == .choice)
@@ -1062,6 +1068,22 @@ pub const View = struct {
             else => {},
         }
         return .none;
+    }
+
+    fn focusDialogExtreme(self: *View, id: dialogs.Id, last: bool) void {
+        self.dialog_browse_focus = false;
+        if (last) {
+            self.dialog_action_focus = if (dialogs.showsCancel(id)) .cancel else .primary;
+            return;
+        }
+        for (dialogs.fields(id), 0..) |field, index| {
+            if (!dialogFieldFocusable(field)) continue;
+            self.dialog_field = index;
+            self.dialog_action_focus = null;
+            self.ensureDialogFieldVisible(id);
+            return;
+        }
+        self.dialog_action_focus = .primary;
     }
 
     fn ensureDialogFieldVisible(self: *View, id: dialogs.Id) void {
@@ -1357,7 +1379,7 @@ pub const View = struct {
             8 => self.toggleMembers(),
             10 => self.openDialog(.away),
             11, 14, 15, 16 => self.openDialog(.personal),
-            12 => self.openDialog(.notifications),
+            12 => self.openDialog(.user_list),
             13 => self.openDialog(.whisper),
             17 => self.openDialog(.set_text_font),
             18, 23 => self.openDialog(.choose_color),
@@ -2231,7 +2253,7 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
             6, 7, 8 => "Room",
             9 => "Favorite",
             11 => "Invite",
-            12 => "Key",
+            12 => "Room",
             else => "Room",
         },
         5 => switch (item) {
@@ -2259,7 +2281,7 @@ fn contextItemHint(kind: ContextKind, item: u8, connected: bool) []const u8 {
             0 => "Say",
             1 => "Card",
             2 => "Room",
-            else => "Mod",
+            else => "Moderate",
         },
         .body_camera => switch (item) {
             0 => "Hold",
@@ -3414,6 +3436,7 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
             0 => "WIRE",
             1 => "SIGN",
             2 => "ROOM",
+            3 => "LIST",
             else => "",
         },
         .password => switch (index) {
@@ -3424,10 +3447,11 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .room_list => switch (index) {
             0 => "LIST",
             1 => "JOIN",
+            2 => "LIST",
             else => "",
         },
-        .user_list => if (index == 0) "CAST" else "",
-        .channel, .channel_create => if (index == 0) "JOIN" else "",
+        .user_list => if (index == 0) "CAST" else if (index == 1) "NAME" else "",
+        .channel, .channel_create => if (index == 0) "JOIN" else if (index == 4 or (id == .channel and index == 1)) "KEY" else "",
         .whisper, .invite => if (index == 0) "SAY" else "",
         .away => if (index == 0) "NOTE" else "",
         .nickname => if (index == 0) "NAME" else "",
@@ -3444,7 +3468,12 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
             else => "",
         },
         .ban => if (index == 0) "NAME" else "",
-        .kick => if (index == 0) "CAST" else "",
+        .kick => switch (index) {
+            0 => "CAST",
+            1 => "NOTE",
+            2 => "NAME",
+            else => "",
+        },
         .call_link => if (index == 0) "CALL" else "",
         .member_profile => if (index == 0) "CARD" else "",
         .sound => if (index == 0) "PLAY" else "",
@@ -3455,7 +3484,20 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .choose_color => if (index == 0) "INK" else "",
         .export_image, .print_preview => if (index == 0) "PAGE" else "",
         .open_conversation, .save_conversation, .open_locator => if (index == 0) "FILE" else "",
-        .automation => if (index == 0) "AUTO" else "",
+        .automation, .rules, .edit_rule => if (index == 0) "AUTO" else "",
+        .channel_password => if (index == 0) "KEY" else "",
+        .background => if (index == 0) "PAGE" else "",
+        .text_font, .set_text_font => if (index == 0) "TYPE" else "",
+        .notifications => if (index == 0) "WATCH" else "",
+        .notification_users => if (index == 0 or index == 1) "CAST" else "",
+        .rule_sets, .add_to_sets => if (index == 0) "SET" else "",
+        .favorite_rooms => if (index == 0) "ROOM" else "",
+        .recent_files => if (index == 0) "FILE" else "",
+        .channel_properties => if (index == 0) "ROOM" else "",
+        .ircx_events => if (index == 1) "WATCH" else "",
+        .rename_loaded_set, .rename_set, .create_set => if (index == 0) "NAME" else "",
+        .advanced_event_params, .advanced_rule_settings => if (index == 0) "RULE" else "",
+        .about => if (index == 0) "INK" else "",
         else => "",
     };
 }
@@ -3474,7 +3516,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
     return switch (id) {
         .setup => "Verified TLS on 6697 is the Sunday default",
         .servers => "Live Onyx nodes use implicit TLS 6697",
-        .connection_features => if (std.mem.eql(u8, first_value, "Offline") or std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "What this wire is offering",
+        .connection_features => if (isOfflineFeatureStatus(first_value)) "Features appear after the wire is live" else "What this wire is offering",
         .room_list => "Search by name or size, then join",
         .user_list => "Choose a CAST member from the list",
         .channel, .channel_create => "Enter a room beginning with # or &",
@@ -3527,11 +3569,21 @@ fn dialogFieldFocusable(field: dialogs.Field) bool {
     return field.kind != .readonly and field.kind != .preview;
 }
 
-fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Editor, active_field: usize, first_field: usize, action_focus: ?ui.DialogButton, hovered_field: ?usize, hovered_browse: ?usize, notice: []const u8, hovered_button: ?ui.DialogButton) void {
-    ui.drawModalBackdrop(c);
-    const dialog_layout = dialogLayout(c.width, c.height, spec);
-    const rect = dialog_layout.rect;
-    const group_text = switch (spec.id) {
+fn dialogJumpsFieldExtreme(id: dialogs.Id, index: usize) bool {
+    const all = dialogs.fields(id);
+    if (index >= all.len) return true;
+    return switch (all[index].kind) {
+        .text, .password, .choice => false,
+        .list, .preview, .readonly => true,
+    };
+}
+
+fn isOfflineFeatureStatus(value: []const u8) bool {
+    return std.mem.eql(u8, value, "Offline") or std.mem.eql(u8, value, "Disconnected") or std.mem.eql(u8, value, "Off the wire");
+}
+
+fn dialogGroupText(id: dialogs.Id) []const u8 {
+    return switch (id) {
         .settings => "Ink, Sunday page density, and the CAST",
         .character => "Choose who stands on the page",
         .background => "The paper behind every panel",
@@ -3539,10 +3591,15 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .servers => "Live Onyx wires on implicit TLS 6697",
         .connection_features => "What this wire is offering",
         .password => "Secure account sign-in",
+        .nickname => "Used on the wire and the Sunday page",
+        .personal => "Shown on your CAST card",
         .sound => "Choose a sound and message",
         .comics_view => "Sunday page or conversation",
         .about => "Portable Ink Sunday client",
         .room_list => "Search rooms, then join",
+        .user_list => "Choose a CAST member from the list",
+        .channel, .channel_create => "Enter a room beginning with # or &",
+        .channel_password => "Needed if the room is locked",
         .whisper => "A quiet balloon for one CAST member",
         .kick => "Remove CAST from this room",
         .ban => "Keep a name pattern off this room",
@@ -3555,15 +3612,34 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .favorite_rooms => "Join or save a favorite room",
         .away => "Posted while you are away",
         .choose_color => "Ink for typed text",
-        else => switch (spec.group) {
-            .application => "Ink Sunday preferences",
-            .connection => "Wire, identity, and appearance",
-            .rooms => "Rooms and CAST",
-            .automation => "Automation and notifications",
-            .files => "Files and conversations",
-        },
+        .notifications, .notification_users => "Watch who comes onto the wire",
+        .rules, .edit_rule => "When something happens on the page",
+        .rule_sets => "Create, import, or export a rule set",
+        .add_to_sets => "Add a rule to an open set",
+        .rename_loaded_set, .rename_set => "Rename the open rule set",
+        .create_set => "Name a new rule set",
+        .advanced_event_params => "How often this rule may fire",
+        .advanced_rule_settings => "Enable matching and case",
+        .automation => "Greeting and repeat limits",
+        .room_access => "Grant, deny, or show room access",
+        .ircx_properties => "Read or write named room properties",
+        .ircx_events => "Watch room, CAST, server, or wire events",
+        .motd => "From the wire",
+        .text_font, .set_text_font => "Type on the Sunday page",
+        .open_conversation => "Open a saved conversation",
+        .save_conversation => "Save this conversation",
+        .export_image => "Export the Sunday page as an image",
+        .open_locator => "Open a saved locator",
+        .print_preview => "Save a printable Sunday page",
+        .recent_files => "Open a recent conversation",
     };
-    ui.drawDialogSurface(c, rect, spec.title, group_text);
+}
+
+fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Editor, active_field: usize, first_field: usize, action_focus: ?ui.DialogButton, hovered_field: ?usize, hovered_browse: ?usize, notice: []const u8, hovered_button: ?ui.DialogButton) void {
+    ui.drawModalBackdrop(c);
+    const dialog_layout = dialogLayout(c.width, c.height, spec);
+    const rect = dialog_layout.rect;
+    ui.drawDialogSurface(c, rect, spec.title, dialogGroupText(spec.id));
     if (spec.id == .settings or spec.id == .setup or spec.id == .servers or spec.id == .connection_features or spec.id == .password) {
         const well_top = dialog_layout.body_y - 8;
         const well_h = @max(0, dialog_layout.primary.y - well_top - 12);
@@ -4739,6 +4815,27 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("OWN", memberRoleChip(.owner));
     try std.testing.expectEqualStrings("Account name and password for this wire", dialogHelper(.password, ""));
     try std.testing.expectEqualStrings("How often this rule may fire", dialogHelper(.advanced_event_params, ""));
+    try std.testing.expectEqualStrings("Room", menuItemHint(4, 12, true));
+    try std.testing.expectEqualStrings("Moderate", contextItemHint(.member, 3, true));
+    try std.testing.expectEqualStrings("KEY", settingsKicker(.channel_password, 0));
+    try std.testing.expectEqualStrings("PAGE", settingsKicker(.background, 0));
+    try std.testing.expectEqualStrings("TYPE", settingsKicker(.text_font, 0));
+    try std.testing.expectEqualStrings("WATCH", settingsKicker(.notifications, 0));
+    try std.testing.expectEqualStrings("CAST", settingsKicker(.notification_users, 1));
+    try std.testing.expectEqualStrings("AUTO", settingsKicker(.rules, 0));
+    try std.testing.expectEqualStrings("SET", settingsKicker(.rule_sets, 0));
+    try std.testing.expectEqualStrings("ROOM", settingsKicker(.favorite_rooms, 0));
+    try std.testing.expectEqualStrings("FILE", settingsKicker(.recent_files, 0));
+    try std.testing.expectEqualStrings("WATCH", settingsKicker(.ircx_events, 1));
+    try std.testing.expectEqualStrings("INK", settingsKicker(.about, 0));
+    try std.testing.expectEqualStrings("LIST", settingsKicker(.connection_features, 3));
+    try std.testing.expectEqualStrings("NAME", settingsKicker(.user_list, 1));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Offline"));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Disconnected"));
+    try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Off the wire"));
+    try std.testing.expectEqualStrings("What this wire is offering", dialogHelper(.connection_features, "Verified TLS"));
+    try std.testing.expectEqualStrings("Used on the wire and the Sunday page", dialogGroupText(.nickname));
+    try std.testing.expectEqualStrings("Greeting and repeat limits", dialogGroupText(.automation));
 }
 
 test "invitation password and wire list route from existing menus" {
@@ -5003,6 +5100,45 @@ test "dialog Home and End jump to the first and last choice" {
     try std.testing.expectEqualStrings("Owner", view.dialogValueAt(1));
     _ = try view.handleDialogKey(.up, .{});
     try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
+}
+
+test "dialog Home and End jump first field and last button from leftover chrome" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+
+    view.openDialog(.file_transfer);
+    view.dialog_field = 2;
+    view.dialog_browse_focus = true;
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expect(!view.dialog_browse_focus);
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 0), view.dialog_field);
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(ui.DialogButton.cancel, view.dialog_action_focus.?);
+
+    view.openDialog(.motd);
+    view.dialog_action_focus = null;
+    view.dialog_field = 0;
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "Ignore CAST toolbar opens the CAST list" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = true;
+    try std.testing.expectEqualStrings("Ignore CAST", toolbarLabel(12));
+    try std.testing.expectEqual(Action{ .toolbar = 12 }, view.activateToolbar(12));
+    try std.testing.expectEqual(dialogs.Id.user_list, view.active_dialog.?);
 }
 
 test "composer Escape returns to the menu bar and transcript Escape clears selection" {

@@ -2246,15 +2246,22 @@ fn prefillOpenedDialog(
             try view.setDialogValueAt(0, "comicchat-print.pdf");
             try view.setDialogValueAt(1, "Save PDF");
         },
+        .setup => {
+            if (view.dialogValueAt(0).len == 0) {
+                try view.setDialogValueAt(0, if (client) |connected| connected.host else "eshmaki.me");
+                try view.setDialogValueAt(1, "6697");
+                try view.setDialogValueAt(2, "Verified TLS");
+            }
+        },
         .servers => {
             try view.setDialogValueAt(0, onyxWirePreset(if (client) |connected| connected.host else ""));
             try view.setDialogValueAt(1, "6697");
             try view.setDialogValueAt(2, "Verified TLS");
         },
         .connection_features => {
-            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext (unsafe)" else "Offline");
-            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Waiting to sign in" else "Offline");
-            try view.setDialogValueAt(2, if (state.ircx_data) "Ready" else "Waiting");
+            try view.setDialogValueAt(0, if (client) |connected| if (connected.usesTls()) "Verified TLS" else "Plaintext (unsafe)" else "Off the wire");
+            try view.setDialogValueAt(1, if (client) |connected| if (connected.authenticated()) "Signed in" else "Signing in" else "Off the wire");
+            try view.setDialogValueAt(2, if (state.ircx_data) "Live" else "Hold");
             if (client) |connected| {
                 var capabilities: std.ArrayList(u8) = .empty;
                 defer capabilities.deinit(view.gpa);
@@ -2857,7 +2864,7 @@ fn applyDialogAction(
                 return;
             };
             const interval = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(2), " \t"), 10) catch {
-                view.setDialogNotice("Repeat window seconds must be a number.");
+                view.setDialogNotice("Repeat window must be a number.");
                 return;
             };
             const rule = findRule(preferences, value) orelse {
@@ -4406,9 +4413,9 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             },
             .invitation => try view.setDialogValueAt(0, "#root"),
             .connection_features => {
-                try view.setDialogValueAt(0, "Offline");
-                try view.setDialogValueAt(1, "Offline");
-                try view.setDialogValueAt(2, "Waiting");
+                try view.setDialogValueAt(0, "Off the wire");
+                try view.setDialogValueAt(1, "Off the wire");
+                try view.setDialogValueAt(2, "Hold");
                 try view.setDialogValueAt(3, "Waiting on the wire");
             },
             .file_transfer => {
