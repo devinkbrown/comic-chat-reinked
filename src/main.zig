@@ -4486,7 +4486,7 @@ fn processWorkspaceMessages(
                 try appendSessionNotice(workspace, notice);
             state.join_requested = true;
             state.status = "joining";
-            resubscribeSessionControls(client, state);
+            resubscribeSessionControls(client, state, workspace);
             if (workspaceTranscriptRoom(workspace, channel)) |welcome_room|
                 try appendServerWorkflowReply(&welcome_room.transcript, &msg);
             redraw = true;
@@ -4573,7 +4573,7 @@ fn processWorkspaceMessages(
             const is_private = cc.net.irc_map.eql(workspace.casemapping, resolved, nick);
             const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
             if (is_notice and isServerSourced(&msg)) {
-                if (workspaceTranscriptRoom(workspace, channel)) |active_room|
+                if (workspaceWorkflowRoom(workspace, &msg, channel)) |active_room|
                     try appendServerWorkflowReply(&active_room.transcript, &msg);
                 redraw = true;
                 continue;
@@ -5772,6 +5772,45 @@ fn sendOnyxServiceSlash(
         try appendSessionNotice(workspace, "Usage: /pins [channel] list|add <msgid>|del <msgid>|clear");
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "accept")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "list") or std.mem.eql(u8, words[0], "*")) {
+            client.accept(.list, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        var operation: cc.net.client.AcceptOperation = .add;
+        var nick = words[0];
+        if (std.ascii.eqlIgnoreCase(words[0], "add") or std.mem.eql(u8, words[0], "+")) {
+            if (count < 2) {
+                try appendSessionNotice(workspace, "Usage: /accept [+|-|add|remove] <nick>");
+                return true;
+            }
+            nick = words[1];
+        } else if (std.ascii.eqlIgnoreCase(words[0], "remove") or std.ascii.eqlIgnoreCase(words[0], "del") or std.mem.eql(u8, words[0], "-")) {
+            if (count < 2) {
+                try appendSessionNotice(workspace, "Usage: /accept [+|-|add|remove] <nick>");
+                return true;
+            }
+            operation = .remove;
+            nick = words[1];
+        } else if (words[0][0] == '+') {
+            nick = words[0][1..];
+        } else if (words[0][0] == '-') {
+            operation = .remove;
+            nick = words[0][1..];
+        }
+        if (nick.len == 0) {
+            try appendSessionNotice(workspace, "Usage: /accept [+|-|add|remove] <nick>");
+            return true;
+        }
+        client.accept(operation, nick) catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
     if (!isOnyxServiceSlash(verb)) return false;
     var command_buf: [16]u8 = undefined;
     if (verb.len > command_buf.len) return false;
@@ -6221,11 +6260,21 @@ fn observeSilenceState(gpa: std.mem.Allocator, state: *ChatState, msg: *const cc
     }
 }
 
-fn resubscribeSessionControls(client: *cc.net.client.Client, state: *const ChatState) void {
+fn resubscribeSessionControls(
+    client: *cc.net.client.Client,
+    state: *const ChatState,
+    workspace: *const cc.client.workspace.Workspace,
+) void {
     for (state.silence_masks.items) |mask| {
         client.silence(.add, mask) catch {};
     }
-    if (state.away_message) |message| client.setAway(message) catch {};
+    if (state.away_message) |message| {
+        client.setAway(message) catch {};
+        for (workspace.rooms.items) |*room| {
+            if (room.joined or client.restoresChannel(room.name))
+                client.sendAwayControl(room.name, message) catch {};
+        }
+    }
 }
 
 fn modernEventText(msg: *const cc.net.message.Message, who: []const u8, buf: *[280]u8) ?[]const u8 {
@@ -7745,6 +7794,7 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("monitor"));
     try std.testing.expect(isOnyxServiceSlash("pins"));
     try std.testing.expect(isOnyxServiceSlash("successor"));
+    try std.testing.expect(isOnyxServiceSlash("accept"));
     try std.testing.expect(isOnyxServiceReply("SUCCESSOR"));
     try std.testing.expect(isVisibleServerWorkflowReply("SUCCESSOR"));
     try std.testing.expect(isOnyxQuerySlash("umode"));
@@ -7873,6 +7923,8 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     _ = workspace.activate(workspace.find("#other").?);
     const pins_reply = cc.net.message.parse(":irc PINS #root LIST");
     try std.testing.expectEqualStrings("#root", workspaceWorkflowRoom(&workspace, &pins_reply, "#other").?.name);
+    const notice_reply = cc.net.message.parse(":irc NOTICE #root :IDENTIFY ok");
+    try std.testing.expectEqualStrings("#root", workspaceWorkflowRoom(&workspace, &notice_reply, "#other").?.name);
     const motd_reply = cc.net.message.parse(":irc 372 me :- hello");
     try std.testing.expectEqualStrings("#other", workspaceWorkflowRoom(&workspace, &motd_reply, "#other").?.name);
 }
@@ -8141,7 +8193,7 @@ test "silence, modern events, and leftover session numerics stay live" {
     try applySilenceOperation(&client, &state, gpa, .list, "");
     try applySilenceOperation(&client, &state, gpa, .add, "quiet!*@*");
     try applySilenceOperation(&client, &state, gpa, .delete, "*!*@bad.example");
-    resubscribeSessionControls(&client, &state);
+    resubscribeSessionControls(&client, &state, &workspace);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "SILENCE\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "SILENCE +quiet!*@*\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "SILENCE -*!*@bad.example\r\n") != null);
@@ -8149,6 +8201,14 @@ test "silence, modern events, and leftover session numerics stay live" {
     try std.testing.expect(!containsIgnoreCase(state.silence_masks.items, "*!*@bad.example"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[3].bytes, "SILENCE +quiet!*@*\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[4].bytes, "AWAY :back later") != null);
+    try client.join("#root");
+    const before_restore = client.tx.items.items.len;
+    resubscribeSessionControls(&client, &state, &workspace);
+    var saw_away_control = false;
+    for (client.tx.items.items[before_restore..]) |item| {
+        if (std.mem.indexOf(u8, item.bytes, "PRIVMSG #root :\x01AWAY back later\x01") != null) saw_away_control = true;
+    }
+    try std.testing.expect(saw_away_control);
 }
 
 test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
@@ -8445,6 +8505,12 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/successor #root SHOW"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SUCCESSOR #root") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "SHOW") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accept alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT +alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accept -bob"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT -bob") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/accept"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCEPT *") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
     try std.testing.expect(!client.projectsSessionChannels());
 

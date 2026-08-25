@@ -175,6 +175,16 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 42 leftovers in scope
+
+- `/accept` uses the live client method (`ACCEPT +nick` / `-nick` / `*`)
+- Server `NOTICE` uses `workspaceWorkflowRoom` so a channel target lands on
+  that open room
+- After 001, stored away text also sends comic `AWAY` control to already
+  joined and session-sync restored rooms
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 41 leftovers in scope
 
 - Leftover `/` slashes notice even when the room is not yet joined; `/avatar`
