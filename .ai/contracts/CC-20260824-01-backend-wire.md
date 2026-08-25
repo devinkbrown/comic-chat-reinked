@@ -139,6 +139,20 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 35 leftovers in scope
+
+- Query slashes that were comic PRIVMSG stay on the wire: WHOIS/WHOWAS/WHO/ISON/
+  USERHOST/MOTD/VERSION/TIME/ADMIN/INFO/LUSERS/COMMANDS/NAMES/LIST
+- Send/session slashes `/msg`, `/notice`, `/nick`, `/topic`, and `/invite` stay
+  live; `/part [#channel] [reason]` no longer becomes comic speech; `/away` stays
+  on the dialog (persists `away_message`)
+- Dialog `InvalidUtf8` on topic/kick/PROP/ACCESS stays English; `setProperty` and
+  `accessAdd` validate UTF-8
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+- Leave SASL EXTERNAL cert, `draft/pre-away` after 001, TARGMAX vs MAXTARGETS,
+  and `FAIL JOIN TEMPORARILY_UNAVAILABLE` keeping `want_rejoin`
+
 ## Wave 33 leftovers in scope
 
 - Server NOTICE/NOTE without a user prefix stay as Server lines (SESSION TOKEN,

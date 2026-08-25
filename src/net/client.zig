@@ -561,7 +561,16 @@ pub const Client = struct {
     }
 
     pub fn part(self: *Client, channel: []const u8) !void {
-        try self.appendCommand("PART", &.{channel});
+        return self.partReason(channel, "");
+    }
+
+    pub fn partReason(self: *Client, channel: []const u8, reason: []const u8) !void {
+        if (reason.len == 0) {
+            try self.appendCommand("PART", &.{channel});
+        } else {
+            try self.validateOutgoingText(reason);
+            try self.appendCommandTrailing("PART", &.{ channel, reason });
+        }
         if (self.restoration) |*restoration| restoration.forget(channel);
         try self.queueOut(.interactive, true, false);
     }
@@ -889,6 +898,7 @@ pub const Client = struct {
 
     pub fn setProperty(self: *Client, entity: []const u8, property: []const u8, value: []const u8) !void {
         if (!validPropertyList(property)) return error.InvalidIrcParameter;
+        try self.validateOutgoingText(value);
         try self.appendCommandTrailing("PROP", &.{ entity, property, value });
         try self.queueOut(.interactive, true, false);
     }
@@ -929,6 +939,7 @@ pub const Client = struct {
             count += 1;
         }
         if (reason.len != 0) {
+            try self.validateOutgoingText(reason);
             if (duration.len == 0) {
                 params[count] = "0";
                 count += 1;
@@ -950,10 +961,10 @@ pub const Client = struct {
     // Onyx query/status surface. Each method is intentionally bounded to IRC
     // atoms and stays on the ordinary interactive/bulk queue.
     pub fn ison(self: *Client, nicks: []const u8) !void {
-        try self.sendRequiredAtom("ISON", nicks, .bulk);
+        try self.sendNickList("ISON", nicks, .bulk);
     }
     pub fn userhost(self: *Client, nicks: []const u8) !void {
-        try self.sendRequiredAtom("USERHOST", nicks, .bulk);
+        try self.sendNickList("USERHOST", nicks, .bulk);
     }
     pub fn whois(self: *Client, nick: []const u8) !void {
         try self.sendRequiredAtom("WHOIS", nick, .bulk);
@@ -1801,6 +1812,23 @@ pub const Client = struct {
     fn sendRequiredAtom(self: *Client, command: []const u8, value: []const u8, priority: policy.Priority) !void {
         if (!validIrcAtom(value)) return error.InvalidIrcParameter;
         try self.appendCommand(command, &.{value});
+        try self.queueOut(priority, true, false);
+    }
+    fn sendNickList(self: *Client, command: []const u8, nicks: []const u8, priority: policy.Priority) !void {
+        var args: [16][]const u8 = undefined;
+        var count: usize = 0;
+        var it = std.mem.tokenizeAny(u8, nicks, " ,\t");
+        while (it.next()) |nick| {
+            if (count == args.len) break;
+            if (!validIrcAtom(nick)) return error.InvalidIrcParameter;
+            args[count] = nick;
+            count += 1;
+        }
+        if (count == 0) return error.InvalidIrcParameter;
+        if (count == 1)
+            try self.appendCommand(command, args[0..count])
+        else
+            try self.appendCommandTrailing(command, args[0..count]);
         try self.queueOut(priority, true, false);
     }
     fn sendOptionalAtom(self: *Client, command: []const u8, value: ?[]const u8, priority: policy.Priority) !void {
@@ -3140,6 +3168,12 @@ test "advertised ACCOUNTEXTBAN, CHATHISTORY, EXCEPTS, and UTF-8 stay live" {
     try std.testing.expect(client.features.?.extban.allows('a'));
     try std.testing.expectError(error.InvalidUtf8, client.setTopic("#root", &.{0xff}));
     try std.testing.expectError(error.InvalidUtf8, client.setAway(&.{0xff}));
+    try std.testing.expectError(error.InvalidUtf8, client.setProperty("#root", "TOPIC", &.{0xff}));
+    try std.testing.expectError(error.InvalidUtf8, client.accessAdd("#root", "HOST", "anna!*@*", "", &.{0xff}));
+    try client.ison("alice bob");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ISON alice :bob") != null);
+    try client.partReason("#root", "later");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PART #root :later") != null);
     try client.setException("#root", "alice!*@*");
     try client.setInviteMask("#root", "bob!*@*");
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 2].bytes, "MODE #root +x alice!*@*") != null);
