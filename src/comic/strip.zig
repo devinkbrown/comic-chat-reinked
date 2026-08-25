@@ -2259,3 +2259,106 @@ test "leftover Color laugh and sad dests keep pose-authored face color" {
         try leftoverStoryFaceHits(image, case.kind);
     }
 }
+
+test "unlocked leftover Color dests keep pose-authored face color under a tall balloon" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "rebecca color", .kind = .peach_or_cool },
+        .{ .speaker = "dan color", .kind = .peach_or_cool },
+        .{ .speaker = "jordan color", .kind = .peach_or_cool },
+        .{ .speaker = "lance color", .kind = .yellow_or_cool },
+        .{ .speaker = "susan color", .kind = .cool },
+        .{ .speaker = "xeno color", .kind = .cool },
+        .{ .speaker = "armando color", .kind = .peach_or_cool },
+        .{ .speaker = "bolo color", .kind = .peach_or_cool },
+        .{ .speaker = "margaret color", .kind = .peach_or_cool },
+        .{ .speaker = "kwensa color", .kind = .cool_or_brown },
+        .{ .speaker = "tongtyed color", .kind = .peach_or_cool },
+    };
+    const tall = "Great. The comic view feels much clearer now and the standing Color figures keep their faces visible even when the balloon needs several more lines of text than a short dest would allow without sliding.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "leftover Color thought and whisper dests keep pose-authored face color" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind, modes: u16 }{
+        .{ .speaker = "maynard color", .kind = .cool, .modes = original_page.bm_think },
+        .{ .speaker = "hugh color", .kind = .yellow_or_cool, .modes = original_page.bm_think },
+        .{ .speaker = "cro color", .kind = .peach_or_yellow, .modes = original_page.bm_whisper },
+        .{ .speaker = "mike color", .kind = .peach_or_cool, .modes = original_page.bm_whisper },
+        .{ .speaker = "sage color", .kind = .yellow, .modes = original_page.bm_action },
+    };
+    const text = "Great. The comic view feels much clearer now and the standing dest must stay visible under this leftover balloon.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = text, .modes = case.modes }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "two leftover Color speakers keep dest faces on the wrap page" {
+    const gpa = std.testing.allocator;
+    const lines = [_]Line{
+        .{ .speaker = "hugh color", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "mike color", .text = "Standing dests still keep their faces visible." },
+    };
+    var image = try renderWithOptions(gpa, &lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try leftoverStoryFaceHits(image, .yellow_or_cool);
+    try leftoverStoryFaceHits(image, .peach_or_cool);
+}
+
+test "leftover Color talk-to dests keep pose-authored face color" {
+    const gpa = std.testing.allocator;
+    const mike = [_]Participant{.{ .identity = "mike", .avatar = "mike color" }};
+    var image = try renderWithOptions(gpa, &.{.{
+        .speaker = "hugh color",
+        .text = "Great. The leftover dest talking to another leftover dest must keep both faces visible.",
+        .talk_targets = &mike,
+    }}, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try leftoverStoryFaceHits(image, .yellow_or_cool);
+    try leftoverStoryFaceHits(image, .peach_or_cool);
+}
+
+test "leftover HD dests keep pose-authored face color under a tall balloon" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh hd", .kind = .yellow_or_cool },
+        .{ .speaker = "maynard hd", .kind = .cool },
+        .{ .speaker = "cro hd", .kind = .peach_or_yellow },
+        .{ .speaker = "rebecca hd", .kind = .peach_or_cool },
+        .{ .speaker = "xeno hd", .kind = .cool },
+        .{ .speaker = "jordan hd", .kind = .peach_or_cool },
+    };
+    const tall = "Great. The comic view feels much clearer now and the standing HD figures keep their faces visible even when the balloon needs several more lines of text.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
