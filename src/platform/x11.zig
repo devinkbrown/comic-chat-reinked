@@ -32,8 +32,8 @@
 //!     Shift+Insert / XF86Paste CLIPBOARD paste as typed keys, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
-//!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, and Markdown MIME,
+//!     paste does not read PRIMARY and local CLIPBOARD text is used only while we
+//!     still own CLIPBOARD; PRIMARY paste uses local text only while we own PRIMARY), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear (a held button emits `.up` first; implicit-grab motion
@@ -133,6 +133,7 @@ const family_internet: u16 = 0;
 const family_local: u16 = 256;
 const family_wild: u16 = 65535;
 const max_clipboard_bytes = 1024 * 1024;
+const max_stashed_events: usize = 256;
 
 const request_put_image_header_units = 6;
 const min_max_request_units = 64;
@@ -1481,7 +1482,7 @@ pub const Window = struct {
     }
 
     fn readPrimaryNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        if (self.owns_primary or self.owns_clipboard) {
+        if (useLocalPrimary(self.owns_primary)) {
             if (self.clipboard_text.len == 0) return null;
             return try gpa.dupe(u8, self.clipboard_text);
         }
@@ -1502,7 +1503,7 @@ pub const Window = struct {
                 return try self.readSelectionProperty(gpa, property);
             }
             if (kind == 0) return error.X11ServerError;
-            if (!self.handleProtocolEvent(raw) and self.pending_events.items.len < 32) {
+            if (!self.handleProtocolEvent(raw) and self.pending_events.items.len < max_stashed_events) {
                 self.pending_events.append(self.gpa, raw) catch {};
             }
         }
@@ -1627,7 +1628,7 @@ pub const Window = struct {
                 continue;
             }
             if (kind == 0) return error.X11ServerError;
-            if (!self.handleProtocolEvent(raw) and self.pending_events.items.len < 32) {
+            if (!self.handleProtocolEvent(raw) and self.pending_events.items.len < max_stashed_events) {
                 self.pending_events.append(self.gpa, raw) catch {};
             }
         }
@@ -3814,6 +3815,10 @@ fn destroyNotifyCloses(destroyed: u32, toplevel: u32) bool {
     return destroyed != 0 and destroyed == toplevel;
 }
 
+fn useLocalPrimary(owns_primary: bool) bool {
+    return owns_primary;
+}
+
 fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == 0) return 0;
     if (atom == conn.utf8_string) return 7;
@@ -4441,6 +4446,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(!destroyNotifyCloses(41, 40));
     try std.testing.expect(!destroyNotifyCloses(40, 0));
     try std.testing.expect(!destroyNotifyCloses(0, 40));
+    try std.testing.expect(useLocalPrimary(true));
+    try std.testing.expect(!useLocalPrimary(false));
+    try std.testing.expectEqual(@as(usize, 256), max_stashed_events);
     try std.testing.expect(x11FocusDetailIsPointer(notify_detail_pointer));
     try std.testing.expect(!x11FocusDetailIsPointer(0));
     try std.testing.expectEqual(@as(u32, 1 << 5), event_leave_window);

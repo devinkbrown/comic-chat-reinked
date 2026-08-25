@@ -112,7 +112,9 @@ hash.
   `wl-paste --primary` / `xclip`/`xsel` PRIMARY fallback when the native
   protocol is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed
   keys. CLIPBOARD paste does not fall through to PRIMARY, and local
-  CLIPBOARD text is used only while this client still owns CLIPBOARD. A
+  CLIPBOARD text is used only while this client still owns CLIPBOARD, and
+  PRIMARY paste uses local text only while this client still owns PRIMARY.
+  ConvertSelection / INCR stashes up to 256 intervening events. A
   Wayland copy before the first seat serial is advertised once a serial
   arrives.   Pointer leave and incoming DnD motion emit pointer moves so
   hover tracks the seat; LeaveNotify / `wl_pointer.leave` emit `.up` for a
