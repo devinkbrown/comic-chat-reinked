@@ -129,6 +129,12 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 28 leftovers in scope
+
+- After `470`, query dest `MODE` and apply `324` `+k` so a forwarded room stores the dest key, not only a copied source key
+- `324` without a key parameter does not wipe a stored join key (Onyx shows `+k` to non-members without the value)
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 27 leftovers in scope
 
 - LIST/ACCESS/PROP/MONITOR dialog sends that fail client-side validation stay as English notices, not a raw `error.InvalidIrcParameter` out of the UI

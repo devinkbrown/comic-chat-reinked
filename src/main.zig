@@ -4047,6 +4047,10 @@ fn processWorkspaceMessages(
             redraw = true;
         } else if (std.mem.eql(u8, msg.command, "470")) {
             redraw = (try applyChannelForward(workspace, client, state, &msg)) or redraw;
+            if (msg.param(2)) |dest| {
+                if (dest.len > 1 and workspace.chantypes.contains(dest[0]))
+                    try client.queryMode(dest);
+            }
         } else if (isNickFailureNumeric(msg.command)) {
             redraw = (try appendNickNumericLine(workspace, state, &msg)) or redraw;
         } else if (isAuthFailureNumeric(msg.command)) {
@@ -4426,12 +4430,14 @@ fn applyLiveChannelKey(
     state: *ChatState,
     msg: *const cc.net.message.Message,
 ) !bool {
-    if (!std.ascii.eqlIgnoreCase(msg.command, "MODE") or msg.param_count < 2) return false;
-    const channel = msg.params[0];
+    const is_listed = std.mem.eql(u8, msg.command, "324");
+    if (!is_listed and !std.ascii.eqlIgnoreCase(msg.command, "MODE")) return false;
+    if (msg.param_count < (if (is_listed) @as(usize, 3) else 2)) return false;
+    const channel = if (is_listed) msg.params[1] else msg.params[0];
     if (!cc.net.irc_map.isChannelName(workspace.chantypes, channel)) return false;
-    const modes = msg.params[1];
+    const modes = if (is_listed) msg.params[2] else msg.params[1];
     var adding = true;
-    var parameter_index: usize = 2;
+    var parameter_index: usize = if (is_listed) 3 else 2;
     var changed = false;
     for (modes) |mode| {
         if (mode == '+') {
@@ -4443,8 +4449,12 @@ fn applyLiveChannelKey(
             continue;
         }
         if (mode == 'k') {
-            const key = if (adding and parameter_index < msg.param_count) msg.params[parameter_index] else "";
-            if (parameter_index < msg.param_count) parameter_index += 1;
+            const has_key = parameter_index < msg.param_count;
+            const key = if (adding and has_key) msg.params[parameter_index] else "";
+            if (has_key) parameter_index += 1;
+            // 324 shows +k to everyone but only members get the value. Do not
+            // wipe a stored key when the parameter is omitted.
+            if (adding and !has_key) continue;
             if (workspace.find(channel)) |room_index| {
                 try workspace.rooms.items[room_index].setJoinKey(workspace.gpa, key);
                 changed = true;
@@ -6345,6 +6355,13 @@ test "live MODE key and command failures update membership state" {
     try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &clear_key));
     try std.testing.expect(workspace.rooms.items[root].join_key == null);
     try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
+    const listed_key = cc.net.message.parse(":server 324 me #root +ntk listed");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &listed_key));
+    try std.testing.expectEqualStrings("listed", workspace.rooms.items[root].join_key.?);
+    try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
+    const listed_letters = cc.net.message.parse(":server 324 me #root +ntk");
+    try std.testing.expect(!try applyLiveChannelKey(&workspace, &client, &state, &listed_letters));
+    try std.testing.expectEqualStrings("listed", workspace.rooms.items[root].join_key.?);
 
     workspace.rooms.items[root].setWantRejoin(true);
     const noton = cc.net.message.parse(":server 442 me #root :You're not on that channel");
@@ -6902,6 +6919,12 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
     try std.testing.expectEqualStrings("#vault", state.last_invite_channel.?);
     try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[vault].transcript.lines.items[0].text, "Forwarded from #old to #vault") != null);
+    try client.queryMode("#vault");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #vault\r\n") != null);
+    const dest_modes = cc.net.message.parse(":server 324 me #vault +ntk destkey");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &state, &dest_modes));
+    try std.testing.expectEqualStrings("destkey", workspace.rooms.items[vault].join_key.?);
+    try std.testing.expectEqualStrings("#vault", state.last_key_channel.?);
 
     try workspace.rooms.items[vault].setClientData(gpa, "bk=room;");
     workspace.rooms.items[vault].joined = true;

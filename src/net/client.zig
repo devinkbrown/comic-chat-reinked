@@ -795,6 +795,12 @@ pub const Client = struct {
         try self.queueOut(.interactive, true, false);
     }
 
+    /// `MODE <channel>` query. Onyx answers `324` with `+k`/`+l` values for members.
+    pub fn queryMode(self: *Client, target: []const u8) !void {
+        try self.appendCommand("MODE", &.{target});
+        try self.queueOut(.interactive, true, false);
+    }
+
     /// Microsoft uses LISTX for the extended room browser when IRCX is live.
     /// Ordinary LIST never accepts invented LISTX query atoms (`N=`, `>10`).
     pub fn listRooms(self: *Client, filter: []const u8, limit: []const u8, ircx_data: bool) !void {
