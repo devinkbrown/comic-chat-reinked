@@ -1555,6 +1555,149 @@ test "Cro Color keeps pose-authored yellow tunic and peach skin" {
     try std.testing.expect(yellow > 200);
 }
 
+test "Hugh Color keeps pose-authored yellow and cool paint" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var yellow: usize = 0;
+    var cool: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+    }
+    try std.testing.expect(yellow > 200);
+    try std.testing.expect(cool > 400);
+}
+
+test "Mike Color keeps pose-authored peach without a shirt wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var peach: usize = 0;
+    var cool: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+    }
+    try std.testing.expect(peach > 80);
+    try std.testing.expect(cool > 400);
+}
+
+test "Scotty Color keeps pose-authored green without a peach wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var green_n: usize = 0;
+    var peach: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (green > red + 15 and green > blue + 10) green_n += 1;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+    }
+    try std.testing.expect(green_n > 400);
+    try std.testing.expect(green_n > peach * 4);
+}
+
+test "Lynnea Color keeps pose-authored cool and brown without a peach wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var cool: usize = 0;
+    var brown: usize = 0;
+    var peach: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+        if (red > 40 and green > 20 and blue > 10 and red > green + 10 and green > blue and red < 160) brown += 1;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+    }
+    try std.testing.expect(cool + brown > 400);
+    try std.testing.expect(cool + brown > peach * 4);
+}
+
+test "Maynard HD and Cro HD keep the same leftover local color as Color" {
+    const gpa = std.testing.allocator;
+    var maynard = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer maynard.deinit(gpa);
+    var cool: usize = 0;
+    var tan: usize = 0;
+    for (maynard.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+        if (red > 180 and green > 120 and blue < 90 and red > blue + 40) tan += 1;
+    }
+    try std.testing.expect(cool > 400);
+    try std.testing.expect(cool > tan * 4);
+
+    var cro = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer cro.deinit(gpa);
+    var peach: usize = 0;
+    var yellow: usize = 0;
+    for (cro.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+        if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+    }
+    try std.testing.expect(peach > 400);
+    try std.testing.expect(yellow > 200);
+}
+
 test "Sage Color keeps pose-authored yellow without a blue wash" {
     const gpa = std.testing.allocator;
     var card = try bgb.decodePoseForEmotion(

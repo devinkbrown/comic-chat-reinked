@@ -1878,6 +1878,72 @@ test "Color cafe and apartment keep wood plants and sky" {
     }
 }
 
+test "Color and whacky rooms do not package a paper sheet gutter" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/color-rainy-street.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-space-corridor.bgb"),
+        @embedFile("../assets/generated/whacky-arcade-planetarium.bgb"),
+        @embedFile("../assets/generated/whacky-asteroid-diner.bgb"),
+        @embedFile("../assets/generated/whacky-cloud-train-station.bgb"),
+        @embedFile("../assets/generated/whacky-cosmic-laundromat.bgb"),
+        @embedFile("../assets/generated/whacky-friendly-castle.bgb"),
+        @embedFile("../assets/generated/whacky-mushroom-village.bgb"),
+        @embedFile("../assets/generated/whacky-pinball-interior.bgb"),
+        @embedFile("../assets/generated/whacky-sky-island-market.bgb"),
+        @embedFile("../assets/generated/whacky-spaceship-bridge.bgb"),
+        @embedFile("../assets/generated/whacky-underwater-dome.bgb"),
+    };
+    for (rooms) |data| {
+        var image = try bgb.decodeBackground(gpa, data);
+        defer image.deinit(gpa);
+        try std.testing.expectEqual(@as(u32, 315), image.width);
+        try std.testing.expectEqual(@as(u32, 315), image.height);
+        var top: usize = 0;
+        var bot: usize = 0;
+        var left: usize = 0;
+        var right: usize = 0;
+        var x: u32 = 0;
+        while (x < image.width) : (x += 1) {
+            const t = image.pixels[x];
+            const b = image.pixels[(image.height - 1) * image.width + x];
+            const tr: u8 = @truncate(t >> 16);
+            const tg: u8 = @truncate(t >> 8);
+            const tb: u8 = @truncate(t);
+            const br: u8 = @truncate(b >> 16);
+            const bg_ch: u8 = @truncate(b >> 8);
+            const bb: u8 = @truncate(b);
+            if (tr >= 245 and tg >= 245 and tb >= 245) top += 1;
+            if (br >= 245 and bg_ch >= 245 and bb >= 245) bot += 1;
+        }
+        var y: u32 = 0;
+        while (y < image.height) : (y += 1) {
+            const l = image.pixels[y * image.width];
+            const r = image.pixels[y * image.width + image.width - 1];
+            const lr: u8 = @truncate(l >> 16);
+            const lg: u8 = @truncate(l >> 8);
+            const lb: u8 = @truncate(l);
+            const rr: u8 = @truncate(r >> 16);
+            const rg: u8 = @truncate(r >> 8);
+            const rb: u8 = @truncate(r);
+            if (lr >= 245 and lg >= 245 and lb >= 245) left += 1;
+            if (rr >= 245 and rg >= 245 and rb >= 245) right += 1;
+        }
+        try std.testing.expect(top * 10 < image.width * 9);
+        try std.testing.expect(bot * 10 < image.width * 9);
+        try std.testing.expect(left * 10 < image.height * 9);
+        try std.testing.expect(right * 10 < image.height * 9);
+    }
+}
+
 test "every Color default chrome portrait stays a standing silhouette" {
     const gpa = std.testing.allocator;
     const names = [_][]const u8{

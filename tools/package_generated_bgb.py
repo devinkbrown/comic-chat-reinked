@@ -35,6 +35,48 @@ def variable_record(tag: int, payload: bytes) -> bytes:
     return u16(tag) + u16(len(payload)) + payload
 
 
+def _is_paper(pixel: tuple[int, ...]) -> bool:
+    """Sheet gutter / near-white matte. Authored sky and wood stay ink."""
+    red, green, blue = pixel[:3]
+    if red >= 245 and green >= 245 and blue >= 245:
+        return True
+    return min(red, green, blue) >= 228 and max(red, green, blue) - min(red, green, blue) < 18
+
+
+def trim_paper_matte(image: Image.Image, threshold: float = 0.90) -> Image.Image:
+    """Drop sheet gutters that would package as room paper bleed.
+
+    Color tiles are cropped from a comic sheet. A 4–6px white matte around
+    the panel becomes a paper band in the 315×315 BGB and shows in the
+    background dialog. Trim edge rows/cols that are almost all paper; keep
+    authored white windows and the black panel frame.
+    """
+    pixels = image.load()
+    width, height = image.size
+
+    def row_paper(y: int) -> float:
+        return sum(1 for x in range(width) if _is_paper(pixels[x, y])) / width
+
+    def col_paper(x: int) -> float:
+        return sum(1 for y in range(height) if _is_paper(pixels[x, y])) / height
+
+    top = 0
+    while top < height - 8 and row_paper(top) >= threshold:
+        top += 1
+    bottom = height
+    while bottom > top + 8 and row_paper(bottom - 1) >= threshold:
+        bottom -= 1
+    left = 0
+    while left < width - 8 and col_paper(left) >= threshold:
+        left += 1
+    right = width
+    while right > left + 8 and col_paper(right - 1) >= threshold:
+        right -= 1
+    if top == 0 and left == 0 and bottom == height and right == width:
+        return image
+    return image.crop((left, top, right, bottom))
+
+
 def bmp24(image: Image.Image) -> bytes:
     image = image.convert("RGB")
     width, height = image.size
@@ -60,7 +102,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("image", type=Path)
     args = parser.parse_args()
-    image = Image.open(args.image).convert("RGB").resize((315, 315), Image.Resampling.LANCZOS)
+    image = trim_paper_matte(Image.open(args.image).convert("RGB")).resize((315, 315), Image.Resampling.LANCZOS)
     dib = bmp24(image)
     name_record = u16(AK_NAME) + args.name.encode("utf-8") + b"\0"
     copyright_record = variable_record(AK_COPYRIGHT, args.copyright_text.encode("utf-8") + b"\0")
