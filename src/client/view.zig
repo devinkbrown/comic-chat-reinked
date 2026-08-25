@@ -3960,7 +3960,8 @@ test "every menu popup and command row stays reachable at minimum width" {
     defer view.deinit();
     view.active_menu = 6;
     const more = menuPopupRect(width, 6);
-    _ = view.handlePointer(.{ .kind = .down, .x = more.x + 12, .y = more.y + 8 + 7 * 29, .button = .primary }, 0, 0);
+    const about_item = menuItemCount(6) - 1;
+    _ = view.handlePointer(.{ .kind = .down, .x = more.x + 12, .y = more.y + 8 + @as(i32, about_item) * 29, .button = .primary }, 0, 0);
     try std.testing.expectEqual(dialogs.Id.about, view.active_dialog.?);
 }
 
