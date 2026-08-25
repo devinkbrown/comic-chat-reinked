@@ -108,14 +108,14 @@ pub const specs = [_]Spec{
     .{ .id = .text_font, .resource = "IDD_TEXTFONTPAGE_IRC", .title = "Text font", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .choose_color, .resource = "IDD_CHOOSECOLOR", .title = "Choose ink", .group = .connection, .source_w = 118, .source_h = 38 },
     .{ .id = .invitation, .resource = "IDD_INVITATION", .title = "Room invitation", .group = .rooms, .source_w = 186, .source_h = 93 },
-    .{ .id = .advanced_event_params, .resource = "IDD_ADVANCEDEVENTPARAMS", .title = "Rule limits", .group = .automation, .source_w = 186, .source_h = 85 },
+    .{ .id = .advanced_event_params, .resource = "IDD_ADVANCEDEVENTPARAMS", .title = "Rule caps", .group = .automation, .source_w = 186, .source_h = 85 },
     .{ .id = .rule_sets, .resource = "IDD_RULESETSPAGE", .title = "Rule sets", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .add_to_sets, .resource = "IDD_ADDTOSETS", .title = "Add to rule sets", .group = .automation, .source_w = 252, .source_h = 161 },
     .{ .id = .rename_loaded_set, .resource = "IDD_RENAMELOADEDSET", .title = "Rename open set", .group = .automation, .source_w = 258, .source_h = 103 },
     .{ .id = .rename_set, .resource = "IDD_RENAMESET", .title = "Rename rule set", .group = .automation, .source_w = 226, .source_h = 79 },
-    .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Online notifications", .group = .automation, .source_w = 252, .source_h = 218 },
+    .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Watch CAST", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule matching", .group = .automation, .source_w = 186, .source_h = 95 },
-    .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Online CAST", .group = .automation, .source_w = 262, .source_h = 111 },
+    .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Live CAST", .group = .automation, .source_w = 262, .source_h = 111 },
     .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Wire list", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Sign in", .group = .connection, .source_w = 198, .source_h = 127 },
     .{ .id = .create_set, .resource = "IDD_CREATESET", .title = "Create rule set", .group = .automation, .source_w = 226, .source_h = 79 },
@@ -157,7 +157,7 @@ pub fn prompt(id: Id) ?[]const u8 {
         .sound => "Sound",
         .set_text_font, .text_font => "Font name and size",
         .rename_loaded_set, .rename_set, .create_set => "Rule set name",
-        .advanced_event_params => "Rule limits",
+        .advanced_event_params => "Rule caps",
         .file_transfer => "File path",
         .open_conversation, .recent_files => "Conversation file",
         .open_locator => "Locator file",
@@ -199,17 +199,17 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Room name", .hint = "#room" },
             .{ .label = "Topic", .hint = "Optional" },
             .{ .label = "Room options", .hint = "Optional; one word" },
-            .{ .label = "CAST limit", .hint = "Optional" },
+            .{ .label = "CAST cap", .hint = "Optional" },
             .{ .label = "Room password", .kind = .password },
         },
-        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST limit", .hint = "Optional" }, .{ .label = "Room password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and limits", .kind = .readonly } },
+        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST cap", .hint = "Optional" }, .{ .label = "Room password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and cap", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password", .hint = "Needed if the room is locked" }},
         .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "List cap", .hint = "Optional; blank means unlimited" } },
         .user_list => &.{ .{ .label = "CAST member", .hint = "Choose a visible CAST member" }, .{ .label = "Name filter", .hint = "Optional name filter" } },
         .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban", .hint = "Optional name pattern" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
         .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
-        .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Choose an online CAST member" }, .{ .label = "CAST action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
+        .notification_users => &.{ .{ .label = "On the wire now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Choose a live CAST member" }, .{ .label = "CAST action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound", .kind = .choice }, .{ .label = "With balloon", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
@@ -318,7 +318,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             &.{ "Room", "CAST", "Server", "Connection", "Link" }
         else
             &.{},
-        .rule_sets => if (index == 0) &.{ "Create", "Rename", "Assign rule", "Rule limits", "Rule matching", "Import", "Export" } else &.{},
+        .rule_sets => if (index == 0) &.{ "Create", "Rename", "Assign rule", "Rule caps", "Rule matching", "Import", "Export" } else &.{},
         .advanced_rule_settings => if (index == 1 or index == 2) &.{ "Yes", "No" } else &.{},
         .recent_files => if (index == 1) &.{ "Open", "Remove" } else &.{},
         .favorite_rooms => if (index == 1) &.{ "Join", "Add this room", "Remove" } else &.{},
@@ -513,7 +513,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Ink", fields(.choose_color)[0].label);
     try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
     try std.testing.expectEqualStrings("Named properties", get(.ircx_properties).title);
-    try std.testing.expectEqualStrings("Online notifications", get(.notifications).title);
+    try std.testing.expectEqualStrings("Watch CAST", get(.notifications).title);
     try std.testing.expectEqualStrings("Room events", get(.ircx_events).title);
     try std.testing.expectEqualStrings("Room search", fields(.room_list)[0].label);
     try std.testing.expectEqualStrings("Save properties", primaryLabel(.ircx_properties));
@@ -529,8 +529,8 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("CAST profile", get(.member_profile).title);
     try std.testing.expectEqualStrings("Kick CAST", get(.kick).title);
     try std.testing.expectEqualStrings("Invite CAST", get(.invite).title);
-    try std.testing.expectEqualStrings("CAST limit", fields(.channel_create)[3].label);
-    try std.testing.expectEqualStrings("CAST limit", fields(.channel_properties)[2].label);
+    try std.testing.expectEqualStrings("CAST cap", fields(.channel_create)[3].label);
+    try std.testing.expectEqualStrings("CAST cap", fields(.channel_properties)[2].label);
     try std.testing.expectEqualStrings("CAST member", fields(.whisper)[0].label);
     try std.testing.expectEqualStrings("CAST member", fields(.file_transfer)[1].label);
     try std.testing.expectEqualStrings("CAST member", fields(.call_link)[0].label);
@@ -561,18 +561,19 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Wire", fields(.notifications)[3].label);
     try std.testing.expectEqualStrings("Notice", fields(.notifications)[4].label);
     try std.testing.expectEqualStrings("Secure link", fields(.call_link)[2].label);
-    try std.testing.expectEqualStrings("Rule limits", choiceOptions(.rule_sets, 0)[3]);
+    try std.testing.expectEqualStrings("Rule caps", choiceOptions(.rule_sets, 0)[3]);
     try std.testing.expectEqualStrings("Rule matching", choiceOptions(.rule_sets, 0)[4]);
     try std.testing.expectEqualStrings("Add this room", choiceOptions(.favorite_rooms, 1)[1]);
     try std.testing.expectEqualStrings("In-app banner", choiceOptions(.notifications, 4)[0]);
     try std.testing.expectEqualStrings("Away message", get(.away).title);
-    try std.testing.expectEqualStrings("Online CAST", get(.notification_users).title);
-    try std.testing.expectEqualStrings("Choose an online CAST member", fields(.notification_users)[1].hint);
+    try std.testing.expectEqualStrings("Live CAST", get(.notification_users).title);
+    try std.testing.expectEqualStrings("Choose a live CAST member", fields(.notification_users)[1].hint);
+    try std.testing.expectEqualStrings("On the wire now", fields(.notification_users)[0].label);
     try std.testing.expectEqualStrings("Rename open set", get(.rename_loaded_set).title);
     try std.testing.expectEqualStrings("Page view", fields(.comics_view)[0].label);
     try std.testing.expectEqualStrings("Sunday page or conversation", fields(.settings)[3].hint);
     try std.testing.expectEqualStrings("Sunday page or conversation", fields(.comics_view)[0].hint);
-    try std.testing.expectEqualStrings("Rule limits", get(.advanced_event_params).title);
+    try std.testing.expectEqualStrings("Rule caps", get(.advanced_event_params).title);
     try std.testing.expectEqualStrings("Repeat cap", fields(.automation)[2].label);
     try std.testing.expectEqualStrings("Repeat window", fields(.automation)[3].label);
     try std.testing.expectEqualStrings("Seconds", fields(.automation)[3].hint);
@@ -654,7 +655,7 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Read", &.{ "Get", "Read" }));
     try std.testing.expect(matchesAny("Remove", &.{ "Delete", "Remove" }));
     try std.testing.expect(matchesAny("Remove from list", &.{ "Remove", "Remove from list" }));
-    try std.testing.expect(matchesAny("Advanced limits", &.{ "Rule limits", "Advanced limits" }));
+    try std.testing.expect(matchesAny("Advanced limits", &.{ "Rule caps", "Rule limits", "Advanced limits" }));
     try std.testing.expect(matchesAny("Add current room", &.{ "Add this room", "Add current room" }));
     try std.testing.expect(matchesAny("Clear all", &.{ "Clear", "Clear all" }));
     try std.testing.expect(matchesAny("Also ban pattern", &.{ "Also ban", "Also ban pattern" }));
@@ -682,6 +683,12 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Ink value", &.{ "Ink", "Ink value" }));
     try std.testing.expect(matchesAny("List limit", &.{ "List cap", "List limit" }));
     try std.testing.expect(matchesAny("Fill the first field before continuing.", &.{ "Fill the first field first.", "Fill the first field before continuing." }));
+    try std.testing.expect(matchesAny("Online notifications", &.{ "Watch CAST", "Online notifications" }));
+    try std.testing.expect(matchesAny("Online CAST", &.{ "Live CAST", "Online CAST" }));
+    try std.testing.expect(matchesAny("Online now", &.{ "On the wire now", "Online now" }));
+    try std.testing.expect(matchesAny("CAST limit", &.{ "CAST cap", "CAST limit" }));
+    try std.testing.expect(matchesAny("Rule limits", &.{ "Rule caps", "Rule limits" }));
+    try std.testing.expect(matchesAny("Choose a valid sound name.", &.{ "Choose a valid sound.", "Choose a valid sound name." }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 

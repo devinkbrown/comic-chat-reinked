@@ -2216,8 +2216,8 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             5 => "Greeting",
             6 => "Rules",
             7 => "Rule sets",
-            8 => "Online notifications",
-            9 => "Online CAST",
+            8 => "Watch CAST",
+            9 => "Live CAST",
             else => "About Comic Chat",
         },
         else => "Studio",
@@ -3528,7 +3528,7 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .ircx_properties => "Read or write named room properties",
         .ircx_events => "Watch room, CAST, server, or wire events",
         .invitation => "Accept an invitation to a room",
-        .channel_properties => "Topic, options, and CAST limit for this room",
+        .channel_properties => "Topic, options, and CAST cap for this room",
         .file_transfer => "Offer or accept a file with CAST",
         .call_link => "Send a meeting link to CAST",
         .member_profile => "Request a CAST profile",
@@ -3607,7 +3607,7 @@ fn dialogGroupText(id: dialogs.Id) []const u8 {
         .invitation => "Accept an invitation to a room",
         .call_link => "Send a meeting link to CAST",
         .member_profile => "Request a CAST profile",
-        .channel_properties => "Topic, options, and CAST limit for this room",
+        .channel_properties => "Topic, options, and CAST cap for this room",
         .file_transfer => "Offer or accept a file with CAST",
         .favorite_rooms => "Join or save a favorite room",
         .away => "Posted while you are away",
@@ -4796,7 +4796,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
-    try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 9));
+    try std.testing.expectEqualStrings("Watch CAST", menuItemLabel(6, 8));
+    try std.testing.expectEqualStrings("Live CAST", menuItemLabel(6, 9));
     try std.testing.expectEqualStrings("Room invitation", menuItemLabel(4, 11));
     try std.testing.expectEqualStrings("Room password", menuItemLabel(4, 12));
     try std.testing.expectEqualStrings("Live Onyx nodes use implicit TLS 6697", dialogHelper(.servers, ""));

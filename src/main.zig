@@ -2592,11 +2592,11 @@ fn applyDialogAction(
             }
             if (limit.len != 0) {
                 for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("CAST limit must be a positive number.");
+                    view.setDialogNotice("CAST cap must be a positive number.");
                     return;
                 };
                 if ((std.fmt.parseUnsigned(u32, limit, 10) catch 0) == 0) {
-                    view.setDialogNotice("CAST limit must be a positive number.");
+                    view.setDialogNotice("CAST cap must be a positive number.");
                     return;
                 }
             }
@@ -2807,7 +2807,7 @@ fn applyDialogAction(
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
             }
-            if (cc.client.dialogs.matchesAny(operation, &.{ "Rule limits", "Advanced limits" })) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Rule caps", "Rule limits", "Advanced limits" })) {
                 view.openDialog(.advanced_event_params);
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
@@ -2928,7 +2928,7 @@ fn applyDialogAction(
             } else {
                 const member = std.mem.trim(u8, view.dialogValueAt(1), " \t");
                 if (!containsIgnoreCase(state.notification_current.items, member)) {
-                    view.setDialogNotice("Choose a CAST member from the refreshed online list.");
+                    view.setDialogNotice("Choose a CAST member from the refreshed live list.");
                     return;
                 }
                 if (std.ascii.eqlIgnoreCase(operation, "Whisper")) {
@@ -2982,7 +2982,7 @@ fn applyDialogAction(
                 return;
             };
             if (std.mem.indexOfAny(u8, value, "\r\n\x00\x01") != null) {
-                view.setDialogNotice("Choose a valid sound name.");
+                view.setDialogNotice("Choose a valid sound.");
                 return;
             }
             const accompanying_message = view.dialogValueAt(1);
