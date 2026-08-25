@@ -32,7 +32,7 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/15 and Markdown MIME,
+//!     still own CLIPBOARD), receive-only ISO-8859-1/2/15 and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear,
@@ -41,7 +41,7 @@
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
 //!     FocusIn/leaving-hidden expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
 //!     while hidden or fully obscured; MapNotify exposes), a scaled
-//!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128, urgency on `notify` (cleared on
+//!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 (reinstalled on scale change), urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
 //!     for `xdg-open`, EnterNotify cursor restore and pointer move,
