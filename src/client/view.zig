@@ -266,29 +266,29 @@ pub const View = struct {
             .toolbar => switch (key) {
                 .left, .up => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, false, self.wire_live),
                 .right, .down => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, true, self.wire_live),
-                .home => self.focused_toolbar = firstEnabledToolbar(self.wire_live),
-                .end => self.focused_toolbar = lastEnabledToolbar(self.wire_live),
+                .home, .page_up => self.focused_toolbar = firstEnabledToolbar(self.wire_live),
+                .end, .page_down => self.focused_toolbar = lastEnabledToolbar(self.wire_live),
                 .enter => return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]),
                 .char => |code| if (code == ' ') return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]) else return .none,
                 .escape => {
                     self.shell.focus = .navigation;
                     return .none;
                 },
-                .tab, .page_up, .page_down => return null,
+                .tab => return null,
                 else => return .none,
             },
             .say_actions => switch (key) {
                 .left, .up => self.focused_say_action = nextEnabledSayAction(self.focused_say_action, false, self.wire_live),
                 .right, .down => self.focused_say_action = nextEnabledSayAction(self.focused_say_action, true, self.wire_live),
-                .home => self.focused_say_action = firstEnabledSayAction(self.wire_live),
-                .end => self.focused_say_action = lastEnabledSayAction(self.wire_live),
+                .home, .page_up => self.focused_say_action = firstEnabledSayAction(self.wire_live),
+                .end, .page_down => self.focused_say_action = lastEnabledSayAction(self.wire_live),
                 .enter => return self.activateSayAction(self.focused_say_action),
                 .char => |code| if (code == ' ') return self.activateSayAction(self.focused_say_action) else return .none,
                 .escape => {
                     self.shell.focus = .composer;
                     return .none;
                 },
-                .tab, .page_up, .page_down => return null,
+                .tab => return null,
                 else => return .none,
             },
             .status => switch (key) {
@@ -1737,7 +1737,7 @@ pub const View = struct {
         }
         if (self.context_menu) |kind| {
             const popup = ui.PopupLayout.anchored(self.canvas.width, self.canvas.height, self.context_x, self.context_y, 196, contextItemCount(kind));
-            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "CAST actions" else "Character actions", .focused = true });
+            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "CAST actions" else "Figure actions", .focused = true });
             var item: u8 = 0;
             while (item < contextItemCount(kind)) : (item += 1) snapshot.append(.{
                 .id = contextSemanticId(kind, item),
@@ -1776,7 +1776,7 @@ pub const View = struct {
                 .id = "dialog-browse",
                 .role = .button,
                 .bounds = dialogBrowseRect(dialog_layout.fieldRectScrolled(index, self.dialog_first_field)),
-                .label = "Choose file",
+                .label = "Pick path",
                 .focused = self.dialog_browse_focus,
             });
             if (id == .character) {
@@ -2173,7 +2173,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             3 => "Save conversation",
             4 => "Export Sunday page",
             5 => "Sunday PDF",
-            else => "Quit",
+            else => "Close Comic Chat",
         },
         1 => switch (item) {
             0 => "Copy ink",
@@ -2195,9 +2195,9 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Backdrop",
             3 => "Character",
             4 => "CAST card",
-            5 => "Bold selection",
-            6 => "Italic selection",
-            else => "Underline selection",
+            5 => "Bold ink",
+            6 => "Italic ink",
+            else => "Underline ink",
         },
         4 => switch (item) {
             0 => "Browse rooms",
@@ -2247,7 +2247,7 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
         0 => switch (item) {
             0, 1, 2 => "Open",
             3, 4, 5 => "Save",
-            else => "Quit",
+            else => "Close",
         },
         1 => switch (item) {
             3 => "Studio",
@@ -2286,7 +2286,7 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
         6 => switch (item) {
             0, 1, 2, 3, 4 => "Wire",
             10 => "About",
-            else => "Auto",
+            else => "Rule",
         },
         else => "",
     };
@@ -2445,9 +2445,9 @@ fn contextItemLabel(kind: ContextKind, item: u8, frozen: bool) []const u8 {
             else => "Ban or release",
         },
         .body_camera => switch (item) {
-            0 => if (frozen) "Unfreeze expression" else "Freeze expression",
-            1 => "Change character",
-            2 => "Return to neutral",
+            0 => if (frozen) "Release expression" else "Hold expression",
+            1 => "Choose character",
+            2 => "Neutral expression",
             else => "Send expression",
         },
     };
@@ -3474,20 +3474,45 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
             else => "",
         },
         .user_list => if (index == 0) "CAST" else if (index == 1) "NAME" else "",
-        .channel, .channel_create => if (index == 0) "JOIN" else if (index == 4 or (id == .channel and index == 1)) "KEY" else "",
+        .channel => if (index == 0) "JOIN" else if (index == 1) "KEY" else "",
+        .channel_create => switch (index) {
+            0 => "JOIN",
+            1, 2 => "ROOM",
+            3 => "CAST",
+            4 => "KEY",
+            else => "",
+        },
         .whisper, .invite => if (index == 0) "SAY" else "",
         .away => if (index == 0) "NOTE" else "",
         .nickname => if (index == 0) "NAME" else "",
-        .personal => if (index == 0) "CARD" else "",
-        .ircx_properties => if (index == 0) "ROOM" else "",
+        .personal => switch (index) {
+            0 => "CARD",
+            1 => "NAME",
+            2 => "WEB",
+            3 => "MAIL",
+            else => "",
+        },
+        .ircx_properties => switch (index) {
+            0 => "ROOM",
+            1 => "LIST",
+            2 => "VALUE",
+            3 => "SET",
+            else => "",
+        },
         .room_access => switch (index) {
+            0 => "ROLE",
             1 => "ROLE",
             2 => "NAME",
+            3 => "TIME",
+            4 => "NOTE",
             else => "",
         },
         .file_transfer => switch (index) {
+            0 => "FILE",
             1 => "CAST",
             2 => "FILE",
+            3 => "FILE",
+            4 => "FILE",
             else => "",
         },
         .ban => if (index == 0) "NAME" else "",
@@ -3497,30 +3522,55 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
             2 => "NAME",
             else => "",
         },
-        .call_link => if (index == 0) "CALL" else "",
-        .member_profile => if (index == 0) "CARD" else "",
-        .sound => if (index == 0) "PLAY" else "",
-        .invitation => if (index == 0) "JOIN" else "",
-        .comics_view => if (index == 0) "PAGE" else "",
-        .character => if (index == 0) "PAGE" else "",
+        .call_link => if (index == 0) "CALL" else if (index == 1 or index == 2) "CALL" else "",
+        .member_profile => if (index == 0 or index == 1) "CARD" else "",
+        .sound => if (index == 0) "PLAY" else if (index == 1) "SAY" else "",
+        .invitation => if (index == 0) "JOIN" else if (index == 1) "NOTE" else "",
+        .comics_view => if (index == 0 or index == 1) "PAGE" else "",
+        .character => if (index == 0) "PAGE" else if (index == 1) "FACE" else if (index == 2) "PAGE" else "",
         .motd => if (index == 0) "LIST" else "",
-        .choose_color => if (index == 0) "INK" else "",
-        .export_image, .print_preview => if (index == 0) "PAGE" else "",
+        .choose_color => if (index == 0 or index == 1) "INK" else "",
+        .export_image, .print_preview => if (index == 0) "PAGE" else if (index == 1) "PAGE" else "",
         .open_conversation, .save_conversation, .open_locator => if (index == 0) "FILE" else "",
-        .automation, .rules, .edit_rule => if (index == 0) "AUTO" else "",
+        .automation, .rules, .edit_rule => switch (index) {
+            0 => "AUTO",
+            1 => "WATCH",
+            2 => "MATCH",
+            3 => "AUTO",
+            4 => "AUTO",
+            else => "",
+        },
         .channel_password => if (index == 0) "KEY" else "",
-        .background => if (index == 0) "PAGE" else "",
-        .text_font, .set_text_font => if (index == 0) "TYPE" else "",
-        .notifications => if (index == 0) "WATCH" else "",
-        .notification_users => if (index == 0 or index == 1) "CAST" else "",
-        .rule_sets, .add_to_sets => if (index == 0) "SET" else "",
-        .favorite_rooms => if (index == 0) "ROOM" else "",
-        .recent_files => if (index == 0) "FILE" else "",
-        .channel_properties => if (index == 0) "ROOM" else if (index == 4) "NOTE" else "",
-        .ircx_events => if (index == 1) "WATCH" else "",
-        .rename_loaded_set, .rename_set, .create_set => if (index == 0) "NAME" else "",
-        .advanced_event_params, .advanced_rule_settings => if (index == 0) "RULE" else "",
-        .about => if (index == 0) "INK" else "",
+        .background => if (index == 0 or index == 1) "PAGE" else "",
+        .text_font, .set_text_font => if (index == 0 or index == 1) "TYPE" else "",
+        .notifications => switch (index) {
+            0 => "WATCH",
+            1 => "NAME",
+            2 => "ADDR",
+            3 => "WIRE",
+            4 => "WATCH",
+            else => "",
+        },
+        .notification_users => switch (index) {
+            0, 1, 2 => "CAST",
+            3 => "JOIN",
+            else => "",
+        },
+        .rule_sets, .add_to_sets => if (index == 0) "SET" else if (index == 1) "NAME" else if (index == 2) "FILE" else "",
+        .favorite_rooms => if (index == 0 or index == 1) "ROOM" else "",
+        .recent_files => if (index == 0 or index == 1) "FILE" else "",
+        .channel_properties => switch (index) {
+            0, 1 => "ROOM",
+            2 => "CAST",
+            3 => "KEY",
+            4 => "NOTE",
+            else => "",
+        },
+        .ircx_events => if (index == 0 or index == 1) "WATCH" else if (index == 2) "FILTER" else "",
+        .rename_loaded_set, .rename_set, .create_set => if (index == 0 or index == 1) "NAME" else "",
+        .advanced_event_params => if (index == 0) "RULE" else if (index == 1) "CAP" else if (index == 2) "TIME" else "",
+        .advanced_rule_settings => if (index == 0) "RULE" else if (index == 1) "RULE" else if (index == 2) "MATCH" else "",
+        .about => if (index == 0 or index == 1) "INK" else "",
     };
 }
 
@@ -4023,7 +4073,8 @@ test "focused chrome leftover keys do not leak into the composer" {
     view.shell.focus = .toolbar;
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.backspace).?);
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.delete).?);
-    try std.testing.expect(view.handleFocusedActionKey(.page_up) == null);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(firstEnabledToolbar(view.wire_live), view.focused_toolbar);
     try std.testing.expect(view.handleFocusedActionKey(.tab) == null);
     view.shell.focus = .navigation;
     try std.testing.expectEqual(Action.none, view.handleMenuKey(.backspace).?);
@@ -4838,7 +4889,20 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Insert symbol", toolbarLabel(23));
     try std.testing.expectEqualStrings("Sunday tool", toolbarLabel(24));
     try std.testing.expectEqualStrings("Sunday", toolbarHint(24));
-    try std.testing.expectEqualStrings("Quit", menuItemLabel(0, 6));
+    try std.testing.expectEqualStrings("Close Comic Chat", menuItemLabel(0, 6));
+    try std.testing.expectEqualStrings("Close", menuItemHint(0, 6, true));
+    try std.testing.expectEqualStrings("Bold ink", menuItemLabel(3, 5));
+    try std.testing.expectEqualStrings("Italic ink", menuItemLabel(3, 6));
+    try std.testing.expectEqualStrings("Underline ink", menuItemLabel(3, 7));
+    try std.testing.expectEqualStrings("Rule", menuItemHint(6, 5, true));
+    try std.testing.expectEqualStrings("Hold expression", contextItemLabel(.body_camera, 0, false));
+    try std.testing.expectEqualStrings("Release expression", contextItemLabel(.body_camera, 0, true));
+    try std.testing.expectEqualStrings("Choose character", contextItemLabel(.body_camera, 1, false));
+    try std.testing.expectEqualStrings("Neutral expression", contextItemLabel(.body_camera, 2, false));
+    try std.testing.expectEqualStrings("FACE", settingsKicker(.character, 1));
+    try std.testing.expectEqualStrings("SAY", settingsKicker(.sound, 1));
+    try std.testing.expectEqualStrings("WATCH", settingsKicker(.notifications, 4));
+    try std.testing.expectEqualStrings("WEB", settingsKicker(.personal, 2));
     try std.testing.expectEqualStrings("INK", settingsKicker(.choose_color, 0));
     try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
     try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
@@ -5012,6 +5076,10 @@ test "wire-dead toolbar commands look disabled and are skipped" {
     view.focused_toolbar = 0;
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
     try std.testing.expectEqual(@as(u8, 3), view.focused_toolbar);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(firstEnabledToolbar(false), view.focused_toolbar);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_down).?);
+    try std.testing.expectEqual(lastEnabledToolbar(false), view.focused_toolbar);
 
     view.wire_live = true;
     _ = view.handlePointer(.{ .kind = .down, .x = enter.x + 4, .y = enter.y + 4, .button = .primary }, 0, 0);
@@ -5053,6 +5121,10 @@ test "say actions set mode only and skip whisper and sound while offline" {
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
     try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.end).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_up).?);
+    try std.testing.expectEqual(@as(u8, 0), view.focused_say_action);
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.page_down).?);
     try std.testing.expectEqual(@as(u8, 3), view.focused_say_action);
     try std.testing.expect(!sayActionEnabled(2, false));
     try std.testing.expect(!sayActionEnabled(4, false));

@@ -188,7 +188,7 @@ pub fn fields(id: Id) []const Field {
         .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Sign-in name", .hint = "Visible sign-in name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
         .character => &.{
             .{ .label = "Character", .kind = .choice },
-            .{ .label = "Expression", .kind = .choice },
+            .{ .label = "Mood", .kind = .choice },
             .{ .label = "Character gallery", .hint = "Previous, selected, and next", .kind = .preview },
         },
         .background => &.{ .{ .label = "Backdrop name", .kind = .choice }, .{ .label = "Preview", .hint = "Bundled background", .kind = .preview } },
@@ -211,7 +211,7 @@ pub fn fields(id: Id) []const Field {
         .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
         .notification_users => &.{ .{ .label = "On the wire now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Choose a live CAST member" }, .{ .label = "CAST action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
-        .sound => &.{ .{ .label = "Sound", .kind = .choice }, .{ .label = "With balloon", .hint = "Optional" } },
+        .sound => &.{ .{ .label = "Sound", .kind = .choice }, .{ .label = "With ink", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
         .choose_color => &.{ .{ .label = "Ink", .hint = "#RRGGBB or name" }, .{ .label = "Preview", .hint = "Current ink", .kind = .preview } },
         .comics_view => &.{ .{ .label = "Page view", .hint = "Sunday page or conversation", .kind = .choice }, .{ .label = "Panels across", .hint = "4 panels", .kind = .choice } },
@@ -223,7 +223,7 @@ pub fn fields(id: Id) []const Field {
         .create_set => &.{.{ .label = "Rule set name" }},
         .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat cap", .hint = "0 means unlimited" }, .{ .label = "Repeat window", .hint = "Seconds; 0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Rule on", .kind = .choice }, .{ .label = "Match case", .kind = .choice } },
-        .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Wire", .hint = "Optional wire" }, .{ .label = "Notice", .kind = .choice } },
+        .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Wire", .hint = "Optional wire" }, .{ .label = "Watch how", .kind = .choice } },
         .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
         .save_conversation => &.{.{ .label = "Conversation file", .hint = "Save as .ccc" }},
@@ -556,11 +556,11 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Sign-in", fields(.connection_features)[1].label);
     try std.testing.expectEqualStrings("On this wire", fields(.connection_features)[3].label);
     try std.testing.expectEqualStrings("Wire", fields(.connection_features)[0].label);
-    try std.testing.expectEqualStrings("Expression", fields(.character)[1].label);
+    try std.testing.expectEqualStrings("Mood", fields(.character)[1].label);
     try std.testing.expectEqualStrings("Room password", fields(.channel)[1].label);
     try std.testing.expectEqualStrings("List cap", fields(.room_list)[2].label);
     try std.testing.expectEqualStrings("Wire", fields(.notifications)[3].label);
-    try std.testing.expectEqualStrings("Notice", fields(.notifications)[4].label);
+    try std.testing.expectEqualStrings("Watch how", fields(.notifications)[4].label);
     try std.testing.expectEqualStrings("Secure link", fields(.call_link)[2].label);
     try std.testing.expectEqualStrings("Rule caps", choiceOptions(.rule_sets, 0)[3]);
     try std.testing.expectEqualStrings("Rule matching", choiceOptions(.rule_sets, 0)[4]);
@@ -602,7 +602,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Rule matching", get(.advanced_rule_settings).title);
     try std.testing.expectEqualStrings("Ink", prompt(.choose_color).?);
     try std.testing.expectEqualStrings("Timeout", fields(.room_access)[3].label);
-    try std.testing.expectEqualStrings("With balloon", fields(.sound)[1].label);
+    try std.testing.expectEqualStrings("With ink", fields(.sound)[1].label);
     try std.testing.expectEqualStrings("Apply set", primaryLabel(.rule_sets));
     try std.testing.expectEqualStrings("Apply CAST", primaryLabel(.notification_users));
     try std.testing.expectEqualStrings("Add rule", primaryLabel(.add_to_sets));
@@ -700,6 +700,20 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("CAST limit", &.{ "CAST cap", "CAST limit" }));
     try std.testing.expect(matchesAny("Rule limits", &.{ "Rule caps", "Rule limits" }));
     try std.testing.expect(matchesAny("Choose a valid sound name.", &.{ "Choose a valid sound.", "Choose a valid sound name." }));
+    try std.testing.expect(matchesAny("Quit", &.{ "Close Comic Chat", "Quit" }));
+    try std.testing.expect(matchesAny("Bold selection", &.{ "Bold ink", "Bold selection" }));
+    try std.testing.expect(matchesAny("Italic selection", &.{ "Italic ink", "Italic selection" }));
+    try std.testing.expect(matchesAny("Underline selection", &.{ "Underline ink", "Underline selection" }));
+    try std.testing.expect(matchesAny("Freeze expression", &.{ "Hold expression", "Freeze expression" }));
+    try std.testing.expect(matchesAny("Unfreeze expression", &.{ "Release expression", "Unfreeze expression" }));
+    try std.testing.expect(matchesAny("Return to neutral", &.{ "Neutral expression", "Return to neutral" }));
+    try std.testing.expect(matchesAny("Change character", &.{ "Choose character", "Change character" }));
+    try std.testing.expect(matchesAny("Choose file", &.{ "Pick path", "Choose file" }));
+    try std.testing.expect(matchesAny("Expression", &.{ "Mood", "Expression" }));
+    try std.testing.expect(matchesAny("Notice", &.{ "Watch how", "Notice" }));
+    try std.testing.expect(matchesAny("With balloon", &.{ "With ink", "With balloon" }));
+    try std.testing.expect(matchesAny("Give the rule a name.", &.{ "Name the rule.", "Give the rule a name." }));
+    try std.testing.expect(matchesAny("The saved notification rules will be queried now.", &.{ "Watch CAST will query the wire now.", "The saved notification rules will be queried now." }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 

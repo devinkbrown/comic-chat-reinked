@@ -2222,7 +2222,7 @@ fn prefillOpenedDialog(
                 if (index != 0) try online.appendSlice(view.gpa, ", ");
                 try online.appendSlice(view.gpa, member);
             }
-            try view.setDialogValueAt(0, if (online.items.len == 0) "No matching CAST in the last refresh" else online.items);
+            try view.setDialogValueAt(0, if (online.items.len == 0) "No matching CAST on the last watch" else online.items);
             if (state.notification_current.items.len != 0) try view.setDialogValueAt(1, state.notification_current.items[0]);
             try view.setDialogValueAt(2, "Refresh");
         },
@@ -2779,7 +2779,7 @@ fn applyDialogAction(
         },
         .rules, .edit_rule => {
             if (value.len == 0) {
-                view.setDialogNotice("Give the rule a name.");
+                view.setDialogNotice("Name the rule.");
                 return;
             }
             if (hasWireControl(view.dialogValueAt(4))) {
@@ -2905,7 +2905,7 @@ fn applyDialogAction(
             if (std.ascii.eqlIgnoreCase(operation, "Refresh")) {
                 state.notification_poll_pending = 0;
                 state.last_notification_poll_ms = 0;
-                view.setDialogNotice("The saved notification rules will be queried now.");
+                view.setDialogNotice("Watch CAST will query the wire now.");
                 return;
             }
             if (std.ascii.eqlIgnoreCase(operation, "Clear list")) {
@@ -3139,12 +3139,12 @@ fn applyDialogAction(
             const print_action = view.dialogValueAt(1);
             if (std.ascii.eqlIgnoreCase(print_action, "Save PDF and open"))
                 openDesktopPath(window, gpa, value) catch {
-                    view.setDialogNotice("The PDF was saved, but no document viewer could be opened.");
+                    view.setDialogNotice("The Sunday PDF was saved; no viewer opened.");
                     return;
                 };
             if (std.ascii.eqlIgnoreCase(print_action, "Save PDF and print"))
                 printDesktopPath(window, gpa, value) catch {
-                    view.setDialogNotice("The PDF was saved, but no desktop print service was available.");
+                    view.setDialogNotice("The Sunday PDF was saved; no print service is available.");
                     return;
                 };
         },
@@ -3186,7 +3186,7 @@ fn browseDialogFile(gpa: std.mem.Allocator, window: anytype, view: *cc.client.vi
             else => 0,
         };
         const selected = window.chooseFile(gpa, save, cc.client.dialogs.get(id).title) catch {
-            view.setDialogNotice("The desktop file picker could not be opened; enter a path.");
+            view.setDialogNotice("The file picker could not open; choose a path.");
             return;
         };
         if (selected) |path| {
