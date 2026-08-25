@@ -115,6 +115,7 @@ pub const View = struct {
     hovered_status: bool = false,
     hovered_status_tab: bool = false,
     hovered_room_tab: ?usize = null,
+    hovered_room_overflow: bool = false,
     hovered_status_action: ?StatusActionHover = null,
     hovered_column_control: ?ColumnControlHover = null,
     hovered_member: ?usize = null,
@@ -233,8 +234,8 @@ pub const View = struct {
     pub fn handleFocusedActionKey(self: *View, key: platform_event.Key) ?Action {
         switch (self.shell.focus) {
             .toolbar => switch (key) {
-                .left, .up => self.focused_toolbar = (self.focused_toolbar + @as(u8, @intCast(ui.ToolbarLayout.button_count)) - 1) % @as(u8, @intCast(ui.ToolbarLayout.button_count)),
-                .right, .down => self.focused_toolbar = (self.focused_toolbar + 1) % @as(u8, @intCast(ui.ToolbarLayout.button_count)),
+                .left, .up => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, false, self.wire_live),
+                .right, .down => self.focused_toolbar = nextEnabledToolbar(self.focused_toolbar, true, self.wire_live),
                 .home => self.focused_toolbar = 0,
                 .end => self.focused_toolbar = @intCast(ui.ToolbarLayout.button_count - 1),
                 .enter => return self.activateToolbar(ui.ToolbarLayout.command_ids[self.focused_toolbar]),
@@ -330,6 +331,16 @@ pub const View = struct {
                     self.hovered_menu_item = firstEnabledMenuItem(self.active_menu.?, self.can_moderate, self.wire_live);
                     return .none;
                 },
+                .left, .right => {
+                    const comic_mode = self.shell.content_mode == .comic;
+                    const layout = geometry.Layout.compute(self.canvas.width, self.canvas.height, comic_mode, self.shell.show_members);
+                    const viewport = tabViewport(layout, comic_mode);
+                    if (key == .right and self.room_tab_first + viewport.capacity < self.room_tab_count)
+                        return .{ .room_tab = self.room_tab_first + viewport.capacity };
+                    if (key == .left and self.room_tab_first > 0)
+                        return .{ .room_tab = self.room_tab_first - 1 };
+                    return null;
+                },
                 else => return null,
             }
         };
@@ -410,6 +421,7 @@ pub const View = struct {
         self.hovered_status = false;
         self.hovered_status_tab = false;
         self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_column_control = null;
         self.hovered_member = null;
         self.context_menu = null;
@@ -490,7 +502,7 @@ pub const View = struct {
                 if (ui.contains(dialogBrowseRect(dialog_layout.fieldRectScrolled(index, self.dialog_first_field)), pointer.x, pointer.y)) index else null
             else
                 null;
-            const changed = self.hovered_dialog_button != next or self.hovered_dialog_field != next_field or self.hovered_dialog_browse != next_browse or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_column_control != null or self.hovered_member != null;
+            const changed = self.hovered_dialog_button != next or self.hovered_dialog_field != next_field or self.hovered_dialog_browse != next_browse or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_column_control != null or self.hovered_member != null;
             self.hovered_dialog_button = next;
             self.hovered_dialog_field = next_field;
             self.hovered_dialog_browse = next_browse;
@@ -502,6 +514,7 @@ pub const View = struct {
             self.hovered_status = false;
             self.hovered_status_tab = false;
             self.hovered_room_tab = null;
+            self.hovered_room_overflow = false;
             self.hovered_column_control = null;
             self.hovered_member = null;
             return changed;
@@ -529,7 +542,7 @@ pub const View = struct {
             const target = hit_test.shell(layout, self.shell.content_mode == .comic, self.shell.member_view == .icons, pointer.x, pointer.y, member_count);
             if (target == .menu) {
                 const next_menu = target.menu;
-                const changed = self.active_menu != next_menu or self.hovered_menu != next_menu or self.hovered_menu_item != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_column_control != null or self.hovered_member != null;
+                const changed = self.active_menu != next_menu or self.hovered_menu != next_menu or self.hovered_menu_item != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_column_control != null or self.hovered_member != null;
                 self.active_menu = next_menu;
                 self.hovered_menu = next_menu;
                 self.hovered_menu_item = null;
@@ -538,12 +551,13 @@ pub const View = struct {
                 self.hovered_status = false;
                 self.hovered_status_tab = false;
                 self.hovered_room_tab = null;
+                self.hovered_room_overflow = false;
                 self.hovered_column_control = null;
                 self.hovered_member = null;
                 return changed;
             }
             const item = menuPopupItem(self.canvas.width, menu, pointer.x, pointer.y);
-            const changed = self.hovered_menu_item != item or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_column_control != null or self.hovered_member != null;
+            const changed = self.hovered_menu_item != item or self.hovered_menu != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_column_control != null or self.hovered_member != null;
             self.hovered_menu_item = item;
             self.hovered_menu = null;
             self.hovered_toolbar = null;
@@ -551,6 +565,7 @@ pub const View = struct {
             self.hovered_status = false;
             self.hovered_status_tab = false;
             self.hovered_room_tab = null;
+            self.hovered_room_overflow = false;
             self.hovered_column_control = null;
             self.hovered_member = null;
             return changed;
@@ -571,7 +586,9 @@ pub const View = struct {
             .say_action => |index| self.setContentHover(index, null, null),
             .composer => self.setComposerHover(),
             .status_window => self.setStatusTabHover(),
-            .room_tab => if (roomTabIndexAt(self, layout, comic_mode, pointer.x)) |index|
+            .room_tab => if (roomOverflowContains(layout, comic_mode, self.room_tab_count, self.room_tab_first, pointer.x, pointer.y))
+                self.setRoomOverflowHover()
+            else if (roomTabIndexAt(self, layout, comic_mode, pointer.x)) |index|
                 self.setRoomTabHover(index)
             else
                 self.setHover(null, null),
@@ -584,7 +601,7 @@ pub const View = struct {
     }
 
     fn setHover(self: *View, menu: ?u8, toolbar: ?u8) bool {
-        const changed = self.hovered_menu != menu or self.hovered_menu_item != null or self.hovered_toolbar != toolbar or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != menu or self.hovered_menu_item != null or self.hovered_toolbar != toolbar or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = menu;
         self.hovered_menu_item = null;
         self.hovered_toolbar = toolbar;
@@ -593,6 +610,7 @@ pub const View = struct {
         self.hovered_status = false;
         self.hovered_status_tab = false;
         self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -600,7 +618,7 @@ pub const View = struct {
     }
 
     fn setContentHover(self: *View, say_action: ?u8, column_control: ?ColumnControlHover, member: ?usize) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != say_action or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_status_action != null or self.hovered_column_control != column_control or self.hovered_member != member;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != say_action or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != column_control or self.hovered_member != member;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
@@ -609,6 +627,7 @@ pub const View = struct {
         self.hovered_status = false;
         self.hovered_status_tab = false;
         self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = column_control;
         self.hovered_member = member;
@@ -616,7 +635,7 @@ pub const View = struct {
     }
 
     fn setComposerHover(self: *View) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or !self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or !self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
@@ -625,6 +644,7 @@ pub const View = struct {
         self.hovered_status = false;
         self.hovered_status_tab = false;
         self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -632,7 +652,7 @@ pub const View = struct {
     }
 
     fn setStatusHover(self: *View) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or !self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or !self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
@@ -641,6 +661,7 @@ pub const View = struct {
         self.hovered_status = true;
         self.hovered_status_tab = false;
         self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -648,7 +669,7 @@ pub const View = struct {
     }
 
     fn setStatusTabHover(self: *View) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or !self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or !self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
@@ -657,6 +678,7 @@ pub const View = struct {
         self.hovered_status = false;
         self.hovered_status_tab = true;
         self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -664,7 +686,7 @@ pub const View = struct {
     }
 
     fn setRoomTabHover(self: *View, tab: usize) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != tab or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != tab or self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
@@ -673,14 +695,15 @@ pub const View = struct {
         self.hovered_status = false;
         self.hovered_status_tab = false;
         self.hovered_room_tab = tab;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = null;
         self.hovered_column_control = null;
         self.hovered_member = null;
         return changed;
     }
 
-    fn setStatusActionHover(self: *View, action: ?StatusActionHover) bool {
-        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_status_action != action or self.hovered_column_control != null or self.hovered_member != null;
+    fn setRoomOverflowHover(self: *View) bool {
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or !self.hovered_room_overflow or self.hovered_status_action != null or self.hovered_column_control != null or self.hovered_member != null;
         self.hovered_menu = null;
         self.hovered_menu_item = null;
         self.hovered_toolbar = null;
@@ -689,6 +712,24 @@ pub const View = struct {
         self.hovered_status = false;
         self.hovered_status_tab = false;
         self.hovered_room_tab = null;
+        self.hovered_room_overflow = true;
+        self.hovered_status_action = null;
+        self.hovered_column_control = null;
+        self.hovered_member = null;
+        return changed;
+    }
+
+    fn setStatusActionHover(self: *View, action: ?StatusActionHover) bool {
+        const changed = self.hovered_menu != null or self.hovered_menu_item != null or self.hovered_toolbar != null or self.hovered_say_action != null or self.hovered_composer or self.hovered_status or self.hovered_status_tab or self.hovered_room_tab != null or self.hovered_room_overflow or self.hovered_status_action != action or self.hovered_column_control != null or self.hovered_member != null;
+        self.hovered_menu = null;
+        self.hovered_menu_item = null;
+        self.hovered_toolbar = null;
+        self.hovered_say_action = null;
+        self.hovered_composer = false;
+        self.hovered_status = false;
+        self.hovered_status_tab = false;
+        self.hovered_room_tab = null;
+        self.hovered_room_overflow = false;
         self.hovered_status_action = action;
         self.hovered_column_control = null;
         self.hovered_member = null;
@@ -1032,6 +1073,8 @@ pub const View = struct {
             },
             .room_tab => room: {
                 self.shell.focus = .navigation;
+                if (nextOverflowRoom(layout, comic_mode, self.room_tab_count, self.room_tab_first, pointer.x, pointer.y)) |index|
+                    break :room .{ .room_tab = index };
                 break :room if (roomTabIndexAt(self, layout, comic_mode, pointer.x)) |index|
                     .{ .room_tab = index }
                 else
@@ -1135,6 +1178,7 @@ pub const View = struct {
     }
 
     fn activateToolbar(self: *View, index: u8) Action {
+        if (!toolbarCommandEnabled(index, self.wire_live)) return .none;
         if (index == 0) return .connection;
         switch (index) {
             1, 3, 19, 20, 21, 22 => {},
@@ -1314,8 +1358,8 @@ pub const View = struct {
         self.canvas.clear(ui.current.chrome);
 
         drawMenuBar(&self.canvas, layout.menu, self.active_menu, self.hovered_menu);
-        drawToolBar(&self.canvas, layout.toolbar, comic_mode, self.hovered_toolbar, if (self.shell.focus == .toolbar) self.focused_toolbar else null);
-        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab, self.hovered_room_tab);
+        drawToolBar(&self.canvas, layout.toolbar, comic_mode, self.hovered_toolbar, if (self.shell.focus == .toolbar) self.focused_toolbar else null, self.wire_live);
+        drawTabBar(&self.canvas, layout, tabs, active_tab, self.room_tab_first, self.shell.focus == .navigation, comic_mode, self.shell.comic_columns, self.hovered_column_control, self.status_panel_open, self.hovered_status_tab, self.hovered_room_tab, self.hovered_room_overflow);
         drawSplitters(&self.canvas, layout, comic_mode);
 
         if (comic_mode) {
@@ -1329,13 +1373,18 @@ pub const View = struct {
             if (comic_mode) try self.drawBodyCamera(layout.body_camera, transcript);
         }
         drawSayWindow(&self.canvas, layout, input, cursor, selection, self.shell.focus == .composer, self.hovered_composer, self.shell.say_mode, self.hovered_say_action, if (self.shell.focus == .say_actions) self.focused_say_action else null, status);
-        drawStatusBar(&self.canvas, layout.status, status, transcript.activeMemberCount(), self.hovered_status);
+        drawStatusBar(&self.canvas, layout.status, statusBarLabel(status), transcript.activeMemberCount(), self.hovered_status);
 
         if (self.shell.focus == .transcript) drawFocus(&self.canvas, layout.transcript);
         if (self.shell.focus == .members) drawFocus(&self.canvas, layout.members);
         if (self.shell.focus == .emotion) drawFocus(&self.canvas, layout.body_camera);
-        if (self.hovered_toolbar) |index| drawToolbarTooltip(&self.canvas, layout, index);
+        if (self.hovered_toolbar) |index| drawToolbarTooltip(&self.canvas, layout, index, self.wire_live);
         if (self.hovered_say_action) |index| drawSayActionTooltip(&self.canvas, layout, index);
+        if (self.hovered_room_overflow) drawOverflowTooltip(&self.canvas, layout, comic_mode, tabs.len, self.room_tab_first);
+        if (self.hovered_status_tab) drawStatusTabTooltip(&self.canvas, layout, status);
+        if (self.hovered_status) drawStatusBarTooltip(&self.canvas, layout, status);
+        if (self.hovered_room_tab) |index| if (index < tabs.len) drawRoomTabTooltip(&self.canvas, layout, comic_mode, tabs[index].label, index);
+        if (self.hovered_column_control) |_| drawColumnTooltip(&self.canvas, layout, self.shell.comic_columns);
         if (self.active_menu) |menu| drawMenuPopup(&self.canvas, menu, self.hovered_menu_item, self.shell, self.can_moderate, self.wire_live);
         if (self.context_menu) |kind| drawContextPopup(&self.canvas, kind, self.context_x, self.context_y, self.hovered_context_item orelse self.focused_context_item, self.shell.emotion_frozen, self.can_moderate, self.wire_live);
         if (self.status_panel_open) drawStatusPanel(&self.canvas, status, transcript.activeMemberCount(), self.shell, self.appearance, self.status_detailed, self.hovered_status_action);
@@ -1376,6 +1425,13 @@ pub const View = struct {
                 .focused = index == active_tab and self.shell.focus == .navigation,
             });
         }
+        if (roomOverflowRect(layout, comic_mode, tabs.len, self.room_tab_first)) |overflow| snapshot.append(.{
+            .id = "room-overflow",
+            .role = .button,
+            .bounds = overflow,
+            .label = "More rooms",
+            .focused = self.hovered_room_overflow,
+        });
         snapshot.append(.{ .id = "transcript", .role = .transcript, .bounds = layout.transcript, .label = "Conversation", .focused = self.shell.focus == .transcript });
         if (layout.right.w > 0) snapshot.append(.{ .id = "members", .role = .member_list, .bounds = layout.members, .label = "Members", .focused = self.shell.focus == .members });
         snapshot.append(.{ .id = "composer", .role = .composer, .bounds = layout.say_editor, .label = "Message", .focused = self.shell.focus == .composer });
@@ -1861,7 +1917,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
         },
         4 => switch (item) {
             0 => "Room list",
-            1 => "Enter room",
+            1 => "Join room",
             2 => "Create room",
             3 => "Room properties",
             4 => "Set away message",
@@ -1897,7 +1953,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
 }
 
 fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
-    if ((menu == 4 or menu == 5) and !connected) return "Wire";
+    if ((menu == 4 or menu == 5) and !connected) return "Connect first";
     return switch (menu) {
         0 => switch (item) {
             0, 1, 2 => "Open",
@@ -1946,7 +2002,7 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
 }
 
 fn contextItemHint(kind: ContextKind, item: u8, connected: bool) []const u8 {
-    if (kind == .member and !connected) return "Wire";
+    if (kind == .member and !connected) return "Connect first";
     return switch (kind) {
         .member => switch (item) {
             0 => "Say",
@@ -2156,7 +2212,7 @@ fn nextEnabledContextItem(kind: ContextKind, start: u8, forward: bool, can_moder
     return 0;
 }
 
-fn drawToolBar(c: *Canvas, rect: Rect, comic_mode: bool, hovered: ?u8, focused: ?u8) void {
+fn drawToolBar(c: *Canvas, rect: Rect, comic_mode: bool, hovered: ?u8, focused: ?u8, connected: bool) void {
     ui.drawToolbarSurface(c, rect);
     const toolbar_layout = ui.ToolbarLayout.init(rect);
     for (ui.ToolbarLayout.group_counts, 0..) |_, group| if (toolbar_layout.groupRect(group)) |group_rect| ui.drawToolbarGroup(c, group_rect);
@@ -2176,7 +2232,8 @@ fn drawToolBar(c: *Canvas, rect: Rect, comic_mode: bool, hovered: ?u8, focused: 
     };
     for (primary, 0..) |item, position| {
         if (toolbar_layout.buttonRect(position)) |button| {
-            _ = drawModernToolButton(c, item.glyph, button.x, button.y, item.selected, hovered == item.index);
+            const enabled = toolbarCommandEnabled(item.index, connected);
+            _ = drawModernToolButton(c, item.glyph, button.x, button.y, item.selected, hovered == item.index and enabled, !enabled);
             if (focused == @as(u8, @intCast(position))) ui.drawFocusRing(c, button);
         }
     }
@@ -2188,7 +2245,7 @@ fn toolbarLabel(index: u8) []const u8 {
     return switch (index) {
         0 => "Connection setup",
         1 => "Disconnect",
-        2 => "Enter room",
+        2 => "Join room",
         3 => "Leave room",
         4 => "Create room",
         5 => "Comic view",
@@ -2230,10 +2287,10 @@ fn toolbarButtonX(rect: Rect, index: u8) ?i32 {
     return null;
 }
 
-fn drawToolbarTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
+fn drawToolbarTooltip(c: *Canvas, layout: geometry.Layout, index: u8, connected: bool) void {
     const button_x = toolbarButtonX(layout.toolbar, index) orelse return;
     const label = toolbarLabel(index);
-    const hint = toolbarHint(index);
+    const hint = if (!toolbarCommandEnabled(index, connected)) "Connect first" else toolbarHint(index);
     const width = @min(230, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
     const x = std.math.clamp(button_x - 4, 6, @max(6, layout.toolbar.right() - width - 6));
     ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, label, hint);
@@ -2241,21 +2298,42 @@ fn drawToolbarTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
 
 fn toolbarHint(index: u8) []const u8 {
     return switch (index) {
-        0 => "File",
-        2 => "Network",
-        4, 7 => "Layout",
-        5, 13 => "Member",
-        6 => "Refresh",
-        8 => "Message",
-        10, 17 => "Text",
-        11 => "Profile",
-        18 => "Color",
+        0 => "Wire",
+        2 => "Join",
+        4 => "New",
+        5 => "Page",
+        6 => "Text",
+        7 => "Rooms",
+        8 => "CAST",
+        10 => "Away",
+        11 => "Card",
+        13 => "Say",
+        17 => "Type",
+        18 => "Ink",
         else => "Tool",
     };
 }
 
-fn drawModernToolButton(c: *Canvas, glyph: ToolGlyph, x: i32, y: i32, selected: bool, hovered: bool) i32 {
-    const glyph_color = ui.drawCommandTile(c, x, y, selected, hovered);
+fn toolbarCommandEnabled(index: u8, connected: bool) bool {
+    return switch (index) {
+        2, 4, 7, 10, 13 => connected,
+        else => true,
+    };
+}
+
+fn nextEnabledToolbar(current: u8, forward: bool, connected: bool) u8 {
+    const count: u8 = @intCast(ui.ToolbarLayout.button_count);
+    var item = current;
+    var checked: u8 = 0;
+    while (checked < count) : (checked += 1) {
+        item = if (forward) (item + 1) % count else (item + count - 1) % count;
+        if (toolbarCommandEnabled(ui.ToolbarLayout.command_ids[item], connected)) return item;
+    }
+    return current;
+}
+
+fn drawModernToolButton(c: *Canvas, glyph: ToolGlyph, x: i32, y: i32, selected: bool, hovered: bool, disabled: bool) i32 {
+    const glyph_color = ui.drawCommandTileState(c, x, y, selected, hovered, disabled);
     ui.drawToolGlyph(c, glyph, x + 8, y + 8, glyph_color);
     return x + 32;
 }
@@ -2289,11 +2367,34 @@ fn roomTabIndexAt(self: *const View, layout: geometry.Layout, comic_mode: bool, 
     const tab_width: i32 = 164;
     const viewport = tabViewport(layout, comic_mode);
     if (x >= viewport.right) return null;
+    if (roomOverflowContains(layout, comic_mode, self.room_tab_count, self.room_tab_first, x, layout.tabs.y + 10)) return null;
     const raw = @divTrunc(x - first_x, tab_width);
     if (raw < 0) return null;
     const index = self.room_tab_first + @as(usize, @intCast(raw));
     if (index >= self.room_tab_count) return null;
     return index;
+}
+
+fn roomOverflowRect(layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize) ?Rect {
+    const viewport = tabViewport(layout, comic_mode);
+    if (count <= viewport.capacity) return null;
+    _ = first_visible;
+    const chip = Rect{ .x = viewport.right - 26, .y = layout.tabs.y + 8, .w = 26, .h = 20 };
+    if (chip.x < viewport.first_x) return null;
+    return chip;
+}
+
+fn roomOverflowContains(layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize, x: i32, y: i32) bool {
+    const chip = roomOverflowRect(layout, comic_mode, count, first_visible) orelse return false;
+    return ui.contains(chip, x, y);
+}
+
+fn nextOverflowRoom(layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize, x: i32, y: i32) ?usize {
+    if (!roomOverflowContains(layout, comic_mode, count, first_visible, x, y) or count == 0) return null;
+    const viewport = tabViewport(layout, comic_mode);
+    const last_visible = first_visible + @min(viewport.capacity, count - first_visible);
+    if (last_visible < count) return last_visible;
+    return 0;
 }
 
 fn updateTabViewport(self: *View, layout: geometry.Layout, comic_mode: bool, count: usize, active: usize) void {
@@ -2308,12 +2409,13 @@ fn updateTabViewport(self: *View, layout: geometry.Layout, comic_mode: bool, cou
     self.room_tab_first = @min(self.room_tab_first, count - capacity);
 }
 
-fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover, status_selected: bool, status_hovered: bool, hovered_room: ?usize) void {
+fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, active: usize, first_visible: usize, focused: bool, comic_mode: bool, comic_columns: u8, column_hover: ?ColumnControlHover, status_selected: bool, status_hovered: bool, hovered_room: ?usize, overflow_hovered: bool) void {
     const rect = layout.tabs;
     ui.drawTabStrip(c, rect);
     const status_w: i32 = 108;
     ui.drawStatusTab(c, rect, status_selected, status_hovered);
     ui.drawStatusTabContent(c, rect, status_selected);
+    if (status_hovered) ui.drawFocusRing(c, .{ .x = rect.x + 8, .y = rect.y + 6, .w = 96, .h = rect.h - 12 });
     const viewport = tabViewport(layout, comic_mode);
     const first_x = rect.x + status_w + 6;
     const tab_w: i32 = 164;
@@ -2324,9 +2426,9 @@ fn drawTabBar(c: *Canvas, layout: geometry.Layout, tabs: []const View.Tab, activ
         const width = tab_w;
         ui.drawConversationTab(c, .{ .x = x, .y = rect.y + 5, .w = width, .h = rect.h - 5 }, tab.label, tab.unread, index == active, focused and index == active, hovered_room == index);
     }
-    if (first_visible + viewport.capacity < tabs.len and first_x + @as(i32, @intCast(@min(viewport.capacity, tabs.len - first_visible))) * tab_w + 28 <= viewport.right) {
-        const chip_x = first_x + @as(i32, @intCast(@min(viewport.capacity, tabs.len - first_visible))) * tab_w;
-        ui.drawInkChip(c, .{ .x = chip_x, .y = rect.y + 8, .w = 26, .h = 20 }, "...", false);
+    if (roomOverflowRect(layout, comic_mode, tabs.len, first_visible)) |chip| {
+        ui.drawInkChip(c, chip, "...", overflow_hovered);
+        if (overflow_hovered) ui.drawFocusRing(c, chip);
     }
     if (comic_mode and layout.transcript.w >= 430) drawComicColumnControl(c, layout, comic_columns, column_hover);
 }
@@ -2567,6 +2669,56 @@ fn drawSayActionTooltip(c: *Canvas, layout: geometry.Layout, index: u8) void {
     ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.say.y - 34, .w = width, .h = 28 }, label, hint);
 }
 
+fn drawOverflowTooltip(c: *Canvas, layout: geometry.Layout, comic_mode: bool, count: usize, first_visible: usize) void {
+    const chip = roomOverflowRect(layout, comic_mode, count, first_visible) orelse return;
+    const hidden = if (count > first_visible) count - first_visible else 0;
+    const viewport = tabViewport(layout, comic_mode);
+    const unseen = if (hidden > viewport.capacity) hidden - viewport.capacity else if (first_visible > 0) first_visible else hidden;
+    var hint_buf: [16]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, "{d} hidden", .{@max(1, unseen)}) catch "More";
+    const width = @min(220, Canvas.uiTextWidth("More rooms") + Canvas.uiTextWidth(hint) + 38);
+    const x = std.math.clamp(chip.x - 4, 6, @max(6, layout.tabs.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, "More rooms", hint);
+}
+
+fn drawStatusTabTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
+    const hint = switch (ui.statusTone(status)) {
+        .success => "Live",
+        .failure => "Failed",
+        .warning => "Offline",
+        .info => "Wire",
+    };
+    const width = @min(200, Canvas.uiTextWidth("Status") + Canvas.uiTextWidth(hint) + 38);
+    ui.drawTooltipWithHint(c, .{ .x = layout.tabs.x + 8, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, "Status", hint);
+}
+
+fn drawStatusBarTooltip(c: *Canvas, layout: geometry.Layout, status: []const u8) void {
+    const label = statusBarLabel(status);
+    const hint = if (ui.statusTone(status) == .success) "Live" else "Connect";
+    const width = @min(260, Canvas.uiTextWidth(label) + Canvas.uiTextWidth(hint) + 38);
+    const x = std.math.clamp(layout.status.x + 8, 6, @max(6, layout.status.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.status.y - 34, .w = width, .h = 28 }, label, hint);
+}
+
+fn drawRoomTabTooltip(c: *Canvas, layout: geometry.Layout, comic_mode: bool, label: []const u8, index: usize) void {
+    const viewport = tabViewport(layout, comic_mode);
+    const slot: i32 = @intCast(index -| @as(usize, @intCast(@max(0, @as(i32, @intCast(index)) - @as(i32, @intCast(viewport.capacity))))));
+    _ = slot;
+    const width = @min(220, Canvas.uiTextWidth(label) + Canvas.uiTextWidth("Page") + 38);
+    const tab_x = viewport.first_x + @as(i32, @intCast(index)) * 164;
+    const x = std.math.clamp(tab_x, 6, @max(6, layout.tabs.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, label, "Page");
+}
+
+fn drawColumnTooltip(c: *Canvas, layout: geometry.Layout, columns: u8) void {
+    var hint_buf: [16]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, "{d} across", .{columns}) catch "4 across";
+    const width = @min(200, Canvas.uiTextWidth("Panels") + Canvas.uiTextWidth(hint) + 38);
+    const control = geometry.comicColumnControl(layout);
+    const x = std.math.clamp(control.x - 8, 6, @max(6, layout.tabs.right() - width - 6));
+    ui.drawTooltipWithHint(c, .{ .x = x, .y = layout.tabs.bottom() + 7, .w = width, .h = 28 }, "Panels", hint);
+}
+
 fn drawStatusBar(c: *Canvas, rect: Rect, status: []const u8, member_count: usize, hovered: bool) void {
     ui.drawStatusBar(c, rect.x, rect.y, rect.w, rect.h, status, member_count, hovered);
 }
@@ -2617,6 +2769,8 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
         const settings = panel_layout.settings;
         ui.drawButton(c, connection.x, connection.y, connection.w, "Connection setup", .primary, hovered_action == .connection);
         ui.drawButton(c, settings.x, settings.y, settings.w, "Settings", .secondary, hovered_action == .settings);
+        if (hovered_action == .connection) ui.drawFocusRing(c, connection);
+        if (hovered_action == .settings) ui.drawFocusRing(c, settings);
         ui.drawDismissHint(c, panel, "Esc closes");
     }
 }
@@ -2651,6 +2805,14 @@ fn statusPanelHeading(status: []const u8) []const u8 {
     if (tone == .success) return "On the wire";
     if (tone == .failure) return "Wire failed";
     if (std.mem.indexOf(u8, status, "offline") != null) return "Offline";
+    return "Waiting on the wire";
+}
+
+fn statusBarLabel(status: []const u8) []const u8 {
+    const tone = ui.statusTone(status);
+    if (tone == .success) return "On the wire";
+    if (tone == .failure) return status;
+    if (std.mem.indexOf(u8, status, "offline") != null) return "Sunday page is offline";
     return "Waiting on the wire";
 }
 
@@ -2893,6 +3055,11 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
             else => "",
         },
         .user_list => if (index == 0) "CAST" else "",
+        .channel, .channel_create => if (index == 0) "JOIN" else "",
+        .whisper, .invite => if (index == 0) "SAY" else "",
+        .away => if (index == 0) "AWAY" else "",
+        .nickname => if (index == 0) "NICK" else "",
+        .personal => if (index == 0) "CARD" else "",
         else => "",
     };
 }
@@ -2913,6 +3080,17 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .connection_features => if (std.mem.eql(u8, first_value, "Disconnected")) "Features appear after the wire is live" else "",
         .room_list => "LISTX after the wire is live",
         .user_list => "Pick a CAST member after the wire is live",
+        .channel, .channel_create => "Join after the wire is live",
+        .whisper => "Whisper after the wire is live",
+        .invite => "Invite after the wire is live",
+        .kick, .ban, .room_access => "Moderation after the wire is live",
+        .personal => "Shown on your CAST card",
+        .nickname => "Visible on the Sunday page",
+        .away => "Posted while you are away",
+        .settings => "Ink Sunday chrome, page density, and CAST",
+        .comics_view => "Sunday page or transcript",
+        .character => "Who stands on the page",
+        .background => "The paper behind every panel",
         else => "",
     };
 }
@@ -3058,8 +3236,11 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         ui.drawNotice(c, rect.x + 14, dialog_layout.primary.y - 22, rect.w - 28, helper, tone);
     }
     drawDialogButton(c, dialog_layout.primary.x, dialog_layout.primary.y, dialog_layout.primary.w, dialogs.primaryLabel(spec.id), .primary, hovered_button == .primary or action_focus == .primary);
-    if (dialogs.showsCancel(spec.id))
+    if (action_focus == .primary) ui.drawFocusRing(c, dialog_layout.primary);
+    if (dialogs.showsCancel(spec.id)) {
         drawDialogButton(c, dialog_layout.cancel.x, dialog_layout.cancel.y, dialog_layout.cancel.w, "Cancel", .secondary, hovered_button == .cancel or action_focus == .cancel);
+        if (action_focus == .cancel) ui.drawFocusRing(c, dialog_layout.cancel);
+    }
 }
 
 fn dialogBrowseField(id: dialogs.Id) ?usize {
@@ -3926,7 +4107,7 @@ test "view menu layout commands ask the host to persist settings" {
     try std.testing.expectEqual(Action.persist_layout, view.handleMenuKey(.enter).?);
     try std.testing.expectEqual(shell_mod.ContentMode.text, view.shell.content_mode);
     try std.testing.expectEqualStrings("Join", menuItemHint(4, 1, true));
-    try std.testing.expectEqualStrings("Wire", menuItemHint(4, 1, false));
+    try std.testing.expectEqualStrings("Connect first", menuItemHint(4, 1, false));
 }
 
 test "empty page, CAST, composer, and status copy follow the wire" {
@@ -3956,6 +4137,12 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Join a room", emptyCastCopy("connected"));
     try std.testing.expectEqualStrings("Ink the next balloon...", composerPlaceholder("connected"));
     try std.testing.expectEqualStrings("On the wire", statusPanelHeading("connected"));
+    try std.testing.expectEqualStrings("On the wire", statusBarLabel("connected"));
+    try std.testing.expectEqualStrings("Sunday page is offline", statusBarLabel("offline"));
+    try std.testing.expectEqualStrings("Waiting on the wire", statusBarLabel("reconnecting"));
+    try std.testing.expectEqualStrings("Wire", toolbarHint(0));
+    try std.testing.expectEqualStrings("Join", toolbarHint(2));
+    try std.testing.expectEqualStrings("CAST", toolbarHint(8));
 }
 
 test "member context stays closed until the wire is live" {
@@ -3966,4 +4153,55 @@ test "member context stays closed until the wire is live" {
     const popup = contextPopupRect(view.width(), view.height(), .member, 200, 200);
     _ = view.handlePointer(.{ .kind = .down, .x = popup.x + 10, .y = popup.y + 8, .button = .primary }, 0, 1);
     try std.testing.expect(view.active_dialog == null);
+}
+
+test "overflow rooms expose hover tooltip keyboard and jump to the next hidden room" {
+    var view = try View.init(std.testing.allocator, min_width, min_height);
+    defer view.deinit();
+    var transcript = session.Transcript.init(std.testing.allocator);
+    defer transcript.deinit();
+    const tabs = [_]View.Tab{ .{ .label = "#one" }, .{ .label = "#two" }, .{ .label = "#three" } };
+    try view.renderTabs("connected", &transcript, "", 0, null, &tabs, 0);
+    const layout = geometry.Layout.compute(min_width, min_height, true, true);
+    const overflow = roomOverflowRect(layout, true, tabs.len, view.room_tab_first).?;
+    try std.testing.expect(view.handlePointerMove(.{ .kind = .move, .x = overflow.x + 4, .y = overflow.y + 4 }, 0));
+    try std.testing.expect(view.hovered_room_overflow);
+    try std.testing.expect(view.hovered_room_tab == null);
+    const jumped = view.handlePointer(.{ .kind = .down, .x = overflow.x + 4, .y = overflow.y + 4, .button = .primary }, 0, 0);
+    try std.testing.expectEqual(Action{ .room_tab = 2 }, jumped);
+
+    view.room_tab_count = 3;
+    view.room_tab_first = 0;
+    view.shell.focus = .navigation;
+    try std.testing.expectEqual(Action{ .room_tab = tabViewport(layout, true).capacity }, view.handleMenuKey(.right).?);
+
+    const snapshot = view.semanticSnapshot("connected", &tabs, 0);
+    var found_overflow = false;
+    for (snapshot.items()) |item| {
+        if (std.mem.eql(u8, item.id, "room-overflow")) found_overflow = true;
+    }
+    try std.testing.expect(found_overflow);
+}
+
+test "wire-dead toolbar commands look disabled and are skipped" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.wire_live = false;
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const toolbar = ui.ToolbarLayout.init(layout.toolbar);
+    const enter = toolbar.buttonRect(1).?;
+    _ = view.handlePointer(.{ .kind = .down, .x = enter.x + 4, .y = enter.y + 4, .button = .primary }, 0, 0);
+    try std.testing.expect(view.active_dialog == null);
+
+    view.shell.focus = .toolbar;
+    view.focused_toolbar = 0;
+    try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.right).?);
+    try std.testing.expectEqual(@as(u8, 3), view.focused_toolbar);
+
+    view.wire_live = true;
+    _ = view.handlePointer(.{ .kind = .down, .x = enter.x + 4, .y = enter.y + 4, .button = .primary }, 0, 0);
+    try std.testing.expectEqual(dialogs.Id.channel, view.active_dialog.?);
+    try std.testing.expect(!toolbarCommandEnabled(2, false));
+    try std.testing.expect(toolbarCommandEnabled(0, false));
+    try std.testing.expect(toolbarCommandEnabled(5, false));
 }

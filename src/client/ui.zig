@@ -643,6 +643,15 @@ pub fn drawInputControl(c: *Canvas, rect: Rect, kind: InputKind, state: InputSta
 /// Comic Chat signature: selected modes read at a glance without a bulky
 /// native-toolbar bevel.
 pub fn drawCommandTile(c: *Canvas, x: i32, y: i32, selected: bool, hovered: bool) u32 {
+    return drawCommandTileState(c, x, y, selected, hovered, false);
+}
+
+pub fn drawCommandTileState(c: *Canvas, x: i32, y: i32, selected: bool, hovered: bool, disabled: bool) u32 {
+    if (disabled) {
+        drawInkPlate(c, x, y, 32, 32, 2, current.chrome);
+        c.fillRect(x + stroke, y + stroke, 32 - stroke * 2, 2, current.divider);
+        return current.divider;
+    }
     if (selected) {
         drawInkPlate(c, x, y, 32, 32, 2, current.accent);
         return current.layer;
@@ -1700,8 +1709,8 @@ pub fn drawStatusBar(c: *Canvas, x: i32, y: i32, width: i32, height: i32, status
     const badge_x = x + @max(108, width - badge_w - 8);
     if (hovered) c.fillRect(x + 4, y + 4, @max(1, badge_x - x - 10), @max(1, height - 8), current.navigation_hover);
     drawInkChip(c, .{ .x = badge_x, .y = y + 3, .w = badge_w, .h = @max(1, height - 6) }, members, false);
-    const action = "Connect";
     const needs_connect = statusTone(status) != .success;
+    const action = if (needs_connect) "Connect" else "Live";
     const action_w = if (needs_connect or hovered or badge_x - x >= 220) Canvas.uiTextWidth(action) + 28 else 0;
     drawEllipsized(c, status, x + 24, y + 5, badge_x - x - 34 - action_w, current.navigation_ink);
     if (action_w > 0) drawInkChip(c, .{ .x = badge_x - action_w - 6, .y = y + 3, .w = action_w, .h = @max(1, height - 6) }, action, needs_connect or hovered);
