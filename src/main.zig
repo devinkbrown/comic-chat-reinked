@@ -179,6 +179,7 @@ const default_server = "eshmaki.me";
 const default_server_alternative = "ircx.us";
 const default_channel = "#root";
 const default_nick = "comicchat";
+const default_sasl_password_file = ".comicchat-sasl";
 
 const AuthArgs = struct {
     user: ?[]const u8 = null,
@@ -192,6 +193,51 @@ const AuthArgs = struct {
             self.mechanism != null or self.external;
     }
 };
+
+const ResolvedSaslAuth = struct {
+    user: []const u8,
+    password_file: []const u8,
+};
+
+fn resolveSaslAuth(
+    auth: AuthArgs,
+    stored_user: []const u8,
+    stored_file: []const u8,
+    nick: []const u8,
+    default_exists: bool,
+) ?ResolvedSaslAuth {
+    if (auth.password_file) |path| {
+        if (path.len != 0) return .{ .user = auth.user orelse nick, .password_file = path };
+    }
+    if (stored_file.len != 0) {
+        const user = auth.user orelse (if (stored_user.len != 0) stored_user else nick);
+        return .{ .user = user, .password_file = stored_file };
+    }
+    if (default_exists) return .{ .user = auth.user orelse nick, .password_file = default_sasl_password_file };
+    return null;
+}
+
+fn saslPasswordFileExists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
+}
+
+fn applyResolvedSaslAuth(
+    auth: *AuthArgs,
+    preferences: *const cc.client.preferences.Store,
+    nick: []const u8,
+    io: std.Io,
+) void {
+    const resolved = resolveSaslAuth(
+        auth.*,
+        preferences.sasl_user.items,
+        preferences.sasl_password_file.items,
+        nick,
+        saslPasswordFileExists(io, default_sasl_password_file),
+    ) orelse return;
+    auth.user = resolved.user;
+    auth.password_file = resolved.password_file;
+}
 
 const ConnectionArgs = struct {
     host: []const u8,
@@ -496,6 +542,11 @@ const ConnectionRuntime = struct {
     fn init(gpa: std.mem.Allocator, io: std.Io, args: *const ConnectionArgs, executable: []const u8) !ConnectionRuntime {
         const wall_seconds = std.Io.Clock.real.now(io).toSeconds();
         const now_seconds: u64 = if (wall_seconds > 0) @intCast(wall_seconds) else 0;
+        var preferences = try cc.client.preferences.Store.loadFile(gpa, io, ".comicchat-preferences");
+        errdefer preferences.deinit();
+        var auth = args.auth;
+        applyResolvedSaslAuth(&auth, &preferences, args.nick, io);
+
         const stores = stores: {
             var sts = try cc.net.sts_store.Store.loadFile(gpa, io, args.sts_file);
             errdefer sts.deinit();
@@ -504,11 +555,10 @@ const ConnectionRuntime = struct {
                 io,
                 args.session_file,
                 args.host,
-                args.auth.user orelse args.nick,
+                auth.user orelse args.nick,
             );
             errdefer session.deinit();
-            const preferences = try cc.client.preferences.Store.loadFile(gpa, io, ".comicchat-preferences");
-            break :stores .{ .sts = sts, .session = session, .preferences = preferences };
+            break :stores .{ .sts = sts, .session = session };
         };
         var runtime = ConnectionRuntime{
             .gpa = gpa,
@@ -518,10 +568,10 @@ const ConnectionRuntime = struct {
             .session_path = args.session_file,
             .session = stores.session,
             .preferences_path = ".comicchat-preferences",
-            .preferences = stores.preferences,
+            .preferences = preferences,
             .connect_options = args.options,
             .now_seconds = now_seconds,
-            .auth = args.auth,
+            .auth = auth,
             .nick = args.nick,
             .executable = executable,
         };
@@ -532,6 +582,7 @@ const ConnectionRuntime = struct {
         // intended to provide.
         if (runtime.sts.requiresTls(args.host, now_seconds)) runtime.connect_options.security = .tls;
         try runtime.loadCredentials();
+        runtime.persistSaslAuthPaths();
         return runtime;
     }
 
@@ -649,6 +700,23 @@ const ConnectionRuntime = struct {
             self.password_storage = null;
         }
         self.credentials = null;
+    }
+
+    fn persistSaslAuthPaths(self: *ConnectionRuntime) void {
+        const path = self.auth.password_file orelse return;
+        if (path.len == 0 or self.credentials == null) return;
+        const user = self.auth.user orelse self.nick;
+        var user_buf: [256]u8 = undefined;
+        var path_buf: [4096]u8 = undefined;
+        if (user.len > user_buf.len or path.len > path_buf.len) return;
+        const user_copy = user_buf[0..user.len];
+        const path_copy = path_buf[0..path.len];
+        @memcpy(user_copy, user);
+        @memcpy(path_copy, path);
+        self.preferences.setSaslAuth(user_copy, path_copy) catch return;
+        self.auth.user = self.preferences.sasl_user.items;
+        self.auth.password_file = self.preferences.sasl_password_file.items;
+        self.preferences.saveFile(self.io, self.preferences_path) catch return;
     }
 };
 
@@ -1279,6 +1347,7 @@ const ChatState = struct {
     notification_poll_pending: usize = 0,
     notification_current: std.ArrayList([]u8) = .empty,
     notification_previous: std.ArrayList([]u8) = .empty,
+    monitor_subscribed: bool = false,
     last_transfer_bytes: u64 = 0,
     flood_entries: std.ArrayList(FloodEntry) = .empty,
     desktop_notification: ?[]u8 = null,
@@ -1655,6 +1724,7 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
     state.ircx_data = false;
     state.notification_poll_pending = 0;
     state.last_notification_poll_ms = 0;
+    state.monitor_subscribed = false;
     for (state.pending_udi.items) |*entry| entry.deinit(gpa);
     state.pending_udi.clearRetainingCapacity();
     for (state.pending_profiles.items) |nick| gpa.free(nick);
@@ -1729,17 +1799,31 @@ fn tickBackgroundFeatures(
 
     const client = network.clientPtr() orelse return redraw;
     const preferences = &network.runtime.preferences;
+    if (std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled") or
+        preferences.notifications.items.len == 0)
+        return redraw;
+
+    if (monitorAvailable(client) and !state.monitor_subscribed) {
+        try subscribeMonitorTargets(client, preferences);
+        try client.monitor(.status, null);
+        state.monitor_subscribed = true;
+    }
+
     if (state.notification_poll_pending == 0 and
-        preferences.notifications.items.len != 0 and
-        !std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled") and
         (state.last_notification_poll_ms == 0 or now_ms -| state.last_notification_poll_ms >= 60_000))
     {
-        for (state.notification_current.items) |entry| workspace.gpa.free(entry);
-        state.notification_current.clearRetainingCapacity();
-        for (preferences.notifications.items) |notification| if (notification.enabled) {
+        if (state.monitor_subscribed) {
+            retainMonitorOnlineNicks(workspace.gpa, state, preferences);
+        } else {
+            for (state.notification_current.items) |entry| workspace.gpa.free(entry);
+            state.notification_current.clearRetainingCapacity();
+        }
+        for (preferences.notifications.items) |notification| {
+            if (!notification.enabled) continue;
+            if (state.monitor_subscribed and notificationUsesMonitor(&notification)) continue;
             try client.who(notification.nickname);
             state.notification_poll_pending += 1;
-        };
+        }
         state.last_notification_poll_ms = now_ms;
     }
     return redraw;
@@ -2949,12 +3033,22 @@ fn applyDialogAction(
             });
             try preferences.saveFile(io, network.runtime.preferences_path);
             state.last_notification_poll_ms = 0;
+            if (std.ascii.eqlIgnoreCase(delivery, "Disabled")) {
+                if (maybe_client) |client| if (state.monitor_subscribed) {
+                    client.monitor(.clear, null) catch {};
+                    state.monitor_subscribed = false;
+                };
+            } else if (maybe_client) |client| {
+                if (state.monitor_subscribed and notificationUsesMonitorValues(value, view.dialogValueAt(1), view.dialogValueAt(2)))
+                    client.monitor(.add, value) catch {};
+            }
         },
         .notification_users => {
             const operation = view.dialogValueAt(2);
             if (std.ascii.eqlIgnoreCase(operation, "Refresh")) {
                 state.notification_poll_pending = 0;
                 state.last_notification_poll_ms = 0;
+                if (maybe_client) |client| if (state.monitor_subscribed) client.monitor(.status, null) catch {};
                 view.setDialogNotice("The saved notification rules will be queried now.");
                 return;
             }
@@ -3761,6 +3855,10 @@ fn processWorkspaceMessages(
             redraw = (try finishNotificationWho(workspace.gpa, state, workspace)) or redraw;
             continue;
         }
+        if (std.mem.eql(u8, msg.command, "730") or std.mem.eql(u8, msg.command, "731")) {
+            redraw = (try applyMonitorNumeric(workspace.gpa, state, workspace, preferences, &msg)) or redraw;
+            continue;
+        }
         if (isVisibleServerWorkflowReply(msg.command)) {
             if (try applyClientPropertyBackdrop(workspace, &msg)) redraw = true;
             try rememberMotd(state, workspace.gpa, &msg);
@@ -3915,10 +4013,10 @@ fn processWorkspaceMessages(
 fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch return std.ascii.eqlIgnoreCase(command, "PROP");
     return switch (code) {
-        221, 251, 252, 253, 254, 255, 263 => true,
-        311, 312, 313, 314, 317, 318, 319 => true,
-        322, 323, 341, 367, 368, 372, 375, 376, 381, 396, 671 => true,
-        710, 711, 712, 713, 714, 715 => true,
+        2, 3, 4, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266 => true,
+        311, 312, 313, 314, 317, 318, 319, 330 => true,
+        322, 323, 341, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
+        710, 711, 712, 713, 714, 715, 732, 733, 734 => true,
         801...819, 900...908, 913...925 => true,
         else => false,
     };
@@ -4343,6 +4441,152 @@ fn publishClientBackdrop(client: *cc.net.client.Client, room: *cc.client.workspa
     defer gpa.free(updated);
     try client.setProperty(room.name, "CLIENT", updated);
     try room.setClientData(gpa, updated);
+}
+
+fn isStarOrEmpty(value: []const u8) bool {
+    return value.len == 0 or std.mem.eql(u8, value, "*");
+}
+
+fn isExactNotifyNick(nick: []const u8) bool {
+    return nick.len != 0 and nick.len <= 64 and std.mem.indexOfAny(u8, nick, " \r\n\x00,@*?") == null;
+}
+
+fn notificationUsesMonitorValues(nickname: []const u8, user_mask: []const u8, host_mask: []const u8) bool {
+    return isExactNotifyNick(nickname) and isStarOrEmpty(user_mask) and isStarOrEmpty(host_mask);
+}
+
+fn notificationUsesMonitor(notification: *const cc.client.preferences.Notification) bool {
+    return notification.enabled and notificationUsesMonitorValues(notification.nickname, notification.user_mask, notification.host_mask);
+}
+
+fn watchedMonitorNick(preferences: *const cc.client.preferences.Store, nick: []const u8) bool {
+    for (preferences.notifications.items) |notification| {
+        if (notificationUsesMonitor(&notification) and std.ascii.eqlIgnoreCase(notification.nickname, nick)) return true;
+    }
+    return false;
+}
+
+fn monitorAvailable(client: *const cc.net.client.Client) bool {
+    const features = client.featureState() orelse return false;
+    return features.isupport("MONITOR") != null;
+}
+
+fn monitorNickFromTarget(target: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, target, " \t");
+    if (std.mem.indexOfScalar(u8, trimmed, '!')) |bang| return trimmed[0..bang];
+    return trimmed;
+}
+
+fn subscribeMonitorTargets(client: *cc.net.client.Client, preferences: *const cc.client.preferences.Store) !void {
+    var list: [400]u8 = undefined;
+    var used: usize = 0;
+    for (preferences.notifications.items) |notification| {
+        if (!notificationUsesMonitor(&notification)) continue;
+        const nick = notification.nickname;
+        if (used != 0 and used + 1 + nick.len > list.len) {
+            try client.monitor(.add, list[0..used]);
+            used = 0;
+        }
+        if (used != 0) {
+            list[used] = ',';
+            used += 1;
+        }
+        @memcpy(list[used..][0..nick.len], nick);
+        used += nick.len;
+    }
+    if (used != 0) try client.monitor(.add, list[0..used]);
+}
+
+fn retainMonitorOnlineNicks(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    preferences: *const cc.client.preferences.Store,
+) void {
+    var index: usize = 0;
+    while (index < state.notification_current.items.len) {
+        const nick = state.notification_current.items[index];
+        if (watchedMonitorNick(preferences, nick)) {
+            index += 1;
+            continue;
+        }
+        gpa.free(nick);
+        _ = state.notification_current.orderedRemove(index);
+    }
+}
+
+fn rememberNotificationNick(gpa: std.mem.Allocator, list: *std.ArrayList([]u8), nick: []const u8) !bool {
+    if (containsIgnoreCase(list.items, nick)) return false;
+    if (list.items.len >= 512) return false;
+    try list.append(gpa, try gpa.dupe(u8, nick));
+    return true;
+}
+
+fn forgetNotificationNick(gpa: std.mem.Allocator, list: *std.ArrayList([]u8), nick: []const u8) bool {
+    for (list.items, 0..) |entry, index| {
+        if (!std.ascii.eqlIgnoreCase(entry, nick)) continue;
+        gpa.free(entry);
+        _ = list.orderedRemove(index);
+        return true;
+    }
+    return false;
+}
+
+fn announceNotificationChange(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    workspace: *cc.client.workspace.Workspace,
+    nick: []const u8,
+    online: bool,
+) !bool {
+    const transcript = if (workspace.activeRoom()) |room| &room.transcript else return false;
+    var text: [256]u8 = undefined;
+    const line = if (online)
+        std.fmt.bufPrint(&text, "{s} is online.", .{nick}) catch "A watched member is online."
+    else
+        std.fmt.bufPrint(&text, "{s} went offline.", .{nick}) catch "A watched member went offline.";
+    try transcript.addWithOptions("Notification", line, .{ .modes = cc.proto.udi.bm_action });
+    if (state.desktop_notification) |old| gpa.free(old);
+    state.desktop_notification = try gpa.dupe(u8, line);
+    return true;
+}
+
+fn applyMonitorPresence(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    workspace: *cc.client.workspace.Workspace,
+    nick: []const u8,
+    online: bool,
+) !bool {
+    if (online) {
+        _ = try rememberNotificationNick(gpa, &state.notification_current, nick);
+        if (containsIgnoreCase(state.notification_previous.items, nick)) return false;
+        _ = try rememberNotificationNick(gpa, &state.notification_previous, nick);
+        return announceNotificationChange(gpa, state, workspace, nick, true);
+    }
+    _ = forgetNotificationNick(gpa, &state.notification_current, nick);
+    if (!forgetNotificationNick(gpa, &state.notification_previous, nick)) return false;
+    return announceNotificationChange(gpa, state, workspace, nick, false);
+}
+
+fn applyMonitorNumeric(
+    gpa: std.mem.Allocator,
+    state: *ChatState,
+    workspace: *cc.client.workspace.Workspace,
+    preferences: *const cc.client.preferences.Store,
+    msg: *const cc.net.message.Message,
+) !bool {
+    if (std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled")) return false;
+    const list = msg.param(msg.param_count -| 1) orelse return false;
+    const online = std.mem.eql(u8, msg.command, "730");
+    var changed = false;
+    var parts = std.mem.splitScalar(u8, list, ',');
+    while (parts.next()) |part| {
+        const nick = monitorNickFromTarget(part);
+        if (nick.len == 0) continue;
+        if (!watchedMonitorNick(preferences, nick) and !containsIgnoreCase(state.notification_previous.items, nick)) continue;
+        changed = (try applyMonitorPresence(gpa, state, workspace, nick, online)) or changed;
+    }
+    return changed;
 }
 
 fn collectNotificationWho(
@@ -5232,11 +5476,21 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("251"));
     try std.testing.expect(isVisibleServerWorkflowReply("311"));
     try std.testing.expect(isVisibleServerWorkflowReply("221"));
+    try std.testing.expect(isVisibleServerWorkflowReply("002"));
+    try std.testing.expect(isVisibleServerWorkflowReply("004"));
+    try std.testing.expect(isVisibleServerWorkflowReply("250"));
+    try std.testing.expect(isVisibleServerWorkflowReply("265"));
+    try std.testing.expect(isVisibleServerWorkflowReply("330"));
+    try std.testing.expect(isVisibleServerWorkflowReply("422"));
+    try std.testing.expect(isVisibleServerWorkflowReply("732"));
+    try std.testing.expect(isVisibleServerWorkflowReply("734"));
     try std.testing.expect(isVisibleServerWorkflowReply("904"));
     try std.testing.expect(isCommandFailureNumeric("421"));
     try std.testing.expect(isNickFailureNumeric("433"));
     try std.testing.expect(isNickFailureNumeric("437"));
     try std.testing.expect(!isVisibleServerWorkflowReply("315"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("730"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("731"));
     try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("@#root"));
     try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("+#root"));
     try std.testing.expectEqualStrings("&local", stripStatusmsgTarget("&local"));
@@ -5332,6 +5586,88 @@ test "MOTD, invite, knock, key, and ban helpers stay live" {
     try client.clearBan("#root", "alice!*@*");
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MODE #root +b") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MODE #root -b alice!*@*") != null);
+}
+
+test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
+    const gpa = std.testing.allocator;
+
+    const cli = resolveSaslAuth(.{ .user = "cli", .password_file = "cli.secret" }, "stored", ".comicchat-sasl", "nick", true).?;
+    try std.testing.expectEqualStrings("cli", cli.user);
+    try std.testing.expectEqualStrings("cli.secret", cli.password_file);
+    const stored = resolveSaslAuth(.{}, "alex", "stored.secret", "nick", true).?;
+    try std.testing.expectEqualStrings("alex", stored.user);
+    try std.testing.expectEqualStrings("stored.secret", stored.password_file);
+    const inferred = resolveSaslAuth(.{}, "", "", "nick", true).?;
+    try std.testing.expectEqualStrings("nick", inferred.user);
+    try std.testing.expectEqualStrings(default_sasl_password_file, inferred.password_file);
+    try std.testing.expect(resolveSaslAuth(.{}, "", "", "nick", false) == null);
+    try std.testing.expect(resolveSaslAuth(.{ .external = true }, "", "", "nick", false) == null);
+
+    try std.testing.expect(notificationUsesMonitorValues("alice", "*", "*"));
+    try std.testing.expect(notificationUsesMonitorValues("alice", "", ""));
+    try std.testing.expect(!notificationUsesMonitorValues("al*", "*", "*"));
+    try std.testing.expect(!notificationUsesMonitorValues("alice", "*", "*.test"));
+    try std.testing.expectEqualStrings("alice", monitorNickFromTarget("alice!user@host"));
+    try std.testing.expectEqualStrings("bob", monitorNickFromTarget(" bob "));
+
+    var preferences = cc.client.preferences.Store.init(gpa);
+    defer preferences.deinit();
+    try preferences.upsertNotification(.{ .nickname = "alice", .user_mask = "*", .host_mask = "*", .network = "" });
+    try preferences.upsertNotification(.{ .nickname = "bob", .user_mask = "*", .host_mask = "*", .network = "" });
+    try preferences.upsertNotification(.{ .nickname = "al*", .user_mask = "*", .host_mask = "*", .network = "" });
+    try preferences.upsertNotification(.{ .nickname = "carol", .user_mask = "*", .host_mask = "*.test", .network = "" });
+
+    var workspace = try cc.client.workspace.Workspace.init(gpa, "me");
+    defer workspace.deinit();
+    _ = try workspace.ensure("#root");
+    var state: ChatState = .{};
+    defer state.deinit(gpa);
+    state.monitor_subscribed = true;
+    try state.notification_current.append(gpa, try gpa.dupe(u8, "alice"));
+    try state.notification_current.append(gpa, try gpa.dupe(u8, "dave"));
+    try state.notification_previous.append(gpa, try gpa.dupe(u8, "alice"));
+    retainMonitorOnlineNicks(gpa, &state, &preferences);
+    try std.testing.expectEqual(@as(usize, 1), state.notification_current.items.len);
+    try std.testing.expectEqualStrings("alice", state.notification_current.items[0]);
+
+    const online = cc.net.message.parse(":server 730 me :bob!u@h,alice!a@b");
+    try std.testing.expect(try applyMonitorNumeric(gpa, &state, &workspace, &preferences, &online));
+    try std.testing.expect(containsIgnoreCase(state.notification_current.items, "bob"));
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[0].transcript.lines.items[0].text, "bob is online") != null);
+    const again = cc.net.message.parse(":server 730 me :bob!u@h");
+    try std.testing.expect(!try applyMonitorNumeric(gpa, &state, &workspace, &preferences, &again));
+    const offline = cc.net.message.parse(":server 731 me :bob");
+    try std.testing.expect(try applyMonitorNumeric(gpa, &state, &workspace, &preferences, &offline));
+    try std.testing.expect(!containsIgnoreCase(state.notification_current.items, "bob"));
+    try std.testing.expect(containsIgnoreCase(state.notification_previous.items, "alice"));
+    resetChatConnectionState(&state, &workspace, gpa);
+    try std.testing.expect(!state.monitor_subscribed);
+    try std.testing.expect(containsIgnoreCase(state.notification_previous.items, "alice"));
+
+    const owned_host = try gpa.dupe(u8, "irc.example");
+    var client = cc.net.client.Client{
+        .gpa = gpa,
+        .transport = undefined,
+        .host = owned_host,
+        .port = 6697,
+        .connect_options = .{},
+        .framer = cc.net.irc.LineFramer.init(gpa),
+        .tx = cc.net.connection_policy.TxQueue.init(gpa, .{}, 0, 1, 0),
+        .deadlines = cc.net.connection_policy.Deadlines.init(0, .{}),
+        .aggregator = cc.net.features.Aggregator.init(gpa, .{}),
+    };
+    defer {
+        if (client.restoration) |*restoration| restoration.deinit();
+        client.aggregator.deinit();
+        client.tx.deinit();
+        client.framer.deinit();
+        client.out.deinit(gpa);
+        gpa.free(owned_host);
+    }
+    try subscribeMonitorTargets(&client, &preferences);
+    try client.monitor(.status, null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MONITOR + alice,bob\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MONITOR S\r\n") != null);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

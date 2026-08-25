@@ -80,6 +80,10 @@ pub const Store = struct {
     recent_files: std.ArrayList([]u8) = .empty,
     favorite_rooms: std.ArrayList([]u8) = .empty,
     rule_sets: std.ArrayList([]u8) = .empty,
+    /// SASL authentication identity only. The password stays in the file
+    /// named by `sasl_password_file` and is never written here.
+    sasl_user: std.ArrayList(u8) = .empty,
+    sasl_password_file: std.ArrayList(u8) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Store {
         return .{ .gpa = gpa };
@@ -104,6 +108,8 @@ pub const Store = struct {
         deinitStrings(self.gpa, &self.recent_files);
         deinitStrings(self.gpa, &self.favorite_rooms);
         deinitStrings(self.gpa, &self.rule_sets);
+        self.sasl_user.deinit(self.gpa);
+        self.sasl_password_file.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -173,6 +179,11 @@ pub const Store = struct {
 
     pub fn setNotificationDelivery(self: *Store, value: []const u8) !void {
         try replace(&self.notification_delivery, self.gpa, value);
+    }
+
+    pub fn setSaslAuth(self: *Store, user: []const u8, password_file: []const u8) !void {
+        try replace(&self.sasl_user, self.gpa, user);
+        try replace(&self.sasl_password_file, self.gpa, password_file);
     }
 
     pub fn setTextAppearance(self: *Store, font: []const u8, style: []const u8, color: []const u8) !void {
@@ -388,6 +399,8 @@ pub const Store = struct {
         try appendRecord(&out, self.gpa, "ui_accent", try std.fmt.bufPrint(&number, "{d}", .{self.ui_accent}));
         try appendRecord(&out, self.gpa, "ui_high_contrast", if (self.ui_high_contrast) "1" else "0");
         try appendRecord(&out, self.gpa, "ui_status_detailed", if (self.ui_status_detailed) "1" else "0");
+        if (self.sasl_user.items.len != 0) try appendRecord(&out, self.gpa, "sasl_user", self.sasl_user.items);
+        if (self.sasl_password_file.items.len != 0) try appendRecord(&out, self.gpa, "sasl_password_file", self.sasl_password_file.items);
         for (self.recent_files.items) |path| try appendRecord(&out, self.gpa, "recent_file", path);
         for (self.favorite_rooms.items) |room| try appendRecord(&out, self.gpa, "favorite_room", room);
         for (self.rule_sets.items) |name| try appendRecord(&out, self.gpa, "rule_set", name);
@@ -457,7 +470,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Store {
         defer gpa.free(decoded);
         if (std.mem.eql(u8, key, "profile")) try replace(&store.profile, gpa, decoded) else if (std.mem.eql(u8, key, "display_name")) try replace(&store.display_name, gpa, decoded) else if (std.mem.eql(u8, key, "homepage")) try replace(&store.homepage, gpa, decoded) else if (std.mem.eql(u8, key, "email")) try replace(&store.email, gpa, decoded) else if (std.mem.eql(u8, key, "backdrop")) try store.setBackdrop(decoded) else if (std.mem.eql(u8, key, "greeting_mode")) try replace(&store.greeting_mode, gpa, decoded) else if (std.mem.eql(u8, key, "greeting")) try replace(&store.greeting, gpa, decoded) else if (std.mem.eql(u8, key, "auto_ignore_count")) store.auto_ignore_count = std.fmt.parseInt(u16, decoded, 10) catch store.auto_ignore_count else if (std.mem.eql(u8, key, "auto_ignore_interval")) store.auto_ignore_interval_s = std.fmt.parseInt(u16, decoded, 10) catch store.auto_ignore_interval_s else if (std.mem.eql(u8, key, "notification_delivery")) try replace(&store.notification_delivery, gpa, decoded) else if (std.mem.eql(u8, key, "text_font")) try replace(&store.text_font, gpa, decoded) else if (std.mem.eql(u8, key, "text_style")) try replace(&store.text_style, gpa, decoded) else if (std.mem.eql(u8, key, "text_color")) {
             if (validHexColor(decoded)) try replace(&store.text_color, gpa, decoded);
-        } else if (std.mem.eql(u8, key, "ui_text_mode")) store.ui_text_mode = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_comic_columns")) store.ui_comic_columns = std.math.clamp(std.fmt.parseInt(u8, decoded, 10) catch 4, 1, 6) else if (std.mem.eql(u8, key, "ui_members_visible")) store.ui_members_visible = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_member_list")) store.ui_member_list = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_dark_mode")) store.ui_dark_mode = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_accent")) store.ui_accent = @min(std.fmt.parseInt(u8, decoded, 10) catch 0, 2) else if (std.mem.eql(u8, key, "ui_high_contrast")) store.ui_high_contrast = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_status_detailed")) store.ui_status_detailed = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "recent_file")) try rememberBounded(gpa, &store.recent_files, decoded, max_recent_files) else if (std.mem.eql(u8, key, "favorite_room")) try store.addFavoriteRoom(decoded) else if (std.mem.eql(u8, key, "rule_set")) try store.addRuleSet(decoded);
+        } else if (std.mem.eql(u8, key, "ui_text_mode")) store.ui_text_mode = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_comic_columns")) store.ui_comic_columns = std.math.clamp(std.fmt.parseInt(u8, decoded, 10) catch 4, 1, 6) else if (std.mem.eql(u8, key, "ui_members_visible")) store.ui_members_visible = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_member_list")) store.ui_member_list = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_dark_mode")) store.ui_dark_mode = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_accent")) store.ui_accent = @min(std.fmt.parseInt(u8, decoded, 10) catch 0, 2) else if (std.mem.eql(u8, key, "ui_high_contrast")) store.ui_high_contrast = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "ui_status_detailed")) store.ui_status_detailed = std.mem.eql(u8, decoded, "1") else if (std.mem.eql(u8, key, "sasl_user")) try replace(&store.sasl_user, gpa, decoded) else if (std.mem.eql(u8, key, "sasl_password_file")) try replace(&store.sasl_password_file, gpa, decoded) else if (std.mem.eql(u8, key, "recent_file")) try rememberBounded(gpa, &store.recent_files, decoded, max_recent_files) else if (std.mem.eql(u8, key, "favorite_room")) try store.addFavoriteRoom(decoded) else if (std.mem.eql(u8, key, "rule_set")) try store.addRuleSet(decoded);
     }
     return store;
 }
@@ -625,6 +638,7 @@ test "preferences round-trip profile rules notifications and escaped text" {
     try source.addRuleSet("Quiet hours");
     try source.upsertRule(.{ .name = "Hello", .event = "Message", .filter = "ping|pong", .action = "Reply", .value = "hello\nthere", .set_name = "Quiet hours", .case_sensitive = true, .maximum_occurrences = 3, .interval_s = 60 });
     try source.upsertNotification(.{ .nickname = "Anna", .user_mask = "*", .host_mask = "*.test", .network = "eshmaki.me" });
+    try source.setSaslAuth("alex", ".comicchat-sasl");
     const encoded = try source.encode();
     defer gpa.free(encoded);
     try std.testing.expect(std.mem.indexOfScalar(u8, encoded, '\r') == null);
@@ -648,6 +662,9 @@ test "preferences round-trip profile rules notifications and escaped text" {
     try std.testing.expectEqualStrings("#comic-art", decoded.favorite_rooms.items[0]);
     try std.testing.expectEqualStrings("Quiet hours", decoded.rule_sets.items[0]);
     try std.testing.expectEqualStrings("Quiet hours", decoded.rules.items[0].set_name);
+    try std.testing.expectEqualStrings("alex", decoded.sasl_user.items);
+    try std.testing.expectEqualStrings(".comicchat-sasl", decoded.sasl_password_file.items);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "secret") == null);
     try std.testing.expect(decoded.rules.items[0].case_sensitive);
     try std.testing.expectEqual(@as(u16, 3), decoded.rules.items[0].maximum_occurrences);
 }

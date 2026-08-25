@@ -56,13 +56,13 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - [x] PR lists what was fixed and honest leftovers
 - [x] No desktop UI redesign
 
-## Wave 7 leftovers in scope
+## Wave 8 leftovers in scope
 
-- MOTD dialog requests and displays the live MOTD
-- Room-password dialog retries JOIN after 475
-- Invitation dialog joins the remembered invite room
-- Ban dialog can list, add, or remove `+b` masks; 367/368 are visible
-- Incoming KNOCK and IRCX EVENT lines are shown
+- Persist SASL username and password-file path only (never the password, never the Password dialog)
+- Reload that file on a later process and keep session-store account aligned with the SASL user
+- Subscribe exact notify nicks with MONITOR when ISUPPORT advertises it; keep WHO for wildcards
+- Apply 730/731 online/offline immediately; resubscribe after reconnect
+- Show remaining dropped connect/session numerics: 002-004, 250, 265, 266, 330, 422, 732-734
 
 ## Verification
 
