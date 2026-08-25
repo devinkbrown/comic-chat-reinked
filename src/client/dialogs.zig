@@ -186,23 +186,23 @@ pub fn fields(id: Id) []const Field {
         .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Sign-in name", .hint = "Visible sign-in name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
         .character => &.{
             .{ .label = "Character", .kind = .choice },
-            .{ .label = "Expression preview", .kind = .choice },
+            .{ .label = "Expression", .kind = .choice },
             .{ .label = "Character gallery", .hint = "Previous, selected, and next", .kind = .preview },
         },
         .background => &.{ .{ .label = "Backdrop name", .kind = .choice }, .{ .label = "Preview", .hint = "Bundled background", .kind = .preview } },
         .nickname => &.{.{ .label = "Sign-in name", .hint = "Visible on the Sunday page" }},
         .password => &.{ .{ .label = "Account", .hint = "Wire account name" }, .{ .label = "Password", .hint = "Account password", .kind = .password } },
-        .channel => &.{ .{ .label = "Room name", .hint = "#room" }, .{ .label = "Optional password", .hint = "If the room is locked", .kind = .password } },
+        .channel => &.{ .{ .label = "Room name", .hint = "#room" }, .{ .label = "Room password", .hint = "If the room is locked", .kind = .password } },
         .channel_create => &.{
             .{ .label = "Room name", .hint = "#room" },
             .{ .label = "Topic", .hint = "Optional" },
             .{ .label = "Room options", .hint = "Optional; one word" },
             .{ .label = "CAST limit", .hint = "Optional" },
-            .{ .label = "Optional password", .kind = .password },
+            .{ .label = "Room password", .kind = .password },
         },
-        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST limit", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and limits", .kind = .readonly } },
+        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST limit", .hint = "Optional" }, .{ .label = "Room password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and limits", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password", .hint = "Needed if the room is locked" }},
-        .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "Result limit", .hint = "Optional; blank means unlimited" } },
+        .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "List limit", .hint = "Optional; blank means unlimited" } },
         .user_list => &.{ .{ .label = "CAST member", .hint = "Choose a visible CAST member" }, .{ .label = "Filter", .hint = "Optional name filter" } },
         .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban pattern", .hint = "Optional" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
@@ -221,7 +221,7 @@ pub fn fields(id: Id) []const Field {
         .create_set => &.{.{ .label = "Rule set name" }},
         .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat limit", .hint = "0 means unlimited" }, .{ .label = "Repeat window seconds", .hint = "0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Enabled", .kind = .choice }, .{ .label = "Case-sensitive match", .kind = .choice } },
-        .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional wire" }, .{ .label = "Delivery", .kind = .choice } },
+        .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Wire", .hint = "Optional wire" }, .{ .label = "Notice", .kind = .choice } },
         .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
         .save_conversation => &.{.{ .label = "Conversation file", .hint = "Save as .ccc" }},
@@ -230,14 +230,14 @@ pub fn fields(id: Id) []const Field {
         .recent_files => &.{ .{ .label = "Recent conversation", .hint = "Most recent path; edit to choose another" }, .{ .label = "Open or remove", .kind = .choice } },
         .favorite_rooms => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Join or save", .kind = .choice } },
         .print_preview => &.{ .{ .label = "PDF file", .hint = "Save printable preview as .pdf" }, .{ .label = "Save how", .kind = .choice } },
-        .connection_features => &.{ .{ .label = "Transport", .kind = .readonly }, .{ .label = "Sign-in", .kind = .readonly }, .{ .label = "Room extras", .kind = .readonly }, .{ .label = "Enabled features", .kind = .readonly } },
+        .connection_features => &.{ .{ .label = "Wire", .kind = .readonly }, .{ .label = "Sign-in", .kind = .readonly }, .{ .label = "Room extras", .kind = .readonly }, .{ .label = "On this wire", .kind = .readonly } },
         .motd => &.{.{ .label = "Bulletin", .hint = "From the wire", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Invitation note", .hint = "Optional" } },
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
         .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
         .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Filter", .hint = "Optional; one word" } },
-        .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Compatibility", .hint = "Portable secure-link invitation", .kind = .readonly } },
+        .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Secure link", .hint = "Portable secure-link invitation", .kind = .readonly } },
         .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Profile", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
 }
@@ -315,10 +315,10 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             &.{ "Room", "CAST", "Server", "Connection", "Link" }
         else
             &.{},
-        .rule_sets => if (index == 0) &.{ "Create", "Rename", "Assign rule", "Advanced limits", "Advanced matching", "Import", "Export" } else &.{},
+        .rule_sets => if (index == 0) &.{ "Create", "Rename", "Assign rule", "Rule limits", "Rule matching", "Import", "Export" } else &.{},
         .advanced_rule_settings => if (index == 1 or index == 2) &.{ "Yes", "No" } else &.{},
         .recent_files => if (index == 1) &.{ "Open", "Remove" } else &.{},
-        .favorite_rooms => if (index == 1) &.{ "Join", "Add current room", "Remove" } else &.{},
+        .favorite_rooms => if (index == 1) &.{ "Join", "Add this room", "Remove" } else &.{},
         .print_preview => if (index == 1) &.{ "Save PDF", "Save PDF and open", "Save PDF and print" } else &.{},
         else => &.{},
     };
@@ -545,7 +545,18 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Bulletin", get(.motd).title);
     try std.testing.expectEqualStrings("Bulletin", fields(.motd)[0].label);
     try std.testing.expectEqualStrings("Sign-in", fields(.connection_features)[1].label);
-    try std.testing.expectEqualStrings("Enabled features", fields(.connection_features)[3].label);
+    try std.testing.expectEqualStrings("On this wire", fields(.connection_features)[3].label);
+    try std.testing.expectEqualStrings("Wire", fields(.connection_features)[0].label);
+    try std.testing.expectEqualStrings("Expression", fields(.character)[1].label);
+    try std.testing.expectEqualStrings("Room password", fields(.channel)[1].label);
+    try std.testing.expectEqualStrings("List limit", fields(.room_list)[2].label);
+    try std.testing.expectEqualStrings("Wire", fields(.notifications)[3].label);
+    try std.testing.expectEqualStrings("Notice", fields(.notifications)[4].label);
+    try std.testing.expectEqualStrings("Secure link", fields(.call_link)[2].label);
+    try std.testing.expectEqualStrings("Rule limits", choiceOptions(.rule_sets, 0)[3]);
+    try std.testing.expectEqualStrings("Rule matching", choiceOptions(.rule_sets, 0)[4]);
+    try std.testing.expectEqualStrings("Add this room", choiceOptions(.favorite_rooms, 1)[1]);
+    try std.testing.expectEqualStrings("In-app banner", choiceOptions(.notifications, 4)[0]);
     try std.testing.expectEqualStrings("Away message", get(.away).title);
     try std.testing.expectEqualStrings("Online CAST", get(.notification_users).title);
     try std.testing.expectEqualStrings("Choose an online CAST member", fields(.notification_users)[1].hint);
@@ -588,6 +599,9 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Show", &.{ "List", "Show" }));
     try std.testing.expect(matchesAny("Read", &.{ "Get", "Read" }));
     try std.testing.expect(matchesAny("Remove", &.{ "Delete", "Remove" }));
+    try std.testing.expect(matchesAny("Remove from list", &.{ "Remove", "Remove from list" }));
+    try std.testing.expect(matchesAny("Advanced limits", &.{ "Rule limits", "Advanced limits" }));
+    try std.testing.expect(matchesAny("Add current room", &.{ "Add this room", "Add current room" }));
     try std.testing.expect(matchesAny("Clear all", &.{ "Clear", "Clear all" }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }

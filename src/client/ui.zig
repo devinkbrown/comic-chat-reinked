@@ -1434,7 +1434,7 @@ pub fn drawInputOverflowMarks(c: *Canvas, rect: Rect, left_hidden: bool, right_h
 pub fn drawBrowseButton(c: *Canvas, rect: Rect, hovered: bool) void {
     drawInkPlate(c, rect.x, rect.y, rect.w, rect.h, 3, if (hovered) current.accent_soft else current.chrome);
     if (hovered) c.fillRect(rect.x + stroke, rect.y + stroke, @max(0, rect.w - stroke * 2), 2, current.accent);
-    _ = c.drawUiText("Browse", rect.x + @max(7, @divTrunc(rect.w - Canvas.uiTextWidth("Browse"), 2)), rect.y + @divTrunc(rect.h - 14, 2), current.accent);
+    _ = c.drawUiText("Choose", rect.x + @max(7, @divTrunc(rect.w - Canvas.uiTextWidth("Choose"), 2)), rect.y + @divTrunc(rect.h - 14, 2), current.accent);
 }
 
 pub fn drawPreviewChoiceCard(c: *Canvas, rect: Rect, active: bool) void {

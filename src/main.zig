@@ -2486,7 +2486,7 @@ fn applyDialogAction(
             return;
         };
         network.reconfigure(request.host, request.port, request.security, monotonicMilliseconds(io)) catch {
-            view.setDialogNotice("Wire failed. Check the server and TLS.");
+            view.setDialogNotice("Wire failed. Check the host and TLS.");
             return;
         };
         resetChatConnectionState(state);
@@ -2772,12 +2772,12 @@ fn applyDialogAction(
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Advanced limits")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Rule limits", "Advanced limits" })) {
                 view.openDialog(.advanced_event_params);
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
             }
-            if (std.ascii.eqlIgnoreCase(operation, "Advanced matching")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Rule matching", "Advanced matching" })) {
                 view.openDialog(.advanced_rule_settings);
                 try prefillOpenedDialog(view, &room.transcript, room.editor.text(), preferences, state, maybe_client);
                 return;
@@ -2954,7 +2954,7 @@ fn applyDialogAction(
             const is_private = view.shell.say_mode == .whisper;
             const target = if (is_private) target: {
                 const member_index = view.shell.selected_member orelse {
-                    view.setDialogNotice("Select a CAST member before sending a whisper sound.");
+                    view.setDialogNotice("Choose a CAST member before sending a whisper sound.");
                     return;
                 };
                 if (member_index >= room.transcript.roster.items.len or room.transcript.roster.items[member_index].departed) {
@@ -3073,7 +3073,7 @@ fn applyDialogAction(
             };
             if (locator.server) |server| if (changes_server) {
                 network.reconfigure(server, network.reconnect.port, network.effectiveOptions().security, monotonicMilliseconds(io)) catch {
-                    view.setDialogNotice("The locator server could not be opened.");
+                    view.setDialogNotice("The locator wire could not be opened.");
                     return;
                 };
                 resetChatConnectionState(state);
@@ -3115,7 +3115,7 @@ fn applyDialogAction(
         },
         .favorite_rooms => {
             const operation = view.dialogValueAt(1);
-            if (std.ascii.eqlIgnoreCase(operation, "Add current room")) {
+            if (cc.client.dialogs.matchesAny(operation, &.{ "Add this room", "Add current room" })) {
                 try preferences.addFavoriteRoom(room.name);
                 try preferences.saveFile(io, network.runtime.preferences_path);
             } else if (std.ascii.eqlIgnoreCase(operation, "Remove")) {
@@ -3262,7 +3262,7 @@ fn applyFileTransferDialog(
     };
     const target = std.mem.trim(u8, view.dialogValueAt(1), " \t");
     if (selectRosterMember(&room.transcript, target) == null) {
-        view.setDialogNotice("Select a CAST member who is still in the current room.");
+        view.setDialogNotice("Choose a CAST member who is still in the current room.");
         return;
     }
     const path = std.mem.trim(u8, view.dialogValueAt(2), " \t");
@@ -4429,7 +4429,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
     }
     if (std.mem.eql(u8, surface, "failed")) {
         view.openDialog(.setup);
-        view.setDialogNotice("Wire failed. Check the server and TLS.");
+        view.setDialogNotice("Wire failed. Check the host and TLS.");
     }
     const preview_input = if (std.mem.eql(u8, surface, "composer"))
         "A polished input should keep the caret visible even when the message becomes wider than the available composer field."

@@ -2119,9 +2119,9 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             else => "Quit",
         },
         1 => switch (item) {
-            0 => "Copy selected lines",
+            0 => "Copy lines",
             1 => "Insert page break",
-            2 => "Delete selected lines",
+            2 => "Delete lines",
             else => "Settings",
         },
         2 => switch (item) {
@@ -3066,7 +3066,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
         ui.drawButton(c, settings.x, settings.y, settings.w, "Settings", .secondary, hovered_action == .settings);
         if (hovered_action == .connection) ui.drawFocusRing(c, connection);
         if (hovered_action == .settings) ui.drawFocusRing(c, settings);
-        ui.drawDismissHint(c, panel, "Esc closes");
+        ui.drawDismissHint(c, panel, "Esc closes panel");
     }
 }
 
@@ -4622,8 +4622,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Connection failed - click for settings"));
     try std.testing.expectEqualStrings("Wire failed - open Wire setup", statusBarLabel("Wire failed - open Wire setup"));
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Wire failed (refused) - open Wire setup"));
-    try std.testing.expectEqualStrings("Copy selected lines", menuItemLabel(1, 0));
-    try std.testing.expectEqualStrings("Delete selected lines", menuItemLabel(1, 2));
+    try std.testing.expectEqualStrings("Copy lines", menuItemLabel(1, 0));
+    try std.testing.expectEqualStrings("Delete lines", menuItemLabel(1, 2));
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
     try std.testing.expectEqualStrings("Name", statusTabLabel("nickname in use"));
     try std.testing.expectEqualStrings("Sign-in name is taken", statusPanelHeading("nickname in use"));
