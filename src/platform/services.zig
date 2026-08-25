@@ -115,6 +115,71 @@ pub fn scaleFromDpi(dpi: u32) u32 {
     return @min(8, @max(1, rounded));
 }
 
+/// First usable payload from a drop: a `file:` URI becomes a local path,
+/// otherwise the first non-empty line is returned as text.
+pub fn firstDropText(text: []const u8, buf: []u8) ?[]const u8 {
+    if (firstPathFromUriList(text, buf)) |path| return path;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const n = @min(line.len, buf.len);
+        if (n == 0) return null;
+        @memcpy(buf[0..n], line[0..n]);
+        return buf[0..n];
+    }
+    return null;
+}
+
+/// First `file:` path in a `text/uri-list` body. Other schemes are skipped.
+pub fn firstPathFromUriList(text: []const u8, buf: []u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (!std.mem.startsWith(u8, line, "file:")) continue;
+        return fileUrlToPath(line, buf);
+    }
+    return null;
+}
+
+fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
+    var rest = url["file:".len..];
+    if (std.mem.startsWith(u8, rest, "//localhost")) rest = rest["//localhost".len..];
+    if (std.mem.startsWith(u8, rest, "//")) rest = rest[1..]; // keep one slash → absolute path
+    if (rest.len == 0) return null;
+    return percentDecode(rest, buf);
+}
+
+fn percentDecode(src: []const u8, buf: []u8) ?[]const u8 {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        if (out >= buf.len) return null;
+        if (src[i] == '%' and i + 2 < src.len) {
+            const hi = hexNibble(src[i + 1]) orelse return null;
+            const lo = hexNibble(src[i + 2]) orelse return null;
+            buf[out] = (hi << 4) | lo;
+            out += 1;
+            i += 3;
+            continue;
+        }
+        buf[out] = if (src[i] == '+') ' ' else src[i];
+        out += 1;
+        i += 1;
+    }
+    return buf[0..out];
+}
+
+fn hexNibble(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
 pub fn parseXftDpi(resources: []const u8) ?u32 {
     var lines = std.mem.splitScalar(u8, resources, '\n');
     while (lines.next()) |line| {
@@ -404,6 +469,15 @@ test "unix connect maps a missing pathname socket to ServerUnavailable" {
         error.ServerUnavailable,
         connectUnixStream(threaded.io(), "/tmp/.comicchat-missing-unix-socket-test"),
     );
+}
+
+test "uri-list drop prefers a local file path and skips comments" {
+    var buf: [128]u8 = undefined;
+    const path = firstPathFromUriList("# comment\r\nhttps://example.test/a\r\nfile:///tmp/chat%20room.ccc\r\n", &buf).?;
+    try std.testing.expectEqualStrings("/tmp/chat room.ccc", path);
+    try std.testing.expectEqualStrings("/tmp/a.ccc", firstPathFromUriList("file://localhost/tmp/a.ccc\n", &buf).?);
+    try std.testing.expect(firstPathFromUriList("https://example.test/a\n", &buf) == null);
+    try std.testing.expectEqualStrings("hello", firstDropText("hello\n", &buf).?);
 }
 
 test "Xft.dpi parser accepts integer and fractional resource lines" {

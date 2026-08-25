@@ -23,8 +23,11 @@
 //! Fractional buffer scale uses `wp_fractional_scale_v1` +
 //! `wp_viewporter` when advertised, otherwise the entered `wl_output`
 //! integer scale. Clipboard uses `wl_data_device` and
-//! `zwp_primary_selection_v1` when present. xdg-shell min/max size matches
-//! the X11 WM size hints.
+//! `zwp_primary_selection_v1` when present, including
+//! `text/plain;charset=utf8` and `text/uri-list`. Text and `file:` drops
+//! arrive as typed keys (no new Event variant). xdg-shell records
+//! maximized/fullscreen configure states and advertises the same min/max
+//! size as the X11 WM hints.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -98,7 +101,11 @@ const xdg_min_width: u32 = 160;
 const xdg_min_height: u32 = 120;
 const xdg_max_width: u32 = 8192;
 const xdg_max_height: u32 = 8192;
+const xdg_state_maximized: u32 = 1;
+const xdg_state_fullscreen: u32 = 2;
 const xdg_state_activated: u32 = 4;
+const data_offer_accept: u16 = 0;
+const data_offer_finish: u16 = 3;
 const text_input_destroy: u16 = 0;
 const text_input_enable: u16 = 1;
 const text_input_disable: u16 = 2;
@@ -111,7 +118,9 @@ const ime_cursor_margin: i32 = 8;
 
 const text_mime_types = [_][]const u8{
     "text/plain;charset=utf-8",
+    "text/plain;charset=utf8",
     "text/plain",
+    "text/uri-list",
     "TEXT",
     "STRING",
     "UTF8_STRING",
@@ -407,6 +416,12 @@ pub const Window = struct {
     pending_offer_id: u32 = 0,
     offer_has_text: bool = false,
     pending_offer_has_text: bool = false,
+    pending_drop_mime: []const u8 = "",
+    dnd_offer_id: u32 = 0,
+    dnd_has_text: bool = false,
+    dnd_mime: []const u8 = "",
+    toplevel_maximized: bool = false,
+    toplevel_fullscreen: bool = false,
     last_serial: u32 = 0,
     clipboard_text: []u8 = &.{},
     axis_have_discrete: bool = false,
@@ -809,6 +824,9 @@ pub const Window = struct {
         if (self.data_offer_id != 0 and msg.object == self.data_offer_id) {
             return try self.dataOfferEvent(msg.opcode, msg.body);
         }
+        if (self.dnd_offer_id != 0 and msg.object == self.dnd_offer_id) {
+            return try self.dataOfferEvent(msg.opcode, msg.body);
+        }
         if (self.pending_offer_id != 0 and msg.object == self.pending_offer_id) {
             return try self.dataOfferEvent(msg.opcode, msg.body);
         }
@@ -845,7 +863,10 @@ pub const Window = struct {
                     const array_len: usize = @intCast(get32(msg.body[8..12]));
                     if (array_len > msg.body.len - 12) return error.InvalidWaylandMessage;
                     if (12 + pad4(array_len) != msg.body.len) return error.InvalidWaylandMessage;
-                    if (configureContainsState(msg.body[12 .. 12 + array_len], xdg_state_activated)) {
+                    const states = msg.body[12 .. 12 + array_len];
+                    self.toplevel_maximized = configureContainsState(states, xdg_state_maximized);
+                    self.toplevel_fullscreen = configureContainsState(states, xdg_state_fullscreen);
+                    if (configureContainsState(states, xdg_state_activated)) {
                         self.refreshTextInput() catch {};
                     }
                     return null;
@@ -1425,6 +1446,14 @@ pub const Window = struct {
             if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
                 if (text.len != 0) {
                     if (last_empty) |prev| gpa.free(prev);
+                    if (std.mem.eql(u8, mime, "text/uri-list")) {
+                        var scratch: [1024]u8 = undefined;
+                        if (services.firstPathFromUriList(text, &scratch)) |path| {
+                            const owned = gpa.dupe(u8, path) catch return text;
+                            gpa.free(text);
+                            return owned;
+                        }
+                    }
                     return text;
                 }
                 if (last_empty) |prev| gpa.free(prev);
@@ -1469,11 +1498,36 @@ pub const Window = struct {
         switch (opcode) {
             0 => { // data_offer
                 if (body.len != 4) return error.InvalidWaylandMessage;
-                if (self.pending_offer_id != 0 and self.pending_offer_id != self.data_offer_id) {
+                if (self.pending_offer_id != 0 and self.pending_offer_id != self.data_offer_id and self.pending_offer_id != self.dnd_offer_id) {
                     sendEmpty(&self.conn, self.pending_offer_id, data_offer_destroy) catch {};
                 }
                 self.pending_offer_id = get32(body);
                 self.pending_offer_has_text = false;
+                self.pending_drop_mime = "";
+            },
+            1 => { // enter(serial, surface, x, y, id)
+                if (body.len != 20) return error.InvalidWaylandMessage;
+                self.last_serial = get32(body[0..4]);
+                self.pointer_x = @divTrunc(getI32(body[8..12]), 256);
+                self.pointer_y = @divTrunc(getI32(body[12..16]), 256);
+                const id = get32(body[16..20]);
+                self.dnd_offer_id = id;
+                self.dnd_has_text = id != 0 and id == self.pending_offer_id and self.pending_offer_has_text;
+                self.dnd_mime = self.pending_drop_mime;
+                if (self.dnd_has_text) {
+                    self.acceptDrop(id, self.last_serial) catch {};
+                }
+            },
+            2 => { // leave
+                self.clearDndOffer();
+            },
+            3 => { // motion(time, x, y)
+                if (body.len != 12) return error.InvalidWaylandMessage;
+                self.pointer_x = @divTrunc(getI32(body[4..8]), 256);
+                self.pointer_y = @divTrunc(getI32(body[8..12]), 256);
+            },
+            4 => { // drop
+                return try self.takeDrop();
             },
             5 => { // selection
                 if (body.len != 4) return error.InvalidWaylandMessage;
@@ -1488,6 +1542,49 @@ pub const Window = struct {
             else => {},
         }
         return null;
+    }
+
+    fn acceptDrop(self: *Window, offer_id: u32, serial: u32) !void {
+        const mime = if (self.dnd_mime.len != 0) self.dnd_mime else "text/plain;charset=utf-8";
+        try sendAccept(&self.conn, self.gpa, offer_id, data_offer_accept, serial, mime);
+    }
+
+    fn takeDrop(self: *Window) !?Event {
+        const offer_id = self.dnd_offer_id;
+        if (offer_id == 0 or !self.dnd_has_text) {
+            self.clearDndOffer();
+            return null;
+        }
+        const bytes = self.receiveOffer(self.gpa, offer_id, data_offer_receive) catch {
+            self.clearDndOffer();
+            return null;
+        };
+        defer self.gpa.free(bytes);
+        sendEmpty(&self.conn, offer_id, data_offer_finish) catch {};
+        self.clearDndOffer();
+        return try self.enqueueDropText(bytes);
+    }
+
+    fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
+        var scratch: [1024]u8 = undefined;
+        const payload = services.firstDropText(bytes, &scratch) orelse bytes;
+        if (!std.unicode.utf8ValidateSlice(payload)) return null;
+        var view = try std.unicode.Utf8View.init(payload);
+        var iterator = view.iterator();
+        while (iterator.nextCodepoint()) |codepoint| {
+            if (self.committed_text.items.len - self.committed_text_offset >= 4096) break;
+            try self.committed_text.append(self.gpa, codepoint);
+        }
+        return self.takeCommittedKey();
+    }
+
+    fn clearDndOffer(self: *Window) void {
+        if (self.dnd_offer_id != 0 and self.dnd_offer_id != self.data_offer_id) {
+            sendEmpty(&self.conn, self.dnd_offer_id, data_offer_destroy) catch {};
+        }
+        self.dnd_offer_id = 0;
+        self.dnd_has_text = false;
+        self.dnd_mime = "";
     }
 
     fn dataSourceEvent(self: *Window, opcode: u16, body: []const u8) !?Event {
@@ -1514,8 +1611,24 @@ pub const Window = struct {
         if (opcode != 0) return null;
         const mime = try parseWireString(body);
         if (isPlainTextMime(mime)) {
-            if (self.pending_offer_id != 0) self.pending_offer_has_text = true;
+            if (self.pending_offer_id != 0) {
+                self.pending_offer_has_text = true;
+                if (knownTextMime(mime)) |known| {
+                    if (self.pending_drop_mime.len == 0 or textMimeRank(known) > textMimeRank(self.pending_drop_mime)) {
+                        self.pending_drop_mime = known;
+                    }
+                }
+            }
             if (self.data_offer_id != 0) self.offer_has_text = true;
+            if (self.dnd_offer_id != 0 and self.dnd_offer_id == self.pending_offer_id) {
+                self.dnd_has_text = true;
+                if (knownTextMime(mime)) |known| {
+                    if (self.dnd_mime.len == 0 or textMimeRank(known) > textMimeRank(self.dnd_mime)) {
+                        self.dnd_mime = known;
+                    }
+                    self.acceptDrop(self.dnd_offer_id, self.last_serial) catch {};
+                }
+            }
         }
         return null;
     }
@@ -1800,6 +1913,19 @@ fn sendTwoU32(conn: *Connection, object: u32, opcode: u16, a: u32, b: u32) !void
     try conn.writeAll(&req);
 }
 
+fn sendAccept(conn: *Connection, gpa: std.mem.Allocator, object: u32, opcode: u16, serial: u32, mime: []const u8) !void {
+    const string_size = try encodedStringSize(mime);
+    const total = try std.math.add(usize, 12, string_size);
+    if (total > std.math.maxInt(u16)) return error.WaylandMessageTooLarge;
+    const req = try gpa.alloc(u8, total);
+    defer gpa.free(req);
+    @memset(req, 0);
+    header(req, object, opcode);
+    put32(req[8..12], serial);
+    encodeString(req[12..], mime);
+    try conn.writeAll(req);
+}
+
 fn sendFourI32(conn: *Connection, object: u32, opcode: u16, a: i32, b: i32, c: i32, d: i32) !void {
     var req: [24]u8 = @splat(0);
     header(&req, object, opcode);
@@ -1893,10 +2019,24 @@ fn configureContainsState(bytes: []const u8, state: u32) bool {
 }
 
 fn isPlainTextMime(mime: []const u8) bool {
+    return knownTextMime(mime) != null;
+}
+
+fn knownTextMime(mime: []const u8) ?[]const u8 {
     for (text_mime_types) |known| {
-        if (std.mem.eql(u8, mime, known)) return true;
+        if (std.mem.eql(u8, mime, known)) return known;
     }
-    return false;
+    return null;
+}
+
+fn textMimeRank(mime: []const u8) u8 {
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf-8")) return 6;
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf8")) return 5;
+    if (std.mem.eql(u8, mime, "text/plain")) return 4;
+    if (std.mem.eql(u8, mime, "UTF8_STRING")) return 3;
+    if (std.mem.eql(u8, mime, "text/uri-list")) return 2;
+    if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
+    return 0;
 }
 
 fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
@@ -2576,9 +2716,12 @@ test "registry records fractional scale, viewporter, and primary selection" {
 
 test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/plain;charset=utf-8"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=utf8"));
+    try std.testing.expect(isPlainTextMime("text/uri-list"));
     try std.testing.expect(isPlainTextMime("TEXT"));
     try std.testing.expect(isPlainTextMime("UTF8_STRING"));
     try std.testing.expect(!isPlainTextMime("image/png"));
+    try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
 }
 
 test "IME cursor rectangle sits on the bottom composer strip" {
@@ -2604,6 +2747,11 @@ test "xdg toplevel configure states include activated" {
     put32(states[0..4], 1);
     put32(states[4..8], 4);
     try std.testing.expect(configureContainsState(&states, xdg_state_activated));
+    try std.testing.expect(configureContainsState(&states, xdg_state_maximized));
     try std.testing.expect(!configureContainsState(states[0..4], xdg_state_activated));
+    var fullscreen: [4]u8 = undefined;
+    put32(fullscreen[0..4], xdg_state_fullscreen);
+    try std.testing.expect(configureContainsState(&fullscreen, xdg_state_fullscreen));
+    try std.testing.expect(!configureContainsState(&fullscreen, xdg_state_maximized));
 }
 const pointer_release: u16 = 1;

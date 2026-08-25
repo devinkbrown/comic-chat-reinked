@@ -11,9 +11,13 @@
 //!   * `Window` — interactive: open/present/nextEvent/fd, with keyboard
 //!     translation (GetKeyboardMapping, including Mod5/AltGr and bounded
 //!     dead-key/Multi_key compose plus optional XCompose locale tables),
-//!     integer HiDPI scale, ICCCM CLIPBOARD+PRIMARY (INCR, UTF8_STRING then
-//!     STRING/TEXT/GTK text MIME, TIMESTAMP, clipboard-manager handoff),
-//!     EWMH ping/type/icon name/user time/allowed actions, WM_TAKE_FOCUS,
+//!     integer HiDPI scale (env + `Xft.dpi`, refreshed on root
+//!     `RESOURCE_MANAGER` changes), ICCCM CLIPBOARD+PRIMARY (INCR,
+//!     UTF8_STRING then STRING/TEXT/GTK text MIME including
+//!     `text/plain;charset=utf8` and `text/uri-list`, TIMESTAMP,
+//!     clipboard-manager handoff), XDND text/`file:` drops injected as
+//!     typed keys, `_NET_WM_STATE` maximize/fullscreen tracking, EWMH
+//!     ping/type/icon name/user time/allowed actions, WM_TAKE_FOCUS,
 //!     WM_LOCALE_NAME, WM size hints, and resize/close events, suitable for
 //!     a poll(2)-driven client event loop.
 
@@ -104,6 +108,22 @@ const XConn = struct {
     save_targets: u32 = 0,
     mime_text_plain: u32 = 0,
     mime_text_utf8: u32 = 0,
+    mime_text_utf8_alt: u32 = 0,
+    mime_uri_list: u32 = 0,
+    xdnd_aware: u32 = 0,
+    xdnd_enter: u32 = 0,
+    xdnd_position: u32 = 0,
+    xdnd_status: u32 = 0,
+    xdnd_leave: u32 = 0,
+    xdnd_drop: u32 = 0,
+    xdnd_finished: u32 = 0,
+    xdnd_selection: u32 = 0,
+    xdnd_type_list: u32 = 0,
+    xdnd_action_copy: u32 = 0,
+    net_wm_state: u32 = 0,
+    net_wm_state_max_horz: u32 = 0,
+    net_wm_state_max_vert: u32 = 0,
+    net_wm_state_fullscreen: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -262,6 +282,12 @@ pub const Window = struct {
     last_user_time: u32,
     compose_table: ?xkb.ComposeTable,
     compose: xkb.Compose,
+    pending_chars: std.ArrayList(u21),
+    xdnd_source: u32,
+    xdnd_has_text: bool,
+    wm_max_horz: bool,
+    wm_max_vert: bool,
+    wm_fullscreen: bool,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
         if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
@@ -308,6 +334,12 @@ pub const Window = struct {
             .last_user_time = 0,
             .compose_table = null,
             .compose = .{},
+            .pending_chars = .empty,
+            .xdnd_source = 0,
+            .xdnd_has_text = false,
+            .wm_max_horz = false,
+            .wm_max_vert = false,
+            .wm_fullscreen = false,
         };
         self.loadComposeFromEnv(env);
         errdefer self.unloadCompose();
@@ -340,6 +372,9 @@ pub const Window = struct {
         try setWmLocaleName(&self.conn, self.window, env);
         try setClientMachine(&self.conn, self.window);
         try setSizeHints(&self.conn, self.window, w, h);
+        try setXdndAware(&self.conn, self.window);
+        try setNetWmState(&self.conn, self.window, &.{});
+        try selectRootPropertyNotify(&self.conn);
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
         try mapWindow(&self.conn, self.window);
@@ -352,6 +387,7 @@ pub const Window = struct {
         self.keymap.deinit(self.gpa);
         self.conn.stream.close(self.conn.io);
         self.threaded.deinit();
+        self.pending_chars.deinit(self.gpa);
         self.unloadCompose();
         self.gpa.destroy(self);
     }
@@ -426,6 +462,7 @@ pub const Window = struct {
     /// Blocking read of the next event. Call only when data is available
     /// (after poll) to avoid stalling, or when blocking is intended.
     pub fn nextEvent(self: *Window) !Event {
+        if (self.takePendingKey()) |event| return event;
         var raw: [32]u8 = undefined;
         try readExact(&self.conn, &raw);
         return self.decode(raw);
@@ -510,6 +547,14 @@ pub const Window = struct {
                 return .{ .resize = .{ .w = w, .h = h } };
             },
             28 => { // PropertyNotify
+                const window = get32(event[4..8]);
+                const atom = get32(event[8..12]);
+                if (window == self.conn.screen.root and atom == atom_resource_manager) {
+                    if (self.refreshScale()) |ev| return ev;
+                }
+                if (window == self.window and atom == self.conn.net_wm_state) {
+                    self.readNetWmState();
+                }
                 self.continueIncr(event);
                 return .other;
             },
@@ -522,7 +567,8 @@ pub const Window = struct {
                 return .other;
             },
             33 => { // ClientMessage
-                if (get32(event[8..12]) == self.conn.wm_protocols) {
+                const typ = get32(event[8..12]);
+                if (typ == self.conn.wm_protocols) {
                     const protocol = get32(event[12..16]);
                     if (protocol == self.conn.wm_delete_window) return .close;
                     if (self.conn.net_wm_ping != 0 and protocol == self.conn.net_wm_ping) {
@@ -531,6 +577,17 @@ pub const Window = struct {
                     if (self.conn.wm_take_focus != 0 and protocol == self.conn.wm_take_focus) {
                         self.claimFocus(get32(event[16..20]));
                     }
+                } else if (typ == self.conn.xdnd_enter) {
+                    self.handleXdndEnter(event);
+                } else if (typ == self.conn.xdnd_position) {
+                    self.handleXdndPosition(event) catch {};
+                } else if (typ == self.conn.xdnd_leave) {
+                    self.xdnd_source = 0;
+                    self.xdnd_has_text = false;
+                } else if (typ == self.conn.xdnd_drop) {
+                    if (self.takeXdndDrop(event)) |ev| return ev;
+                } else if (typ == self.conn.net_wm_state) {
+                    self.applyNetWmStateMessage(event);
                 }
                 return .other;
             },
@@ -584,8 +641,41 @@ pub const Window = struct {
                 }
             } else |_| {}
         }
+        if (self.conn.mime_text_utf8_alt != 0) {
+            if (self.convertTarget(gpa, selection, self.conn.mime_text_utf8_alt, self.conn.mime_text_utf8_alt)) |text| {
+                if (text) |bytes| {
+                    if (bytes.len != 0) return bytes;
+                    gpa.free(bytes);
+                }
+            } else |_| {}
+        }
+        if (self.conn.mime_text_plain != 0) {
+            if (self.convertTarget(gpa, selection, self.conn.mime_text_plain, self.conn.mime_text_plain)) |text| {
+                if (text) |bytes| {
+                    if (bytes.len != 0) return bytes;
+                    gpa.free(bytes);
+                }
+            } else |_| {}
+        }
+        if (self.conn.mime_uri_list != 0) {
+            if (self.convertTarget(gpa, selection, self.conn.mime_uri_list, self.conn.mime_uri_list)) |text| {
+                if (text) |bytes| {
+                    if (self.takeUriListPath(gpa, bytes)) |path| return path;
+                    if (bytes.len != 0) return bytes;
+                    gpa.free(bytes);
+                }
+            } else |_| {}
+        }
         if (self.conn.text == 0) return null;
         return self.convertTarget(gpa, selection, self.conn.text, self.conn.text);
+    }
+
+    fn takeUriListPath(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ?[]u8 {
+        var scratch: [1024]u8 = undefined;
+        const path = services.firstPathFromUriList(bytes, &scratch) orelse return null;
+        const owned = gpa.dupe(u8, path) catch return null;
+        gpa.free(bytes);
+        return owned;
     }
 
     fn convertTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32, property: u32) !?[]u8 {
@@ -752,7 +842,7 @@ pub const Window = struct {
         var served: u32 = 0;
         if (ours and property != 0) {
             if (target == self.conn.targets) {
-                var atoms: [8]u32 = undefined;
+                var atoms: [12]u32 = undefined;
                 var n: usize = 0;
                 atoms[n] = self.conn.targets;
                 n += 1;
@@ -776,6 +866,14 @@ pub const Window = struct {
                 }
                 if (self.conn.mime_text_plain != 0) {
                     atoms[n] = self.conn.mime_text_plain;
+                    n += 1;
+                }
+                if (self.conn.mime_text_utf8_alt != 0) {
+                    atoms[n] = self.conn.mime_text_utf8_alt;
+                    n += 1;
+                }
+                if (self.conn.mime_uri_list != 0) {
+                    atoms[n] = self.conn.mime_uri_list;
                     n += 1;
                 }
                 if (self.conn.incr != 0) {
@@ -836,7 +934,7 @@ pub const Window = struct {
         if (self.conn.clipboard_manager == 0 or self.conn.save_targets == 0) return;
         const owner = getSelectionOwner(&self.conn, self.conn.clipboard_manager) catch return;
         if (owner == 0) return;
-        var targets: [5]u32 = undefined;
+        var targets: [8]u32 = undefined;
         var n: usize = 0;
         if (self.conn.utf8_string != 0) {
             targets[n] = self.conn.utf8_string;
@@ -856,6 +954,14 @@ pub const Window = struct {
             targets[n] = self.conn.mime_text_plain;
             n += 1;
         }
+        if (self.conn.mime_text_utf8_alt != 0) {
+            targets[n] = self.conn.mime_text_utf8_alt;
+            n += 1;
+        }
+        if (self.conn.mime_uri_list != 0) {
+            targets[n] = self.conn.mime_uri_list;
+            n += 1;
+        }
         changePropertyAtoms(&self.conn, self.window, self.conn.save_targets, targets[0..n]) catch return;
         convertSelection(&self.conn, self.window, self.conn.clipboard_manager, self.conn.save_targets, self.conn.save_targets) catch return;
         var attempts: u16 = 0;
@@ -866,6 +972,178 @@ pub const Window = struct {
             if (kind == 31) return;
             _ = self.handleProtocolEvent(raw);
             if (kind == 0) return;
+        }
+    }
+
+    fn takePendingKey(self: *Window) ?Event {
+        if (self.pending_chars.items.len == 0) return null;
+        const ch = self.pending_chars.orderedRemove(0);
+        return .{ .key = .{ .key = .{ .char = ch } } };
+    }
+
+    fn enqueueDropText(self: *Window, bytes: []const u8) !?Event {
+        var scratch: [1024]u8 = undefined;
+        const payload = services.firstDropText(bytes, &scratch) orelse bytes;
+        if (!std.unicode.utf8ValidateSlice(payload)) return null;
+        var view = try std.unicode.Utf8View.init(payload);
+        var iterator = view.iterator();
+        while (iterator.nextCodepoint()) |codepoint| {
+            if (self.pending_chars.items.len >= 4096) break;
+            try self.pending_chars.append(self.gpa, codepoint);
+        }
+        return self.takePendingKey();
+    }
+
+    fn refreshScale(self: *Window) ?Event {
+        const env = services.readEnviron(self.gpa) catch return null;
+        defer self.gpa.free(env);
+        const new_scale = detectScale(self.gpa, &self.conn, env) catch return null;
+        if (new_scale == self.scale) return null;
+        self.scale = new_scale;
+        const w = physicalToLogical(self.pixel_width, new_scale);
+        const h = physicalToLogical(self.pixel_height, new_scale);
+        if (w == self.width and h == self.height) return .expose;
+        self.width = w;
+        self.height = h;
+        return .{ .resize = .{ .w = w, .h = h } };
+    }
+
+    fn handleXdndEnter(self: *Window, event: [32]u8) void {
+        self.xdnd_source = get32(event[12..16]);
+        const info = get32(event[16..20]);
+        const types = [_]u32{ get32(event[20..24]), get32(event[24..28]), get32(event[28..32]) };
+        self.xdnd_has_text = false;
+        for (types) |typ| {
+            if (isClipboardTextTarget(&self.conn, typ)) self.xdnd_has_text = true;
+        }
+        if (!self.xdnd_has_text and (info & 1) != 0) self.readXdndTypeList();
+    }
+
+    fn readXdndTypeList(self: *Window) void {
+        if (self.xdnd_source == 0 or self.conn.xdnd_type_list == 0) return;
+        const bytes = getWindowProperty(self.gpa, &self.conn, self.xdnd_source, self.conn.xdnd_type_list) catch return;
+        defer self.gpa.free(bytes);
+        var off: usize = 0;
+        while (off + 4 <= bytes.len) : (off += 4) {
+            if (isClipboardTextTarget(&self.conn, get32(bytes[off..][0..4]))) {
+                self.xdnd_has_text = true;
+                return;
+            }
+        }
+    }
+
+    fn handleXdndPosition(self: *Window, event: [32]u8) !void {
+        const source = get32(event[12..16]);
+        if (source != 0) self.xdnd_source = source;
+        const flags: u32 = if (self.xdnd_has_text) 0x3 else 0x2; // accept? + no rectangle
+        try sendXdndClientMessage(&self.conn, self.xdnd_source, self.conn.xdnd_status, .{
+            self.window,
+            flags,
+            0,
+            0,
+            self.conn.xdnd_action_copy,
+        });
+    }
+
+    fn takeXdndDrop(self: *Window, event: [32]u8) ?Event {
+        const source = get32(event[12..16]);
+        if (source != 0) self.xdnd_source = source;
+        if (self.xdnd_source == 0 or !self.xdnd_has_text or self.conn.xdnd_selection == 0) {
+            self.finishXdnd(false);
+            return null;
+        }
+        const text = self.convertFirstTextTarget(self.gpa, self.conn.xdnd_selection) catch null;
+        self.finishXdnd(text != null);
+        if (text) |bytes| {
+            defer self.gpa.free(bytes);
+            return self.enqueueDropText(bytes) catch null;
+        }
+        return null;
+    }
+
+    fn convertFirstTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32) !?[]u8 {
+        const targets = [_]u32{
+            self.conn.utf8_string,
+            self.conn.mime_text_utf8,
+            self.conn.mime_text_utf8_alt,
+            self.conn.mime_text_plain,
+            self.conn.mime_uri_list,
+            self.conn.text,
+            atom_string,
+        };
+        for (targets) |target| {
+            if (target == 0) continue;
+            if (self.convertTarget(gpa, selection, target, target)) |text| {
+                if (text) |bytes| {
+                    if (target == self.conn.mime_uri_list) {
+                        if (self.takeUriListPath(gpa, bytes)) |path| return path;
+                    }
+                    if (bytes.len != 0) return bytes;
+                    gpa.free(bytes);
+                }
+            } else |_| {}
+        }
+        return null;
+    }
+
+    fn finishXdnd(self: *Window, accepted: bool) void {
+        if (self.xdnd_source != 0 and self.conn.xdnd_finished != 0) {
+            sendXdndClientMessage(&self.conn, self.xdnd_source, self.conn.xdnd_finished, .{
+                self.window,
+                if (accepted) 1 else 0,
+                self.conn.xdnd_action_copy,
+                0,
+                0,
+            }) catch {};
+        }
+        self.xdnd_source = 0;
+        self.xdnd_has_text = false;
+    }
+
+    fn applyNetWmStateMessage(self: *Window, event: [32]u8) void {
+        const action = get32(event[12..16]);
+        const first = get32(event[16..20]);
+        const second = get32(event[20..24]);
+        self.applyNetWmStateAtom(action, first);
+        if (second != 0) self.applyNetWmStateAtom(action, second);
+    }
+
+    fn applyNetWmStateAtom(self: *Window, action: u32, atom: u32) void {
+        if (atom == 0) return;
+        const add = action == 1 or (action == 2 and !self.hasNetWmState(atom));
+        const remove = action == 0 or (action == 2 and self.hasNetWmState(atom));
+        if (atom == self.conn.net_wm_state_max_horz) {
+            if (add) self.wm_max_horz = true;
+            if (remove) self.wm_max_horz = false;
+        } else if (atom == self.conn.net_wm_state_max_vert) {
+            if (add) self.wm_max_vert = true;
+            if (remove) self.wm_max_vert = false;
+        } else if (atom == self.conn.net_wm_state_fullscreen) {
+            if (add) self.wm_fullscreen = true;
+            if (remove) self.wm_fullscreen = false;
+        }
+    }
+
+    fn hasNetWmState(self: *const Window, atom: u32) bool {
+        if (atom == self.conn.net_wm_state_max_horz) return self.wm_max_horz;
+        if (atom == self.conn.net_wm_state_max_vert) return self.wm_max_vert;
+        if (atom == self.conn.net_wm_state_fullscreen) return self.wm_fullscreen;
+        return false;
+    }
+
+    fn readNetWmState(self: *Window) void {
+        if (self.conn.net_wm_state == 0) return;
+        const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.net_wm_state) catch return;
+        defer self.gpa.free(bytes);
+        self.wm_max_horz = false;
+        self.wm_max_vert = false;
+        self.wm_fullscreen = false;
+        var off: usize = 0;
+        while (off + 4 <= bytes.len) : (off += 4) {
+            const atom = get32(bytes[off..][0..4]);
+            if (atom == self.conn.net_wm_state_max_horz) self.wm_max_horz = true;
+            if (atom == self.conn.net_wm_state_max_vert) self.wm_max_vert = true;
+            if (atom == self.conn.net_wm_state_fullscreen) self.wm_fullscreen = true;
         }
     }
 };
@@ -1399,9 +1677,57 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.save_targets = try internAtom(conn, "SAVE_TARGETS");
     conn.mime_text_plain = try internAtom(conn, "text/plain");
     conn.mime_text_utf8 = try internAtom(conn, "text/plain;charset=utf-8");
+    conn.mime_text_utf8_alt = try internAtom(conn, "text/plain;charset=utf8");
+    conn.mime_uri_list = try internAtom(conn, "text/uri-list");
     conn.net_wm_allowed_actions = try internAtom(conn, "_NET_WM_ALLOWED_ACTIONS");
     conn.wm_take_focus = try internAtom(conn, "WM_TAKE_FOCUS");
     conn.wm_locale_name = try internAtom(conn, "WM_LOCALE_NAME");
+    conn.xdnd_aware = try internAtom(conn, "XdndAware");
+    conn.xdnd_enter = try internAtom(conn, "XdndEnter");
+    conn.xdnd_position = try internAtom(conn, "XdndPosition");
+    conn.xdnd_status = try internAtom(conn, "XdndStatus");
+    conn.xdnd_leave = try internAtom(conn, "XdndLeave");
+    conn.xdnd_drop = try internAtom(conn, "XdndDrop");
+    conn.xdnd_finished = try internAtom(conn, "XdndFinished");
+    conn.xdnd_selection = try internAtom(conn, "XdndSelection");
+    conn.xdnd_type_list = try internAtom(conn, "XdndTypeList");
+    conn.xdnd_action_copy = try internAtom(conn, "XdndActionCopy");
+    conn.net_wm_state = try internAtom(conn, "_NET_WM_STATE");
+    conn.net_wm_state_max_horz = try internAtom(conn, "_NET_WM_STATE_MAXIMIZED_HORZ");
+    conn.net_wm_state_max_vert = try internAtom(conn, "_NET_WM_STATE_MAXIMIZED_VERT");
+    conn.net_wm_state_fullscreen = try internAtom(conn, "_NET_WM_STATE_FULLSCREEN");
+}
+
+fn setXdndAware(conn: *XConn, window: u32) !void {
+    if (conn.xdnd_aware == 0) return;
+    try changeProperty32(conn, window, conn.xdnd_aware, atom_atom, &.{5});
+}
+
+fn setNetWmState(conn: *XConn, window: u32, atoms: []const u32) !void {
+    if (conn.net_wm_state == 0) return;
+    try changePropertyAtoms(conn, window, conn.net_wm_state, atoms);
+}
+
+fn selectRootPropertyNotify(conn: *XConn) !void {
+    try selectPropertyNotify(conn, conn.screen.root);
+}
+
+fn sendXdndClientMessage(conn: *XConn, dest: u32, typ: u32, data: [5]u32) !void {
+    if (dest == 0 or typ == 0) return;
+    var req: [44]u8 = @splat(0);
+    req[0] = 25; // SendEvent
+    put16(req[2..4], 11);
+    put32(req[4..8], dest);
+    req[12] = 33;
+    req[13] = 32;
+    put32(req[16..20], dest);
+    put32(req[20..24], typ);
+    put32(req[24..28], data[0]);
+    put32(req[28..32], data[1]);
+    put32(req[32..36], data[2]);
+    put32(req[36..40], data[3]);
+    put32(req[40..44], data[4]);
+    try writeAll(conn, &req);
 }
 
 fn detectScale(gpa: std.mem.Allocator, conn: *XConn, env: []const u8) !u32 {
@@ -1632,7 +1958,8 @@ fn changeProperty32(conn: *XConn, window: u32, property: u32, typ: u32, values: 
 fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
     if (target == 0) return false;
     return target == conn.utf8_string or target == atom_string or target == conn.text or
-        target == conn.mime_text_plain or target == conn.mime_text_utf8;
+        target == conn.mime_text_plain or target == conn.mime_text_utf8 or
+        target == conn.mime_text_utf8_alt or target == conn.mime_uri_list;
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -1879,10 +2206,14 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_plain = 102,
         .mime_text_utf8 = 103,
         .timestamp = 104,
+        .mime_text_utf8_alt = 105,
+        .mime_uri_list = 106,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
     try std.testing.expect(isClipboardTextTarget(&conn, 103));
+    try std.testing.expect(isClipboardTextTarget(&conn, 105));
+    try std.testing.expect(isClipboardTextTarget(&conn, 106));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 }
 

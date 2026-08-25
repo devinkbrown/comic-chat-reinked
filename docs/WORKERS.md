@@ -83,9 +83,13 @@ hash.
   not claim a full input-method editor — committed IME text uses
   text-input-v3 when advertised, with a multiline hint and a bounded
   composer-strip cursor rectangle. X11 claims focus via `WM_TAKE_FOCUS` /
-  FocusIn and does not speak XIM. See `xkb.zig` and `compose_file.zig` for
-  the exact parsing scope. Do not add an AT-SPI bus or a Wayland→X11
-  fallback.
+  FocusIn and does not speak XIM. Text and `file:` drops use XDND /
+  `wl_data_device` and are injected as existing key events (no new Event
+  variant). Clipboard MIME includes `text/plain;charset=utf8` and
+  `text/uri-list`. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
+  property changes. Both backends track maximized/fullscreen window state.
+  See `xkb.zig` and `compose_file.zig` for the exact parsing scope. Do not
+  add an AT-SPI bus or a Wayland→X11 fallback.
 
 ## Change rules
 
