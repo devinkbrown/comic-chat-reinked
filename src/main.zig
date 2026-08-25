@@ -4073,6 +4073,34 @@ fn sendCreateSlash(
     return true;
 }
 
+fn sendCycleSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    text: []const u8,
+) !bool {
+    const rest = composerSlashRest(text);
+    const named = rest.len != 0 and cc.net.irc_map.isChannelName(workspace.chantypes, rest);
+    const channel_name = if (named) rest else if (workspace.activeRoom()) |active| active.name else "";
+    if (channel_name.len == 0) {
+        try appendSessionNotice(workspace, "Usage: /cycle [#channel]");
+        return true;
+    }
+    const join_key = if (workspace.find(channel_name)) |index|
+        workspace.rooms.items[index].join_key orelse ""
+    else
+        "";
+    if (maybe_client) |client| {
+        client.partReason(channel_name, "cycling") catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        if (try requestJoinWithKey(client, workspace, channel_name, join_key)) |notice| {
+            try appendSessionNotice(workspace, notice);
+        }
+    }
+    return true;
+}
+
 fn handleWorkspaceInputKey(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -4187,6 +4215,13 @@ fn handleWorkspaceInputKey(
             const consumed = try editor.take();
             gpa.free(consumed);
             return true;
+        }
+        if (composerSlashIs(text, "cycle")) {
+            if (try sendCycleSlash(maybe_client, workspace, text)) {
+                const consumed = try editor.take();
+                gpa.free(consumed);
+                return true;
+            }
         }
         if (composerSlashIs(text, "part")) {
             const rest = composerSlashRest(text);
@@ -5366,10 +5401,11 @@ fn sendOnyxServiceSlash(
         return true;
     }
     if (std.ascii.eqlIgnoreCase(verb, "op") or std.ascii.eqlIgnoreCase(verb, "deop") or
-        std.ascii.eqlIgnoreCase(verb, "voice") or std.ascii.eqlIgnoreCase(verb, "devoice"))
+        std.ascii.eqlIgnoreCase(verb, "voice") or std.ascii.eqlIgnoreCase(verb, "devoice") or
+        std.ascii.eqlIgnoreCase(verb, "owner") or std.ascii.eqlIgnoreCase(verb, "deowner"))
     {
         if (count == 0) {
-            try appendSessionNotice(workspace, "Usage: /op|/deop|/voice|/devoice <nick> [#channel]");
+            try appendSessionNotice(workspace, "Usage: /op|/deop|/voice|/devoice|/owner|/deowner <nick> [#channel]");
             return true;
         }
         const named = count > 1 and cc.net.irc_map.isChannelName(workspace.chantypes, words[1]);
@@ -5391,8 +5427,12 @@ fn sendOnyxServiceSlash(
             "-o"
         else if (std.ascii.eqlIgnoreCase(verb, "voice"))
             "+v"
+        else if (std.ascii.eqlIgnoreCase(verb, "devoice"))
+            "-v"
+        else if (std.ascii.eqlIgnoreCase(verb, "owner"))
+            "+q"
         else
-            "-v";
+            "-q";
         client.setMode(channel, flag, nick) catch |err| {
             try rejectServiceIrc(workspace, err);
             return true;
@@ -5421,6 +5461,43 @@ fn sendOnyxServiceSlash(
             client.setBan(channel, mask)
         else
             client.clearBan(channel, mask);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "except") or std.ascii.eqlIgnoreCase(verb, "unexcept") or
+        std.ascii.eqlIgnoreCase(verb, "invex") or std.ascii.eqlIgnoreCase(verb, "uninvex"))
+    {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "That list command needs a room.");
+            return true;
+        };
+        const mask = if (named) (if (count > 1) words[1] else "") else if (count > 0) words[0] else "";
+        const is_except = std.ascii.eqlIgnoreCase(verb, "except") or std.ascii.eqlIgnoreCase(verb, "unexcept");
+        const is_remove = std.ascii.eqlIgnoreCase(verb, "unexcept") or std.ascii.eqlIgnoreCase(verb, "uninvex");
+        if (mask.len == 0) {
+            if (is_remove) {
+                try appendSessionNotice(workspace, "Usage: /unexcept|/uninvex [channel] <mask>");
+                return true;
+            }
+            const send = if (is_except) client.listExceptions(channel) else client.listInviteMasks(channel);
+            send catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const send = if (is_except and !is_remove)
+            client.setException(channel, mask)
+        else if (is_except)
+            client.clearException(channel, mask)
+        else if (!is_remove)
+            client.setInviteMask(channel, mask)
+        else
+            client.clearInviteMask(channel, mask);
         send catch |err| {
             try rejectServiceIrc(workspace, err);
             return true;
@@ -5469,7 +5546,8 @@ fn isOnyxQuerySlash(verb: []const u8) bool {
         "motd",  "version", "time",   "admin",   "info",  "lusers",
         "commands", "names", "list",  "msg",     "notice", "nick",
         "topic", "invite", "mode", "kick", "rename", "ctcp", "ping",
-        "op", "deop", "voice", "devoice", "ban", "unban", "whisper",
+        "op", "deop", "voice", "devoice", "owner", "deowner", "ban", "unban",
+        "except", "unexcept", "invex", "uninvex", "whisper",
     };
     inline for (names) |name| {
         if (std.ascii.eqlIgnoreCase(verb, name)) return true;
@@ -7404,6 +7482,10 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("op"));
     try std.testing.expect(isOnyxServiceSlash("ban"));
     try std.testing.expect(isOnyxServiceSlash("whisper"));
+    try std.testing.expect(isOnyxServiceSlash("owner"));
+    try std.testing.expect(isOnyxServiceSlash("except"));
+    try std.testing.expect(isOnyxServiceSlash("invex"));
+    try std.testing.expect(composerSlashIs("/cycle #root", "cycle"));
     try std.testing.expect(composerSlashIs("/ME waves", "me"));
     try std.testing.expectEqualStrings("waves", composerSlashRest("/ME waves"));
     try std.testing.expect(composerSlashIs("/CLEAR", "clear"));
@@ -8031,6 +8113,16 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     _ = workspace.activate(workspace.find("#root").?);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/whisper alice hi"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WHISPER #root alice :hi") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/owner alice #root"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +q alice") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/except #root good!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +e good!*@*") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/invex #root pal!*@*"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +I pal!*@*") != null);
+    try std.testing.expect(try sendCycleSlash(&client, &workspace, "/cycle #root"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 2].bytes, "PART #root :cycling") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "JOIN #root") != null);
+    try std.testing.expect(workspace.find("#root") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
     try std.testing.expect(!client.projectsSessionChannels());
 
