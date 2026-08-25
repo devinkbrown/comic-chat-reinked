@@ -2557,11 +2557,11 @@ fn applyDialogAction(
             }
             if (limit.len != 0) {
                 for (limit) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
+                    view.setDialogNotice("CAST limit must be a positive number.");
                     return;
                 };
                 if ((std.fmt.parseUnsigned(u32, limit, 10) catch 0) == 0) {
-                    view.setDialogNotice("Maximum users must be a positive number.");
+                    view.setDialogNotice("CAST limit must be a positive number.");
                     return;
                 }
             }
@@ -2893,12 +2893,12 @@ fn applyDialogAction(
             } else {
                 const member = std.mem.trim(u8, view.dialogValueAt(1), " \t");
                 if (!containsIgnoreCase(state.notification_current.items, member)) {
-                    view.setDialogNotice("Choose a member from the refreshed online list.");
+                    view.setDialogNotice("Choose a CAST member from the refreshed online list.");
                     return;
                 }
                 if (std.ascii.eqlIgnoreCase(operation, "Whisper")) {
                     const selected = selectRosterMember(&room.transcript, member) orelse {
-                        view.setDialogNotice("That online user is not in this room.");
+                        view.setDialogNotice("That CAST member is not in this room.");
                         return;
                     };
                     view.shell.selectMember(selected);
@@ -2924,18 +2924,18 @@ fn applyDialogAction(
                 return;
             }
             if (selectRosterMember(&room.transcript, value) == null) {
-                view.setDialogNotice("That member is not in the current room.");
+                view.setDialogNotice("That CAST member is not in the current room.");
                 return;
             }
             try client.sendCallLink(value, link);
         },
         .member_profile => {
             const client = maybe_client orelse {
-                view.setDialogNotice("Connect before requesting a member profile.");
+                view.setDialogNotice("Connect before requesting a CAST profile.");
                 return;
             };
             if (selectRosterMember(&room.transcript, value) == null) {
-                view.setDialogNotice("That member is not in the current room.");
+                view.setDialogNotice("That CAST member is not in the current room.");
                 return;
             }
             try client.requestProfile(value, state.ircx_data);
@@ -2954,11 +2954,11 @@ fn applyDialogAction(
             const is_private = view.shell.say_mode == .whisper;
             const target = if (is_private) target: {
                 const member_index = view.shell.selected_member orelse {
-                    view.setDialogNotice("Select a room member before sending a whisper sound.");
+                    view.setDialogNotice("Select a CAST member before sending a whisper sound.");
                     return;
                 };
                 if (member_index >= room.transcript.roster.items.len or room.transcript.roster.items[member_index].departed) {
-                    view.setDialogNotice("That member is no longer in the room.");
+                    view.setDialogNotice("That CAST member is no longer in the room.");
                     return;
                 }
                 break :target room.transcript.roster.items[member_index].nick;
@@ -2998,7 +2998,7 @@ fn applyDialogAction(
         .invite => if (maybe_client) |client| try client.invite(value, room.name),
         .user_list, .whisper => {
             const selected = selectRosterMember(&room.transcript, value) orelse {
-                view.setDialogNotice("That member is not in the current room.");
+                view.setDialogNotice("That CAST member is not in the current room.");
                 return;
             };
             view.shell.selectMember(selected);
@@ -3262,7 +3262,7 @@ fn applyFileTransferDialog(
     };
     const target = std.mem.trim(u8, view.dialogValueAt(1), " \t");
     if (selectRosterMember(&room.transcript, target) == null) {
-        view.setDialogNotice("Select a member who is still in the current room.");
+        view.setDialogNotice("Select a CAST member who is still in the current room.");
         return;
     }
     const path = std.mem.trim(u8, view.dialogValueAt(2), " \t");
@@ -3281,7 +3281,7 @@ fn applyFileTransferDialog(
         return;
     }
     const host_ip = parseIpv4Number(view.dialogValueAt(3)) orelse {
-        view.setDialogNotice("Enter the IPv4 address the other member should connect to.");
+        view.setDialogNotice("Enter the IPv4 address the other CAST member should connect to.");
         return;
     };
     const port = std.fmt.parseInt(u16, std.mem.trim(u8, view.dialogValueAt(4), " \t"), 10) catch {

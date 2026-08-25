@@ -85,12 +85,12 @@ pub const specs = [_]Spec{
     .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "Personal profile", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose character", .group = .connection, .source_w = 360, .source_h = 260 },
     .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Background", .group = .connection, .source_w = 252, .source_h = 218 },
-    .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick member", .group = .rooms, .source_w = 186, .source_h = 89 },
+    .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Sign-in name", .group = .connection, .source_w = 188, .source_h = 71 },
     .{ .id = .channel, .resource = "IDD_CHANNEL", .title = "Join room", .group = .rooms, .source_w = 144, .source_h = 110 },
     .{ .id = .channel_properties, .resource = "IDD_CHANNELPROP", .title = "Room properties", .group = .rooms, .source_w = 186, .source_h = 196 },
     .{ .id = .ban, .resource = "IDD_BAN", .title = "Ban or unban", .group = .rooms, .source_w = 186, .source_h = 170 },
-    .{ .id = .invite, .resource = "IDD_INVITE", .title = "Invite member", .group = .rooms, .source_w = 186, .source_h = 89 },
+    .{ .id = .invite, .resource = "IDD_INVITE", .title = "Invite CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .sound, .resource = "IDD_SOUND_DLG", .title = "Send sound", .group = .rooms, .source_w = 188, .source_h = 228 },
     .{ .id = .set_text_font, .resource = "IDD_SETTEXTFONT", .title = "Text font", .group = .connection, .source_w = 264, .source_h = 261 },
     .{ .id = .user_list, .resource = "IDD_USERLIST", .title = "CAST list", .group = .rooms, .source_w = 395, .source_h = 263 },
@@ -116,7 +116,7 @@ pub const specs = [_]Spec{
     .{ .id = .notifications, .resource = "IDD_NOTIFICATIONS", .title = "Online notifications", .group = .automation, .source_w = 252, .source_h = 218 },
     .{ .id = .advanced_rule_settings, .resource = "IDD_ADVANCEDRULESETTINGS", .title = "Rule settings", .group = .automation, .source_w = 186, .source_h = 95 },
     .{ .id = .notification_users, .resource = "IDD_NOTIFICATIONUSERS", .title = "Online CAST", .group = .automation, .source_w = 262, .source_h = 111 },
-    .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Servers", .group = .connection, .source_w = 252, .source_h = 218 },
+    .{ .id = .servers, .resource = "IDD_SERVERSPAGE", .title = "Server list", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .password, .resource = "IDD_PASSWORD", .title = "Password", .group = .connection, .source_w = 198, .source_h = 127 },
     .{ .id = .create_set, .resource = "IDD_CREATESET", .title = "Create rule set", .group = .automation, .source_w = 226, .source_h = 79 },
     .{ .id = .open_conversation, .resource = "PORTABLE_OPEN_CONVERSATION", .title = "Open conversation", .group = .files, .source_w = 300, .source_h = 108 },
@@ -126,7 +126,7 @@ pub const specs = [_]Spec{
     .{ .id = .room_access, .resource = "PORTABLE_ROOM_ACCESS", .title = "Room access", .group = .rooms, .source_w = 300, .source_h = 236 },
     .{ .id = .ircx_events, .resource = "PORTABLE_IRCX_EVENTS", .title = "Room events", .group = .rooms, .source_w = 300, .source_h = 184 },
     .{ .id = .call_link, .resource = "PORTABLE_CALL_LINK", .title = "Call link", .group = .connection, .source_w = 300, .source_h = 184 },
-    .{ .id = .member_profile, .resource = "PORTABLE_MEMBER_PROFILE", .title = "Member profile", .group = .connection, .source_w = 300, .source_h = 132 },
+    .{ .id = .member_profile, .resource = "PORTABLE_MEMBER_PROFILE", .title = "CAST profile", .group = .connection, .source_w = 300, .source_h = 132 },
     .{ .id = .open_locator, .resource = "PORTABLE_OPEN_LOCATOR", .title = "Open chat locator", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .recent_files, .resource = "PORTABLE_RECENT_FILES", .title = "Recent conversations", .group = .files, .source_w = 340, .source_h = 150 },
     .{ .id = .favorite_rooms, .resource = "PORTABLE_FAVORITE_ROOMS", .title = "Favorite rooms", .group = .rooms, .source_w = 320, .source_h = 184 },
@@ -179,8 +179,8 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Contrast", .hint = "Ink weight on chrome", .kind = .choice },
             .{ .label = "Conversation view", .hint = "Sunday page or conversation", .kind = .choice },
             .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
-            .{ .label = "Member pane", .hint = "CAST rail visibility", .kind = .choice },
-            .{ .label = "Member layout", .hint = "Portraits or compact list", .kind = .choice },
+            .{ .label = "CAST pane", .hint = "CAST rail visibility", .kind = .choice },
+            .{ .label = "CAST layout", .hint = "Portraits or compact list", .kind = .choice },
             .{ .label = "Status details", .hint = "Activity panel density", .kind = .choice },
         },
         .personal => &.{ .{ .label = "Profile text", .hint = "Shown on your CAST card" }, .{ .label = "Display name", .hint = "Visible sign-in name" }, .{ .label = "Homepage", .hint = "Optional" }, .{ .label = "Email", .hint = "Optional" } },
@@ -197,17 +197,17 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "Room name", .hint = "#room" },
             .{ .label = "Topic", .hint = "Optional" },
             .{ .label = "Room options", .hint = "Optional; one word" },
-            .{ .label = "Maximum users", .hint = "Optional" },
+            .{ .label = "CAST limit", .hint = "Optional" },
             .{ .label = "Optional password", .kind = .password },
         },
-        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "Maximum users", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and limits", .kind = .readonly } },
+        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST limit", .hint = "Optional" }, .{ .label = "Optional password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and limits", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password", .hint = "Needed if the room is locked" }},
         .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "Result limit", .hint = "Optional; blank means unlimited" } },
-        .user_list => &.{ .{ .label = "CAST member", .hint = "Choose a visible room member" }, .{ .label = "Filter", .hint = "Optional name filter" } },
+        .user_list => &.{ .{ .label = "CAST member", .hint = "Choose a visible CAST member" }, .{ .label = "Filter", .hint = "Optional name filter" } },
         .kick => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Reason", .hint = "Optional" }, .{ .label = "Also ban pattern", .hint = "Optional" } },
         .ban => &.{.{ .label = "Ban pattern", .hint = "Name pattern, such as nick!*@*" }},
         .invite, .whisper => &.{.{ .label = "CAST member", .hint = "Visible CAST member" }},
-        .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "Member", .hint = "Select an online CAST member" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Room", .hint = "For Join room, for example #root" } },
+        .notification_users => &.{ .{ .label = "Online now", .hint = "Refresh to query saved notifications", .kind = .readonly }, .{ .label = "CAST member", .hint = "Select an online CAST member" }, .{ .label = "Action", .kind = .choice }, .{ .label = "Room", .hint = "Join path, for example #root" } },
         .away => &.{.{ .label = "Away message", .hint = "Posted while you are away" }},
         .sound => &.{ .{ .label = "Sound file", .kind = .choice }, .{ .label = "Accompanying message", .hint = "Optional" } },
         .set_text_font, .text_font => &.{ .{ .label = "Font name and size", .kind = .choice }, .{ .label = "Style", .hint = "Bold", .kind = .choice } },
@@ -222,7 +222,7 @@ pub fn fields(id: Id) []const Field {
         .advanced_event_params => &.{ .{ .label = "Rule name" }, .{ .label = "Repeat limit", .hint = "0 means unlimited" }, .{ .label = "Repeat window seconds", .hint = "0 means any interval" } },
         .advanced_rule_settings => &.{ .{ .label = "Rule name" }, .{ .label = "Enabled", .kind = .choice }, .{ .label = "Case-sensitive match", .kind = .choice } },
         .notifications => &.{ .{ .label = "Name", .hint = "Name or * pattern" }, .{ .label = "Account pattern", .hint = "*" }, .{ .label = "Address pattern", .hint = "*" }, .{ .label = "Network", .hint = "Optional server" }, .{ .label = "Delivery", .kind = .choice } },
-        .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "Member", .hint = "CAST nickname" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
+        .file_transfer => &.{ .{ .label = "Direction", .kind = .choice }, .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "File or save path", .hint = "Local path" }, .{ .label = "Host / size", .hint = "Address when offering a file" }, .{ .label = "Port / status", .hint = "Listening port, or transfer progress" } },
         .open_conversation => &.{.{ .label = "Conversation file", .hint = "Path to a .ccc file" }},
         .save_conversation => &.{.{ .label = "Conversation file", .hint = "Save as .ccc" }},
         .export_image => &.{.{ .label = "Image file", .hint = "Export as .png" }},
@@ -234,11 +234,11 @@ pub fn fields(id: Id) []const Field {
         .motd => &.{.{ .label = "Bulletin", .hint = "Server supplied", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Invitation note", .hint = "Optional" } },
         .about => &.{ .{ .label = "Comic Chat", .hint = "Portable Ink Sunday client", .kind = .readonly }, .{ .label = "License", .hint = "AGPL-3.0-or-later / printed page", .kind = .readonly } },
-        .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, on-join, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Action", .kind = .choice } },
+        .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Level", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout minutes", .hint = "Optional; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
         .ircx_events => &.{ .{ .label = "Action", .kind = .choice }, .{ .label = "Event", .hint = "Room, member, server, or connection", .kind = .choice }, .{ .label = "Filter", .hint = "Optional; one word" } },
-        .call_link => &.{ .{ .label = "Member", .hint = "CAST nickname" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Compatibility", .hint = "Portable secure-link invitation", .kind = .readonly } },
-        .member_profile => &.{ .{ .label = "Member", .hint = "Visible CAST member" }, .{ .label = "Result", .hint = "Profile is shown in the conversation", .kind = .readonly } },
+        .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Compatibility", .hint = "Portable secure-link invitation", .kind = .readonly } },
+        .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Result", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
 }
 
@@ -464,7 +464,20 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Room", fields(.ircx_properties)[0].label);
     try std.testing.expectEqualStrings("Room options", fields(.channel_create)[2].label);
     try std.testing.expectEqualStrings("Room options", fields(.channel_properties)[1].label);
+    try std.testing.expectEqualStrings("CAST pane", fields(.settings)[5].label);
+    try std.testing.expectEqualStrings("CAST layout", fields(.settings)[6].label);
+    try std.testing.expectEqualStrings("Server list", get(.servers).title);
+    try std.testing.expectEqualStrings("CAST profile", get(.member_profile).title);
+    try std.testing.expectEqualStrings("Kick CAST", get(.kick).title);
+    try std.testing.expectEqualStrings("Invite CAST", get(.invite).title);
+    try std.testing.expectEqualStrings("CAST limit", fields(.channel_create)[3].label);
+    try std.testing.expectEqualStrings("CAST limit", fields(.channel_properties)[2].label);
     try std.testing.expectEqualStrings("CAST member", fields(.whisper)[0].label);
+    try std.testing.expectEqualStrings("CAST member", fields(.file_transfer)[1].label);
+    try std.testing.expectEqualStrings("CAST member", fields(.call_link)[0].label);
+    try std.testing.expectEqualStrings("CAST member", fields(.member_profile)[0].label);
+    try std.testing.expectEqualStrings("Visible sign-in name", fields(.file_transfer)[1].hint);
+    try std.testing.expectEqualStrings("Topic, greeting, or other room properties", fields(.ircx_properties)[1].hint);
     try std.testing.expectEqualStrings("Account pattern", fields(.notifications)[1].label);
     try std.testing.expectEqualStrings("Address pattern", fields(.notifications)[2].label);
     try std.testing.expectEqualStrings("Voice", choiceOptions(.room_access, 1)[0]);

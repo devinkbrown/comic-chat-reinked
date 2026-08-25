@@ -228,6 +228,11 @@ pub const View = struct {
                 .home => self.shell.neutralEmotion(),
                 else => return false,
             },
+            .composer => {
+                if (key != .escape) return false;
+                self.shell.focus = .navigation;
+                return true;
+            },
             else => return false,
         }
         if (self.shell.focus == .members) if (self.shell.selected_member) |selected| {
@@ -335,12 +340,17 @@ pub const View = struct {
             .end => if (total_lines > 0) self.shell.selectTranscriptLine(total_lines, total_lines - 1, extend),
             .page_up => self.pageEarlier(total_lines),
             .page_down => self.pageLater(),
+            .escape => {
+                if (self.shell.transcript_cursor == null) return false;
+                self.shell.transcript_cursor = null;
+                self.shell.transcript_anchor = null;
+            },
             else => return false,
         }
         return true;
     }
 
-    /// Alt+letter opens File/Edit/View/Format/Room/Member/Tools. Alt+Down
+    /// Alt+letter opens File/Edit/View/Format/Room/CAST/Tools. Alt+Down
     /// opens the hovered menu, or File.
     pub fn handleMenuAccelerator(self: *View, key: platform_event.Key, alt: bool) ?Action {
         if (!alt or self.active_dialog != null) return null;
@@ -1628,7 +1638,7 @@ pub const View = struct {
         }
         if (self.context_menu) |kind| {
             const popup = ui.PopupLayout.anchored(self.canvas.width, self.canvas.height, self.context_x, self.context_y, 196, contextItemCount(kind));
-            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "Member actions" else "Body camera actions", .focused = true });
+            snapshot.append(.{ .id = "context-menu", .role = .menu, .bounds = popup.rect, .label = if (kind == .member) "CAST actions" else "Character actions", .focused = true });
             var item: u8 = 0;
             while (item < contextItemCount(kind)) : (item += 1) snapshot.append(.{
                 .id = contextSemanticId(kind, item),
@@ -2028,7 +2038,7 @@ pub const View = struct {
     }
 };
 
-const menu_labels = [_][]const u8{ "File", "Edit", "View", "Format", "Room", "Member", "Tools" };
+const menu_labels = [_][]const u8{ "File", "Edit", "View", "Format", "Room", "CAST", "Tools" };
 
 fn menuStart(menu: u8) i32 {
     var x: i32 = 170;
@@ -2070,9 +2080,9 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
         2 => switch (item) {
             0 => "Comic view",
             1 => "Text view",
-            2 => "Show members",
-            3 => "Member icons",
-            4 => "Member list",
+            2 => "Show CAST",
+            3 => "CAST icons",
+            4 => "CAST list",
             else => "Comic view options",
         },
         3 => switch (item) {
@@ -2100,10 +2110,10 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
         },
         5 => switch (item) {
             0 => "CAST list",
-            1 => "Member profile",
+            1 => "CAST profile",
             2 => "Whisper",
-            3 => "Invite member",
-            4 => "Kick member",
+            3 => "Invite CAST",
+            4 => "Kick CAST",
             5 => "Ban or unban",
             6 => "File transfer",
             else => "Send call link",
@@ -2318,7 +2328,7 @@ fn contextItemLabel(kind: ContextKind, item: u8, frozen: bool) []const u8 {
     return switch (kind) {
         .member => switch (item) {
             0 => "Whisper",
-            1 => "Personal profile",
+            1 => "CAST profile",
             2 => "Invite to room",
             3 => "Kick from room",
             else => "Ban or unban",
@@ -2425,9 +2435,9 @@ fn toolbarLabel(index: u8) []const u8 {
         9 => "Favorite rooms",
         10 => "Set away message",
         11 => "Personal profile",
-        12 => "Ignore member",
+        12 => "Ignore CAST",
         13 => "Send a whisper",
-        14 => "Email member",
+        14 => "Email CAST",
         15 => "Open home page",
         16 => "Start meeting",
         17 => "Choose text font",
@@ -2950,7 +2960,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     ui.drawSectionRule(c, panel.x + 16, panel.y + 60, panel.w - 32);
 
     var members_buf: [32]u8 = undefined;
-    const members = std.fmt.bufPrint(&members_buf, "{d} active member{s}", .{ member_count, if (member_count == 1) "" else "s" }) catch "Member activity";
+    const members = std.fmt.bufPrint(&members_buf, "{d} on CAST", .{member_count}) catch "CAST activity";
     var panels_buf: [32]u8 = undefined;
     const panels = std.fmt.bufPrint(&panels_buf, "{d} panels across", .{shell.comic_columns}) catch "Panel layout";
     const metric_gap: i32 = 8;
@@ -2962,7 +2972,7 @@ fn drawStatusPanel(c: *Canvas, status: []const u8, member_count: usize, shell: s
     }
     if (show_details) {
         const detail_y = first_metric_y + 40;
-        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = detail_y, .w = metric_w, .h = 38 }, "RAIL", if (!shell.show_members) "Pane hidden" else if (shell.member_view == .icons) "Portrait cards" else "Compact list");
+        ui.drawStatusMetricCard(c, .{ .x = panel.x + 18, .y = detail_y, .w = metric_w, .h = 38 }, "RAIL", if (!shell.show_members) "CAST hidden" else if (shell.member_view == .icons) "Portrait cards" else "Compact list");
         const theme_label = switch (appearance.accent) {
             .cobalt => "Vermillion",
             .violet => "Violet",
@@ -3025,7 +3035,7 @@ fn statusPanelHeading(status: []const u8) []const u8 {
     if (tone == .success) return "On the wire";
     if (tone == .failure) return "Wire failed";
     if (std.mem.indexOf(u8, status, "nickname in use") != null) return "Sign-in name is taken";
-    if (std.mem.indexOf(u8, status, "offline") != null) return "Offline";
+    if (std.mem.indexOf(u8, status, "offline") != null) return "Sunday page is offline";
     if (std.mem.indexOf(u8, status, "registering") != null) return "Signing in on the wire";
     if (std.mem.indexOf(u8, status, "joining") != null) return "Joining the Sunday page";
     if (std.mem.indexOf(u8, status, "upgrading") != null) return "Opening a verified wire";
@@ -4421,7 +4431,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Connect to ink the first balloon", offline.detail);
     try std.testing.expectEqualStrings("Connect first", emptyCastCopy("offline"));
     try std.testing.expectEqualStrings("Connect, then ink the next balloon...", composerPlaceholder("offline"));
-    try std.testing.expectEqualStrings("Offline", statusPanelHeading("offline"));
+    try std.testing.expectEqualStrings("Sunday page is offline", statusPanelHeading("offline"));
 
     const waiting = emptyPageCopy("reconnecting");
     try std.testing.expectEqualStrings("Sunday page is waiting", waiting.title);
@@ -4460,8 +4470,17 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Bulletin", menuItemLabel(4, 5));
     try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
     try std.testing.expectEqualStrings("Room events", menuItemLabel(4, 8));
+    try std.testing.expectEqualStrings("Show CAST", menuItemLabel(2, 2));
+    try std.testing.expectEqualStrings("CAST icons", menuItemLabel(2, 3));
+    try std.testing.expectEqualStrings("CAST list", menuItemLabel(2, 4));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
+    try std.testing.expectEqualStrings("CAST profile", menuItemLabel(5, 1));
+    try std.testing.expectEqualStrings("Invite CAST", menuItemLabel(5, 3));
+    try std.testing.expectEqualStrings("Kick CAST", menuItemLabel(5, 4));
     try std.testing.expectEqualStrings("Online CAST", menuItemLabel(6, 6));
+    try std.testing.expectEqualStrings("Ignore CAST", toolbarLabel(12));
+    try std.testing.expectEqualStrings("Email CAST", toolbarLabel(14));
+    try std.testing.expectEqualStrings("CAST", menu_labels[5]);
     try std.testing.expectEqualStrings("Used on the wire and the Sunday page", dialogHelper(.nickname, ""));
     try std.testing.expectEqualStrings("Bulletin", menuItemHint(4, 5, true));
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 6, true));
@@ -4692,6 +4711,22 @@ test "dialog Home and End jump to the first and last choice" {
     try std.testing.expectEqualStrings("Owner", view.dialogValueAt(1));
     _ = try view.handleDialogKey(.up, .{});
     try std.testing.expectEqualStrings("Host", view.dialogValueAt(1));
+}
+
+test "composer Escape returns to the menu bar and transcript Escape clears selection" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.shell.focus = .composer;
+    try std.testing.expect(view.handleFocusedKey(.escape, 0));
+    try std.testing.expectEqual(shell_mod.Focus.navigation, view.shell.focus);
+
+    view.shell.focus = .transcript;
+    view.shell.selectTranscriptLine(4, 2, false);
+    try std.testing.expect(view.handleTranscriptKey(.escape, 4, false));
+    try std.testing.expect(view.shell.transcript_cursor == null);
+    try std.testing.expect(view.shell.transcript_anchor == null);
+    try std.testing.expectEqual(shell_mod.Focus.transcript, view.shell.focus);
+    try std.testing.expect(!view.handleTranscriptKey(.escape, 4, false));
 }
 
 test "member keyboard pages through the CAST" {

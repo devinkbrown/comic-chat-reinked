@@ -50,7 +50,7 @@ pub fn shell(layout: geometry.Layout, comic_mode: bool, member_icons: bool, x: i
 }
 
 fn menuIndex(pointer_x: i32) ?u8 {
-    const items = [_][]const u8{ "File", "Edit", "View", "Format", "Room", "Member", "Tools" };
+    const items = [_][]const u8{ "File", "Edit", "View", "Format", "Room", "CAST", "Tools" };
     var x: i32 = 170;
     for (items, 0..) |item, index| {
         const right = x + Canvas.uiTextWidth(item) + 28;
