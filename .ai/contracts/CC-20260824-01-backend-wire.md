@@ -129,6 +129,14 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - ACCESS/PROP/WHISPER errors `913`–`919`/`923`–`925` are command failures, not raw workflow dumps
 - Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
 
+## Wave 21 leftovers in scope
+
+- Room-properties `MODE +Z` quiet lists `728`/`729` are visible workflow replies
+- `442` marks the seat gone without clearing `want_rejoin` or restoration
+- `470` copies join key / CLIENT only when the destination has none
+- Inbound `RENAME` republishes stored IRCX `CLIENT` under the new name
+- Skip SASL EXTERNAL, password-dialog SASL, NetMeeting, onyx/e2ee, remote art, stored-only ISUPPORT, operator STATS/TRACE/USERS, METADATA (no live UI), and PR #11 UI
+
 ## Wave 19 leftovers in scope
 
 - Notification Join room, `/join`, and automation Join room reuse the stored key and set `want_rejoin`

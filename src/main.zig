@@ -3943,6 +3943,8 @@ fn processWorkspaceMessages(
                 try retargetSessionHint(workspace, state, &state.last_key_channel, old_name, new_name);
                 try retargetSessionHint(workspace, state, &state.last_invite_channel, old_name, new_name);
                 _ = try appendRenameLine(workspace, old_name, new_name);
+                if (workspace.find(new_name)) |index|
+                    republishRoomClientData(client, &workspace.rooms.items[index], state.ircx_data);
                 redraw = true;
             }
         } else if (std.ascii.eqlIgnoreCase(msg.command, "TOPIC") or
@@ -4028,7 +4030,7 @@ fn processWorkspaceMessages(
                 // have a transcript. JOIN confirmation still marks it joined.
                 const startup = try workspace.ensure(channel);
                 workspace.rooms.items[startup].setWantRejoin(true);
-                try client.join(channel);
+                try client.joinWithKey(channel, workspace.rooms.items[startup].join_key orelse "");
             } else for (workspace.rooms.items) |*room| {
                 room.joined = false;
                 if (roomNeedsReconnectJoin(room, client))
@@ -4174,7 +4176,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
         2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
         301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
         322, 323, 325, 328, 329, 341, 346, 347, 348, 349, 364, 365, 367, 368, 372, 375, 376, 381, 396, 422, 466, 671 => true,
-        710, 711, 712, 713, 714, 715, 717, 718, 732, 733, 734 => true,
+        710, 711, 712, 713, 714, 715, 717, 718, 728, 729, 732, 733, 734 => true,
         801...819, 824, 825, 900...908 => true,
         else => false,
     };
@@ -4478,12 +4480,17 @@ fn applyCommandFailure(
     state: *ChatState,
     msg: *const cc.net.message.Message,
 ) !bool {
+    _ = client;
     const subject = msg.param(1) orelse "";
     const detail = msg.param(2) orelse msg.command;
     var buf: [280]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s} {s}: {s}", .{ msg.command, subject, detail }) catch "Command failed.";
     if (std.mem.eql(u8, msg.command, "442") and subject.len > 0) {
-        _ = try applySelfLeftChannel(workspace, client, state, subject, detail);
+        // TOPIC/MODE/KICK 442 means the seat is gone, not that the user left.
+        // Keep want_rejoin and restoration so 001 still JOINs the room.
+        if (workspace.find(subject)) |room_index|
+            workspace.rooms.items[room_index].joined = false;
+        refreshJoinedState(workspace, state, "joining");
     }
     if (workspace.find(subject)) |room_index| {
         try workspace.rooms.items[room_index].transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
@@ -4646,10 +4653,12 @@ fn applyChannelForward(
         const dest_index = workspace.ensure(dest) catch from_index;
         if (dest_index != from_index) {
             if (workspace.find(from)) |source_index| {
-                if (workspace.rooms.items[source_index].join_key) |key|
-                    try workspace.rooms.items[dest_index].setJoinKey(workspace.gpa, key);
-                if (workspace.rooms.items[source_index].client_data) |data|
-                    try workspace.rooms.items[dest_index].setClientData(workspace.gpa, data);
+                if (workspace.rooms.items[dest_index].join_key == null)
+                    if (workspace.rooms.items[source_index].join_key) |key|
+                        try workspace.rooms.items[dest_index].setJoinKey(workspace.gpa, key);
+                if (workspace.rooms.items[dest_index].client_data == null)
+                    if (workspace.rooms.items[source_index].client_data) |data|
+                        try workspace.rooms.items[dest_index].setClientData(workspace.gpa, data);
             }
             workspace.rooms.items[dest_index].setWantRejoin(true);
             _ = workspace.activate(dest_index);
@@ -6093,10 +6102,14 @@ test "live MODE key and command failures update membership state" {
     try std.testing.expect(workspace.rooms.items[root].join_key == null);
     try std.testing.expectEqualStrings("#root", state.last_key_channel.?);
 
+    workspace.rooms.items[root].setWantRejoin(true);
     const noton = cc.net.message.parse(":server 442 me #root :You're not on that channel");
     try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &noton));
     try std.testing.expect(!workspace.rooms.items[root].joined);
-    try std.testing.expect(!client.hasRestorationTargets());
+    try std.testing.expect(workspace.rooms.items[root].want_rejoin);
+    try std.testing.expect(client.hasRestorationTargets());
+    try std.testing.expect(roomNeedsReconnectJoin(&workspace.rooms.items[root], &client) == false);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[root].transcript.lines.items[workspace.rooms.items[root].transcript.lines.items.len - 1].text, "442 #root") != null);
     const forbidden = cc.net.message.parse(":server 482 me #root :You're not channel operator");
     try std.testing.expect(try applyCommandFailure(&workspace, &client, &state, &forbidden));
     try std.testing.expectEqualStrings("not privileged", state.status);
@@ -6195,6 +6208,9 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(!isVisibleServerWorkflowReply("923"));
     try std.testing.expect(isVisibleServerWorkflowReply("804"));
     try std.testing.expect(isVisibleServerWorkflowReply("818"));
+    try std.testing.expect(isVisibleServerWorkflowReply("728"));
+    try std.testing.expect(isVisibleServerWorkflowReply("729"));
+    try std.testing.expect(!isCommandFailureNumeric("728"));
     try std.testing.expect(!canLeaveActiveRoom(1));
     try std.testing.expect(canLeaveActiveRoom(2));
     try std.testing.expect(isAuthFailureNumeric("463"));
@@ -6291,6 +6307,8 @@ test "MOTD, invite, knock, key, and ban helpers stay live" {
     try std.testing.expect(isVisibleServerWorkflowReply("367"));
     try std.testing.expect(isVisibleServerWorkflowReply("368"));
     try std.testing.expect(isVisibleServerWorkflowReply("710"));
+    try std.testing.expect(isVisibleServerWorkflowReply("728"));
+    try std.testing.expect(isVisibleServerWorkflowReply("729"));
 
     try std.testing.expect(try appendKnockLine(&workspace, &state, &cc.net.message.parse(":alice!u@h KNOCK #locked :please")));
     try std.testing.expectEqualStrings("#locked", state.last_invite_channel.?);
@@ -6618,6 +6636,25 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     workspace.rooms.items[vault].joined = true;
     republishJoinedClientData(&client, &workspace);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PROP #vault CLIENT :bk=room;\r\n") != null);
+
+    const kept = try workspace.ensure("#kept");
+    try workspace.rooms.items[kept].setJoinKey(gpa, "keepme");
+    try workspace.rooms.items[kept].setClientData(gpa, "bk=keep;");
+    const other = try workspace.ensure("#other");
+    workspace.rooms.items[other].setWantRejoin(true);
+    try workspace.rooms.items[other].setJoinKey(gpa, "overwrite");
+    try workspace.rooms.items[other].setClientData(gpa, "bk=old;");
+    try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #other #kept :Forwarding")));
+    try std.testing.expectEqualStrings("keepme", workspace.rooms.items[kept].join_key.?);
+    try std.testing.expectEqualStrings("bk=keep;", workspace.rooms.items[kept].client_data.?);
+    try std.testing.expect(workspace.rooms.items[kept].want_rejoin);
+    try std.testing.expect(!workspace.rooms.items[other].want_rejoin);
+
+    try std.testing.expect(try workspace.rename("#vault", "#renamed"));
+    client.renameRestoration("#vault", "#renamed");
+    if (workspace.find("#renamed")) |index|
+        republishRoomClientData(&client, &workspace.rooms.items[index], true);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PROP #renamed CLIENT :bk=room;\r\n") != null);
 
     if (client.features) |*owned_features|
         _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CHANLIMIT=#&:1 :are supported"));
