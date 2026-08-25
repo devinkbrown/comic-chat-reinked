@@ -16,10 +16,11 @@
 //!     UTF8_STRING then STRING/TEXT/GTK text MIME including
 //!     `text/plain;charset=utf8` and `text/uri-list`, TIMESTAMP,
 //!     clipboard-manager handoff), XDND text/`file:` drops injected as
-//!     typed keys, `_NET_WM_STATE` maximize/fullscreen tracking, EWMH
-//!     ping/type/icon name/user time/allowed actions, WM_TAKE_FOCUS,
-//!     WM_LOCALE_NAME, WM size hints, and resize/close events, suitable for
-//!     a poll(2)-driven client event loop.
+//!     typed keys, `_NET_WM_STATE` maximize/fullscreen tracking, a scaled
+//!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
+//!     FocusIn), EWMH ping/type/icon name/user time/allowed actions,
+//!     WM_TAKE_FOCUS, WM_LOCALE_NAME, WM size hints, and resize/close
+//!     events, suitable for a poll(2)-driven client event loop.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -124,6 +125,8 @@ const XConn = struct {
     net_wm_state_max_horz: u32 = 0,
     net_wm_state_max_vert: u32 = 0,
     net_wm_state_fullscreen: u32 = 0,
+    net_wm_icon: u32 = 0,
+    net_wm_state_attention: u32 = 0,
 
     fn allocId(self: *XConn) !u32 {
         const slot = self.next_id & self.resource_mask;
@@ -288,6 +291,8 @@ pub const Window = struct {
     wm_max_horz: bool,
     wm_max_vert: bool,
     wm_fullscreen: bool,
+    cursor_id: u32,
+    wm_urgent: bool,
 
     pub fn open(gpa: std.mem.Allocator, w: u32, h: u32, title: []const u8) !*Window {
         if (w == 0 or h == 0 or w > std.math.maxInt(u16) or h > std.math.maxInt(u16)) {
@@ -340,6 +345,8 @@ pub const Window = struct {
             .wm_max_horz = false,
             .wm_max_vert = false,
             .wm_fullscreen = false,
+            .cursor_id = 0,
+            .wm_urgent = false,
         };
         self.loadComposeFromEnv(env);
         errdefer self.unloadCompose();
@@ -375,6 +382,8 @@ pub const Window = struct {
         try setXdndAware(&self.conn, self.window);
         try setNetWmState(&self.conn, self.window, &.{});
         try selectRootPropertyNotify(&self.conn);
+        try setNetWmIcon(self.gpa, &self.conn, self.window);
+        self.cursor_id = installScaledCursor(self.gpa, &self.conn, self.window, self.scale, env) catch 0;
         self.keymap = try fetchKeymap(gpa, &self.conn);
         errdefer self.keymap.deinit(gpa);
         try mapWindow(&self.conn, self.window);
@@ -388,6 +397,7 @@ pub const Window = struct {
         self.conn.stream.close(self.conn.io);
         self.threaded.deinit();
         self.pending_chars.deinit(self.gpa);
+        if (self.cursor_id != 0) freeCursor(&self.conn, self.cursor_id) catch {};
         self.unloadCompose();
         self.gpa.destroy(self);
     }
@@ -456,6 +466,7 @@ pub const Window = struct {
     }
 
     pub fn notify(self: *Window, gpa: std.mem.Allocator, title: []const u8, body: []const u8) !void {
+        self.demandAttention();
         return services.notify(gpa, self.conn.io, title, body);
     }
 
@@ -525,6 +536,7 @@ pub const Window = struct {
                 } };
             },
             9 => { // FocusIn
+                self.clearAttention();
                 self.claimFocus(self.last_user_time);
                 return .other;
             },
@@ -1131,6 +1143,19 @@ pub const Window = struct {
         return false;
     }
 
+    fn demandAttention(self: *Window) void {
+        self.wm_urgent = true;
+        writeWmHints(&self.conn, self.window, true) catch {};
+        sendNetWmStateClient(&self.conn, self.window, 1, self.conn.net_wm_state_attention) catch {};
+    }
+
+    fn clearAttention(self: *Window) void {
+        if (!self.wm_urgent) return;
+        self.wm_urgent = false;
+        writeWmHints(&self.conn, self.window, false) catch {};
+        sendNetWmStateClient(&self.conn, self.window, 0, self.conn.net_wm_state_attention) catch {};
+    }
+
     fn readNetWmState(self: *Window) void {
         if (self.conn.net_wm_state == 0) return;
         const bytes = getWindowProperty(self.gpa, &self.conn, self.window, self.conn.net_wm_state) catch return;
@@ -1359,8 +1384,13 @@ fn setNetWmPid(conn: *XConn, window: u32) !void {
 }
 
 fn setWmHints(conn: *XConn, window: u32) !void {
+    try writeWmHints(conn, window, false);
+}
+
+fn writeWmHints(conn: *XConn, window: u32, urgent: bool) !void {
     var hints: [9]u32 = @splat(0);
     hints[0] = 1 | 2; // InputHint | StateHint
+    if (urgent) hints[0] |= 1 << 8; // UrgencyHint
     hints[1] = 1; // input
     hints[2] = 1; // NormalState
     try changeProperty32(conn, window, atom_wm_hints, atom_wm_hints, &hints);
@@ -1696,6 +1726,71 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_state_max_horz = try internAtom(conn, "_NET_WM_STATE_MAXIMIZED_HORZ");
     conn.net_wm_state_max_vert = try internAtom(conn, "_NET_WM_STATE_MAXIMIZED_VERT");
     conn.net_wm_state_fullscreen = try internAtom(conn, "_NET_WM_STATE_FULLSCREEN");
+    conn.net_wm_icon = try internAtom(conn, "_NET_WM_ICON");
+    conn.net_wm_state_attention = try internAtom(conn, "_NET_WM_STATE_DEMANDS_ATTENTION");
+}
+
+fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
+    if (conn.net_wm_icon == 0) return;
+    const packed_icon = try services.packNetWmIcon(gpa, &.{ 16, 32 });
+    defer gpa.free(packed_icon);
+    try changePropertyCardinals(conn, window, conn.net_wm_icon, packed_icon);
+}
+
+fn installScaledCursor(gpa: std.mem.Allocator, conn: *XConn, window: u32, scale: u32, env: []const u8) !u32 {
+    var resources: []u8 = &.{};
+    if (getWindowProperty(gpa, conn, conn.screen.root, atom_resource_manager)) |bytes| {
+        resources = bytes;
+    } else |_| {}
+    defer if (resources.len != 0) gpa.free(resources);
+    const size = services.cursorPixelSize(scale, env, resources);
+    const count = try std.math.mul(usize, @as(usize, size), @as(usize, size));
+    const pixels = try gpa.alloc(u32, count);
+    defer gpa.free(pixels);
+    services.fillArrowCursor(pixels, size);
+    const stride = services.bitmapStride(size);
+    const plane_len = stride * @as(usize, size);
+    const source_bits = try gpa.alloc(u8, plane_len);
+    defer gpa.free(source_bits);
+    const mask_bits = try gpa.alloc(u8, plane_len);
+    defer gpa.free(mask_bits);
+    services.encodeBitmapPlane(source_bits, pixels, size, size, true);
+    services.encodeBitmapPlane(mask_bits, pixels, size, size, false);
+
+    const source = try conn.allocId();
+    const mask = try conn.allocId();
+    const gc = try conn.allocId();
+    const cursor = try conn.allocId();
+    try createPixmap(conn, source, 1, @intCast(size), @intCast(size));
+    try createPixmap(conn, mask, 1, @intCast(size), @intCast(size));
+    try createMonoGc(conn, gc, source);
+    try putBitmap(conn, source, gc, source_bits, size, size);
+    try putBitmap(conn, mask, gc, mask_bits, size, size);
+    const hot = services.arrowHotspot(size);
+    try createCursor(conn, cursor, source, mask, hot.x, hot.y);
+    try defineCursor(conn, window, cursor);
+    freeGc(conn, gc) catch {};
+    freePixmap(conn, source) catch {};
+    freePixmap(conn, mask) catch {};
+    return cursor;
+}
+
+fn sendNetWmStateClient(conn: *XConn, window: u32, action: u32, atom: u32) !void {
+    if (conn.net_wm_state == 0 or atom == 0) return;
+    var req: [44]u8 = @splat(0);
+    req[0] = 25; // SendEvent
+    req[1] = 1;
+    put16(req[2..4], 11);
+    put32(req[4..8], conn.screen.root);
+    put32(req[8..12], (1 << 19) | (1 << 20));
+    req[12] = 33;
+    req[13] = 32;
+    put32(req[16..20], window);
+    put32(req[20..24], conn.net_wm_state);
+    put32(req[24..28], action);
+    put32(req[28..32], atom);
+    put32(req[36..40], 1); // source: application
+    try writeAll(conn, &req);
 }
 
 fn setXdndAware(conn: *XConn, window: u32) !void {
@@ -1953,6 +2048,117 @@ fn changeProperty32(conn: *XConn, window: u32, property: u32, typ: u32, values: 
     put32(req[20..24], @intCast(values.len));
     for (values, 0..) |value, i| put32(req[24 + i * 4 .. 28 + i * 4], value);
     try writeAll(conn, req[0..total]);
+}
+
+fn changePropertyCardinals(conn: *XConn, window: u32, property: u32, values: []const u32) !void {
+    if (values.len > 16 * 1024) return error.PropertyTooLarge;
+    const total = 24 + values.len * 4;
+    const req = try std.heap.page_allocator.alloc(u8, total);
+    defer std.heap.page_allocator.free(req);
+    @memset(req, 0);
+    req[0] = 18;
+    req[1] = prop_replace;
+    put16(req[2..4], @intCast(total / 4));
+    put32(req[4..8], window);
+    put32(req[8..12], property);
+    put32(req[12..16], atom_cardinal);
+    req[16] = 32;
+    put32(req[20..24], @intCast(values.len));
+    for (values, 0..) |value, i| put32(req[24 + i * 4 .. 28 + i * 4], value);
+    try writeAll(conn, req);
+}
+
+fn createPixmap(conn: *XConn, pixmap: u32, depth: u8, w: u16, h: u16) !void {
+    var req: [16]u8 = @splat(0);
+    req[0] = 53;
+    req[1] = depth;
+    put16(req[2..4], 4);
+    put32(req[4..8], pixmap);
+    put32(req[8..12], conn.screen.root);
+    put16(req[12..14], w);
+    put16(req[14..16], h);
+    try writeAll(conn, &req);
+}
+
+fn createMonoGc(conn: *XConn, gc: u32, drawable: u32) !void {
+    var req: [24]u8 = @splat(0);
+    req[0] = 55;
+    put16(req[2..4], 6);
+    put32(req[4..8], gc);
+    put32(req[8..12], drawable);
+    put32(req[12..16], gc_foreground | gc_background);
+    put32(req[16..20], 1);
+    put32(req[20..24], 0);
+    try writeAll(conn, &req);
+}
+
+fn putBitmap(conn: *XConn, drawable: u32, gc: u32, bits: []const u8, w: u32, h: u32) !void {
+    const padded = pad4(bits.len);
+    const req = try std.heap.page_allocator.alloc(u8, 24 + padded);
+    defer std.heap.page_allocator.free(req);
+    @memset(req, 0);
+    req[0] = 72;
+    req[1] = z_pixmap;
+    put16(req[2..4], @intCast((24 + padded) / 4));
+    put32(req[4..8], drawable);
+    put32(req[8..12], gc);
+    put16(req[12..14], @intCast(w));
+    put16(req[14..16], @intCast(h));
+    req[21] = 1;
+    if (bits.len != 0) @memcpy(req[24 .. 24 + bits.len], bits);
+    try writeAll(conn, req);
+}
+
+fn createCursor(conn: *XConn, cursor: u32, source: u32, mask: u32, hot_x: u32, hot_y: u32) !void {
+    var req: [32]u8 = @splat(0);
+    req[0] = 93;
+    put16(req[2..4], 8);
+    put32(req[4..8], cursor);
+    put32(req[8..12], source);
+    put32(req[12..16], mask);
+    put16(req[16..18], 0);
+    put16(req[18..20], 0);
+    put16(req[20..22], 0);
+    put16(req[22..24], 0xffff);
+    put16(req[24..26], 0xffff);
+    put16(req[26..28], 0xffff);
+    put16(req[28..30], @intCast(hot_x));
+    put16(req[30..32], @intCast(hot_y));
+    try writeAll(conn, &req);
+}
+
+fn defineCursor(conn: *XConn, window: u32, cursor: u32) !void {
+    var req: [16]u8 = @splat(0);
+    req[0] = 2;
+    put16(req[2..4], 4);
+    put32(req[4..8], window);
+    put32(req[8..12], 1 << 14); // CWCursor
+    put32(req[12..16], cursor);
+    try writeAll(conn, &req);
+}
+
+fn freeCursor(conn: *XConn, cursor: u32) !void {
+    var req: [8]u8 = @splat(0);
+    req[0] = 95;
+    put16(req[2..4], 2);
+    put32(req[4..8], cursor);
+    try writeAll(conn, &req);
+}
+
+fn freePixmap(conn: *XConn, pixmap: u32) !void {
+    var req: [8]u8 = @splat(0);
+    req[0] = 54;
+    put16(req[2..4], 2);
+    put32(req[4..8], pixmap);
+    try writeAll(conn, &req);
+}
+
+fn freeGc(conn: *XConn, gc: u32) !void {
+    var req: [8]u8 = @splat(0);
+    req[0] = 60;
+    put16(req[2..4], 2);
+    put32(req[4..8], gc);
+    try writeAll(conn, &req);
 }
 
 fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {

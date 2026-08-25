@@ -25,9 +25,12 @@
 //! integer scale. Clipboard uses `wl_data_device` and
 //! `zwp_primary_selection_v1` when present, including
 //! `text/plain;charset=utf8` and `text/uri-list`. Text and `file:` drops
-//! arrive as typed keys (no new Event variant). xdg-shell records
+//! arrive as typed keys (no new Event variant). A `wp_cursor_shape_v1`
+//! default pointer is used when advertised, otherwise a scaled shm arrow.
+//! `xdg_toplevel_icon_v1` is set when advertised. xdg-shell records
 //! maximized/fullscreen configure states and advertises the same min/max
-//! size as the X11 WM hints.
+//! size as the X11 WM hints. High-resolution `axis_value120` wheels snap
+//! to the same logical ticks as discrete axes.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -63,6 +66,14 @@ const seat_get_pointer: u16 = 0;
 const seat_get_keyboard: u16 = 1;
 const seat_get_touch: u16 = 2;
 const seat_release: u16 = 3;
+const pointer_set_cursor: u16 = 0;
+const cursor_shape_get_pointer: u16 = 1;
+const cursor_shape_set_shape: u16 = 1;
+const cursor_shape_default: u32 = 1;
+const toplevel_icon_create_icon: u16 = 1;
+const toplevel_icon_set_icon: u16 = 2;
+const toplevel_icon_set_name: u16 = 1;
+const toplevel_icon_add_buffer: u16 = 2;
 const keyboard_release: u16 = 0;
 const data_device_manager_create_data_source: u16 = 0;
 const data_device_manager_get_data_device: u16 = 1;
@@ -146,6 +157,8 @@ const Globals = struct {
     viewporter: Global = .{},
     fractional_manager: Global = .{},
     primary_manager: Global = .{},
+    cursor_shape_manager: Global = .{},
+    toplevel_icon_manager: Global = .{},
 
     fn record(self: *Globals, name: u32, interface: []const u8, version: u32) void {
         const value = Global{ .name = name, .version = version };
@@ -170,6 +183,10 @@ const Globals = struct {
             self.fractional_manager = value;
         } else if (std.mem.eql(u8, interface, "zwp_primary_selection_device_manager_v1") and self.primary_manager.name == 0) {
             self.primary_manager = value;
+        } else if (std.mem.eql(u8, interface, "wp_cursor_shape_manager_v1") and self.cursor_shape_manager.name == 0) {
+            self.cursor_shape_manager = value;
+        } else if (std.mem.eql(u8, interface, "xdg_toplevel_icon_manager_v1") and self.toplevel_icon_manager.name == 0) {
+            self.toplevel_icon_manager = value;
         }
     }
 };
@@ -422,6 +439,15 @@ pub const Window = struct {
     dnd_mime: []const u8 = "",
     toplevel_maximized: bool = false,
     toplevel_fullscreen: bool = false,
+    cursor_shape_manager_id: u32 = 0,
+    cursor_shape_device_id: u32 = 0,
+    cursor_surface_id: u32 = 0,
+    cursor_buffer: ?Buffer = null,
+    cursor_hotspot_x: i32 = 1,
+    cursor_hotspot_y: i32 = 1,
+    toplevel_icon_manager_id: u32 = 0,
+    toplevel_icon_id: u32 = 0,
+    icon_buffer: ?Buffer = null,
     last_serial: u32 = 0,
     clipboard_text: []u8 = &.{},
     axis_have_discrete: bool = false,
@@ -511,7 +537,7 @@ pub const Window = struct {
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.shm, "wl_shm", 1, self.shm_id);
 
         self.seat_id = try self.conn.allocId();
-        self.seat_version = @min(globals.seat.version, 5);
+        self.seat_version = @min(globals.seat.version, 8);
         try sendBind(&self.conn, self.gpa, self.registry_id, globals.seat, "wl_seat", self.seat_version, self.seat_id);
 
         self.xdg_wm_base_id = try self.conn.allocId();
@@ -536,6 +562,14 @@ pub const Window = struct {
             try sendBind(&self.conn, self.gpa, self.registry_id, globals.primary_manager, "zwp_primary_selection_device_manager_v1", 1, self.primary_manager_id);
             self.primary_device_id = try self.conn.allocId();
             try sendTwoU32(&self.conn, self.primary_manager_id, primary_manager_get_device, self.primary_device_id, self.seat_id);
+        }
+        if (globals.cursor_shape_manager.name != 0) {
+            self.cursor_shape_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.cursor_shape_manager, "wp_cursor_shape_manager_v1", 1, self.cursor_shape_manager_id);
+        }
+        if (globals.toplevel_icon_manager.name != 0) {
+            self.toplevel_icon_manager_id = try self.conn.allocId();
+            try sendBind(&self.conn, self.gpa, self.registry_id, globals.toplevel_icon_manager, "xdg_toplevel_icon_manager_v1", 1, self.toplevel_icon_manager_id);
         }
         if (globals.text_input_manager.name != 0) {
             self.text_input_manager_id = try self.conn.allocId();
@@ -574,6 +608,7 @@ pub const Window = struct {
             _ = try self.dispatch(msg);
         }
         if (!self.argb_supported) return error.Argb8888Unsupported;
+        self.installToplevelIcon() catch {};
         return self;
     }
 
@@ -614,6 +649,8 @@ pub const Window = struct {
         if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         for (self.buffers.items) |*buffer| buffer.deinit();
         self.buffers.deinit(self.gpa);
+        if (self.cursor_buffer) |*buffer| buffer.deinit();
+        if (self.icon_buffer) |*buffer| buffer.deinit();
         self.committed_text.deinit(self.gpa);
         self.threaded.deinit();
         self.unloadCompose();
@@ -908,6 +945,10 @@ pub const Window = struct {
             if (self.pointer_id == 0) {
                 self.pointer_id = try self.conn.allocId();
                 try sendOneU32(&self.conn, self.seat_id, seat_get_pointer, self.pointer_id);
+                if (self.cursor_shape_manager_id != 0 and self.cursor_shape_device_id == 0) {
+                    self.cursor_shape_device_id = try self.conn.allocId();
+                    try sendTwoU32(&self.conn, self.cursor_shape_manager_id, cursor_shape_get_pointer, self.cursor_shape_device_id, self.pointer_id);
+                }
             }
         } else if (self.pointer_id != 0) {
             if (self.seat_version >= 3) try sendEmpty(&self.conn, self.pointer_id, pointer_release);
@@ -1061,6 +1102,7 @@ pub const Window = struct {
                 self.last_serial = get32(body[0..4]);
                 self.pointer_x = @divTrunc(getI32(body[8..12]), 256);
                 self.pointer_y = @divTrunc(getI32(body[12..16]), 256);
+                self.applyPointerCursor();
                 return .{ .pointer = .{ .kind = .move, .x = self.pointer_x, .y = self.pointer_y } };
             },
             1 => { // leave(serial, surface)
@@ -1076,6 +1118,7 @@ pub const Window = struct {
             3 => { // button(serial, time, button, state)
                 if (body.len != 16) return error.InvalidWaylandMessage;
                 self.last_serial = get32(body[0..4]);
+                self.applyPointerCursor();
                 const button: shared_event.PointerButton = switch (get32(body[8..12])) {
                     0x110 => .primary,
                     0x111 => .secondary,
@@ -1126,6 +1169,18 @@ pub const Window = struct {
                     .x = self.pointer_x,
                     .y = self.pointer_y,
                     .wheel_y = if (discrete < 0) 1 else if (discrete > 0) -1 else 0,
+                } };
+            },
+            9 => { // axis_value120(axis, value120)
+                if (body.len != 8) return error.InvalidWaylandMessage;
+                if (get32(body[0..4]) != 0) return null;
+                self.axis_have_discrete = true;
+                const value = getI32(body[4..8]);
+                return .{ .pointer = .{
+                    .kind = .wheel,
+                    .x = self.pointer_x,
+                    .y = self.pointer_y,
+                    .wheel_y = if (value < 0) 1 else if (value > 0) -1 else 0,
                 } };
             },
             else => return null,
@@ -1688,6 +1743,55 @@ pub const Window = struct {
         return null;
     }
 
+    fn applyPointerCursor(self: *Window) void {
+        if (self.pointer_id == 0 or self.last_serial == 0) return;
+        if (self.cursor_shape_device_id != 0) {
+            sendTwoU32(&self.conn, self.cursor_shape_device_id, cursor_shape_set_shape, self.last_serial, cursor_shape_default) catch {};
+            return;
+        }
+        self.ensureFallbackCursor() catch return;
+        sendSetCursor(&self.conn, self.pointer_id, self.last_serial, self.cursor_surface_id, self.cursor_hotspot_x, self.cursor_hotspot_y) catch {};
+    }
+
+    fn ensureFallbackCursor(self: *Window) !void {
+        if (self.cursor_surface_id != 0 and self.cursor_buffer != null) return;
+        const size: u32 = services.cursorPixelSize(self.output_scale, "", "");
+        const count = try std.math.mul(usize, @as(usize, size), @as(usize, size));
+        const pixels = try self.gpa.alloc(u32, count);
+        defer self.gpa.free(pixels);
+        services.fillArrowCursor(pixels, size);
+        const buffer = try self.createBuffer(size, size);
+        const destination: []u32 = std.mem.bytesAsSlice(u32, buffer.memory);
+        @memcpy(destination[0..count], pixels);
+        if (self.cursor_surface_id == 0) {
+            self.cursor_surface_id = try self.conn.allocId();
+            try sendOneU32(&self.conn, self.compositor_id, compositor_create_surface, self.cursor_surface_id);
+        }
+        try sendAttach(&self.conn, self.cursor_surface_id, buffer.id);
+        try sendDamage(&self.conn, self.cursor_surface_id, surface_damage, size, size);
+        try sendEmpty(&self.conn, self.cursor_surface_id, surface_commit);
+        const hot = services.arrowHotspot(size);
+        self.cursor_hotspot_x = @intCast(hot.x);
+        self.cursor_hotspot_y = @intCast(hot.y);
+        self.cursor_buffer = buffer;
+    }
+
+    fn installToplevelIcon(self: *Window) !void {
+        if (self.toplevel_icon_manager_id == 0 or self.xdg_toplevel_id == 0) return;
+        self.toplevel_icon_id = try self.conn.allocId();
+        try sendOneU32(&self.conn, self.toplevel_icon_manager_id, toplevel_icon_create_icon, self.toplevel_icon_id);
+        try sendString(&self.conn, self.gpa, self.toplevel_icon_id, toplevel_icon_set_name, "applications-internet");
+        const size: u32 = 32;
+        var pixels: [32 * 32]u32 = undefined;
+        services.fillWindowMark(&pixels, size);
+        const buffer = try self.createBuffer(size, size);
+        const destination: []u32 = std.mem.bytesAsSlice(u32, buffer.memory);
+        @memcpy(destination[0 .. 32 * 32], &pixels);
+        try sendTwoU32(&self.conn, self.toplevel_icon_id, toplevel_icon_add_buffer, buffer.id, 1);
+        try sendTwoU32(&self.conn, self.toplevel_icon_manager_id, toplevel_icon_set_icon, self.xdg_toplevel_id, self.toplevel_icon_id);
+        self.icon_buffer = buffer;
+    }
+
     fn createBuffer(self: *Window, w: u32, h: u32) !Buffer {
         const stride = try std.math.mul(usize, @as(usize, w), 4);
         const byte_len = try std.math.mul(usize, stride, @as(usize, h));
@@ -1762,6 +1866,13 @@ pub const Window = struct {
         if (self.primary_manager_id != 0) try sendEmpty(&self.conn, self.primary_manager_id, 2);
         if (self.text_input_id != 0) try sendEmpty(&self.conn, self.text_input_id, text_input_destroy);
         if (self.text_input_manager_id != 0) try sendEmpty(&self.conn, self.text_input_manager_id, 0);
+        if (self.cursor_shape_device_id != 0) try sendEmpty(&self.conn, self.cursor_shape_device_id, 0);
+        if (self.cursor_shape_manager_id != 0) try sendEmpty(&self.conn, self.cursor_shape_manager_id, 0);
+        if (self.cursor_surface_id != 0) try sendEmpty(&self.conn, self.cursor_surface_id, surface_destroy);
+        if (self.cursor_buffer) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
+        if (self.toplevel_icon_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_id, 0);
+        if (self.icon_buffer) |buffer| try sendEmpty(&self.conn, buffer.id, buffer_destroy);
+        if (self.toplevel_icon_manager_id != 0) try sendEmpty(&self.conn, self.toplevel_icon_manager_id, 0);
         if (self.xdg_toplevel_id != 0) try sendEmpty(&self.conn, self.xdg_toplevel_id, xdg_toplevel_destroy);
         if (self.xdg_surface_id != 0) try sendEmpty(&self.conn, self.xdg_surface_id, xdg_surface_destroy);
         if (self.surface_id != 0) try sendEmpty(&self.conn, self.surface_id, surface_destroy);
@@ -1933,6 +2044,16 @@ fn sendFourI32(conn: *Connection, object: u32, opcode: u16, a: i32, b: i32, c: i
     putI32(req[12..16], b);
     putI32(req[16..20], c);
     putI32(req[20..24], d);
+    try conn.writeAll(&req);
+}
+
+fn sendSetCursor(conn: *Connection, pointer: u32, serial: u32, surface: u32, hotspot_x: i32, hotspot_y: i32) !void {
+    var req: [24]u8 = @splat(0);
+    header(&req, pointer, pointer_set_cursor);
+    put32(req[8..12], serial);
+    put32(req[12..16], surface);
+    putI32(req[16..20], hotspot_x);
+    putI32(req[20..24], hotspot_y);
     try conn.writeAll(&req);
 }
 
@@ -2709,9 +2830,13 @@ test "registry records fractional scale, viewporter, and primary selection" {
     globals.record(3, "wp_viewporter", 1);
     globals.record(4, "wp_fractional_scale_manager_v1", 1);
     globals.record(5, "zwp_primary_selection_device_manager_v1", 1);
+    globals.record(6, "wp_cursor_shape_manager_v1", 1);
+    globals.record(7, "xdg_toplevel_icon_manager_v1", 1);
     try std.testing.expectEqual(@as(u32, 3), globals.viewporter.name);
     try std.testing.expectEqual(@as(u32, 4), globals.fractional_manager.name);
     try std.testing.expectEqual(@as(u32, 5), globals.primary_manager.name);
+    try std.testing.expectEqual(@as(u32, 6), globals.cursor_shape_manager.name);
+    try std.testing.expectEqual(@as(u32, 7), globals.toplevel_icon_manager.name);
 }
 
 test "plain-text MIME set covers UTF-8 and ICCCM names" {

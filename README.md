@@ -274,18 +274,20 @@ to the shared interaction contract, tracks entered `wl_output` integer scale
 plus `wp_fractional_scale_v1` / `wp_viewporter` when advertised, advertises
 xdg-shell min/max size, tracks maximized/fullscreen configure states, copies
 through `wl_data_device` and `zwp_primary_selection_v1` (including
-`text/plain;charset=utf8` and `text/uri-list`), and injects text/`file:`
-drops as typed keys.
+`text/plain;charset=utf8` and `text/uri-list`), injects text/`file:`
+drops as typed keys, shows a `wp_cursor_shape_v1` or scaled shm pointer,
+and sets `xdg_toplevel_icon_v1` when advertised.
 X11 authenticates with MIT-MAGIC-COOKIE-1, talks to local UNIX sockets or
 TCP `host:N` / `localhost:N` (`ssh -X`), presents integer HiDPI frames from
 `GDK_SCALE`/`GDK_DPI_SCALE`/`Xft.dpi` (refreshing `Xft.dpi` when the root
 `RESOURCE_MANAGER` property changes), owns ICCCM CLIPBOARD+PRIMARY including
 INCR with STRING/TEXT/GTK text MIME, `text/uri-list`, and `TIMESTAMP`,
 accepts XDND text/`file:` drops as typed keys, tracks `_NET_WM_STATE`
-maximize/fullscreen, hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when
-present, claims focus via `WM_TAKE_FOCUS`, sets `_NET_WM_ICON_NAME`,
-`_NET_WM_USER_TIME`, `_NET_WM_ALLOWED_ACTIONS`, and `WM_LOCALE_NAME`, and
-replies to `_NET_WM_PING`.
+maximize/fullscreen, installs a scaled core pointer and `_NET_WM_ICON`,
+raises urgency on `notify` until FocusIn, hands CLIPBOARD to
+`CLIPBOARD_MANAGER` on exit when present, claims focus via `WM_TAKE_FOCUS`,
+sets `_NET_WM_ICON_NAME`, `_NET_WM_USER_TIME`, `_NET_WM_ALLOWED_ACTIONS`,
+and `WM_LOCALE_NAME`, and replies to `_NET_WM_PING`.
 Win32 uses per-monitor-v2 DPI geometry, Unicode/IME input, the Unicode
 clipboard, and native common dialogs. Window creation, configure/resize,
 scaled presentation, keyboard/pointer input, IRC traffic, and clean close

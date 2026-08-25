@@ -203,6 +203,168 @@ pub fn parseXftDpi(resources: []const u8) ?u32 {
     return null;
 }
 
+pub fn parseXcursorSize(resources: []const u8) ?u32 {
+    var lines = std.mem.splitScalar(u8, resources, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, "Xcursor.size")) continue;
+        const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
+        const value = std.mem.trim(u8, trimmed[colon + 1 ..], " \t");
+        return parseCursorPx(value);
+    }
+    return null;
+}
+
+pub fn cursorPixelSize(scale: u32, env: []const u8, resources: []const u8) u32 {
+    if (environValue(env, "XCURSOR_SIZE")) |value| {
+        if (parseCursorPx(value)) |size| return size;
+    }
+    if (parseXcursorSize(resources)) |size| return size;
+    return @min(64, @max(16, 16 * @max(scale, 1)));
+}
+
+fn parseCursorPx(value: []const u8) ?u32 {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+    const parsed = std.fmt.parseInt(u32, trimmed, 10) catch return null;
+    if (parsed < 8 or parsed > 128) return null;
+    return parsed;
+}
+
+/// Geometric taskbar mark: navy tile, cream balloon. Not comic artwork.
+pub fn fillWindowMark(dst: []u32, size: u32) void {
+    if (size == 0 or dst.len < @as(usize, size) * @as(usize, size)) return;
+    const navy: u32 = 0xff16324f;
+    const cream: u32 = 0xfff4e6c8;
+    const ink: u32 = 0xff2b1d12;
+    @memset(dst[0 .. @as(usize, size) * @as(usize, size)], 0);
+    const margin = @max(1, size / 8);
+    var y: u32 = 0;
+    while (y < size) : (y += 1) {
+        var x: u32 = 0;
+        while (x < size) : (x += 1) {
+            const edge = x < margin or y < margin or x + margin >= size or y + margin >= size;
+            dst[@as(usize, y) * size + x] = if (edge) ink else navy;
+        }
+    }
+    const balloon_x0 = size / 4;
+    const balloon_x1 = size - size / 6;
+    const balloon_y0 = size / 5;
+    const balloon_y1 = size - size / 3;
+    var by = balloon_y0;
+    while (by < balloon_y1) : (by += 1) {
+        var bx = balloon_x0;
+        while (bx < balloon_x1) : (bx += 1) {
+            dst[@as(usize, by) * size + bx] = cream;
+        }
+    }
+    var tail: u32 = 0;
+    while (tail < size / 5) : (tail += 1) {
+        const tx = balloon_x0 + tail;
+        const ty = balloon_y1 + tail / 2;
+        if (tx < size and ty < size) dst[@as(usize, ty) * size + tx] = cream;
+    }
+}
+
+/// Classic left-pointing arrow with a white outline. `size` is the pixmap edge.
+pub fn fillArrowCursor(dst: []u32, size: u32) void {
+    if (size == 0 or dst.len < @as(usize, size) * @as(usize, size)) return;
+    @memset(dst[0 .. @as(usize, size) * @as(usize, size)], 0);
+    const src_w: u32 = 12;
+    const src_h: u32 = 16;
+    const outline = [_]u16{
+        0b100000000000,
+        0b110000000000,
+        0b111000000000,
+        0b111100000000,
+        0b111110000000,
+        0b111111000000,
+        0b111111100000,
+        0b111111110000,
+        0b111111111000,
+        0b111111000000,
+        0b110111000000,
+        0b100011100000,
+        0b000011100000,
+        0b000001110000,
+        0b000001110000,
+        0b000000110000,
+    };
+    const fill = [_]u16{
+        0b000000000000,
+        0b010000000000,
+        0b011000000000,
+        0b011100000000,
+        0b011110000000,
+        0b011111000000,
+        0b011111100000,
+        0b011111110000,
+        0b011110000000,
+        0b010110000000,
+        0b000011000000,
+        0b000011000000,
+        0b000001100000,
+        0b000001100000,
+        0b000000100000,
+        0b000000000000,
+    };
+    var y: u32 = 0;
+    while (y < size) : (y += 1) {
+        const sy = @min(src_h - 1, (y * src_h) / size);
+        var x: u32 = 0;
+        while (x < size) : (x += 1) {
+            const sx = @min(src_w - 1, (x * src_w) / size);
+            const bit: u16 = @as(u16, 1) << @intCast(src_w - 1 - sx);
+            if (outline[sy] & bit == 0) continue;
+            dst[@as(usize, y) * size + x] = if (fill[sy] & bit != 0) 0xff000000 else 0xffffffff;
+        }
+    }
+}
+
+pub fn arrowHotspot(size: u32) struct { x: u32, y: u32 } {
+    const edge = @max(size, 1);
+    return .{ .x = @max(1, edge / 16), .y = @max(1, edge / 16) };
+}
+
+pub fn packNetWmIcon(gpa: std.mem.Allocator, sizes: []const u32) ![]u32 {
+    var total: usize = 0;
+    for (sizes) |size| {
+        if (size == 0 or size > 64) return error.InvalidIconSize;
+        total = try std.math.add(usize, total, 2 + @as(usize, size) * @as(usize, size));
+    }
+    const out = try gpa.alloc(u32, total);
+    errdefer gpa.free(out);
+    var off: usize = 0;
+    for (sizes) |size| {
+        out[off] = size;
+        out[off + 1] = size;
+        fillWindowMark(out[off + 2 .. off + 2 + @as(usize, size) * @as(usize, size)], size);
+        off += 2 + @as(usize, size) * @as(usize, size);
+    }
+    return out;
+}
+
+pub fn bitmapStride(width: u32) usize {
+    return ((@as(usize, width) + 31) / 32) * 4;
+}
+
+/// `source_fill` writes only the black arrow body; otherwise every opaque pixel.
+pub fn encodeBitmapPlane(dst: []u8, pixels: []const u32, width: u32, height: u32, source_fill: bool) void {
+    const stride = bitmapStride(width);
+    @memset(dst, 0);
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < width) : (x += 1) {
+            const px = pixels[@as(usize, y) * width + x];
+            if (px >> 24 < 0x80) continue;
+            if (source_fill and (px & 0x00ffffff) != 0) continue;
+            const bit: u3 = @intCast(x & 7);
+            dst[@as(usize, y) * stride + x / 8] |= @as(u8, 1) << bit;
+        }
+    }
+}
+
 fn parsePositiveScale(value: []const u8) ?u32 {
     const trimmed = std.mem.trim(u8, value, " \t");
     if (trimmed.len == 0) return null;
@@ -482,6 +644,8 @@ test "uri-list drop prefers a local file path and skips comments" {
     const path = firstPathFromUriList("# comment\r\nhttps://example.test/a\r\nfile:///tmp/chat%20room.ccc\r\n", &buf).?;
     try std.testing.expectEqualStrings("/tmp/chat room.ccc", path);
     try std.testing.expectEqualStrings("/tmp/a.ccc", firstPathFromUriList("file://localhost/tmp/a.ccc\n", &buf).?);
+    try std.testing.expectEqualStrings("/tmp/b.ccc", firstPathFromUriList("file:/tmp/b.ccc\n", &buf).?);
+    try std.testing.expect(firstPathFromUriList("file://remote.example/tmp/a.ccc\n", &buf) == null);
     try std.testing.expect(firstPathFromUriList("https://example.test/a\n", &buf) == null);
     try std.testing.expectEqualStrings("hello", firstDropText("hello\n", &buf).?);
 }
@@ -490,4 +654,33 @@ test "Xft.dpi parser accepts integer and fractional resource lines" {
     try std.testing.expectEqual(@as(u32, 192), parseXftDpi("Xft.antialias: 1\nXft.dpi: 192\n").?);
     try std.testing.expectEqual(@as(u32, 144), parseXftDpi("Xft.dpi:\t143.7\r\n").?);
     try std.testing.expect(parseXftDpi("Xcursor.size: 24\n") == null);
+}
+
+test "cursor size prefers XCURSOR_SIZE then Xcursor.size then framebuffer scale" {
+    try std.testing.expectEqual(@as(u32, 48), parseXcursorSize("Xcursor.theme: Adwaita\nXcursor.size: 48\n").?);
+    try std.testing.expectEqual(@as(u32, 32), cursorPixelSize(1, "XCURSOR_SIZE=32\x00", "Xcursor.size: 24\n"));
+    try std.testing.expectEqual(@as(u32, 24), cursorPixelSize(2, "", "Xcursor.size: 24\n"));
+    try std.testing.expectEqual(@as(u32, 32), cursorPixelSize(2, "", ""));
+    try std.testing.expectEqual(@as(u32, 16), cursorPixelSize(1, "", ""));
+}
+
+test "window mark and arrow cursor produce opaque pixels" {
+    var mark: [16 * 16]u32 = undefined;
+    fillWindowMark(&mark, 16);
+    try std.testing.expectEqual(@as(u32, 0xfff4e6c8), mark[16 * 8 + 8]);
+    try std.testing.expectEqual(@as(u32, 0xff2b1d12), mark[0]);
+    try std.testing.expectEqual(@as(u32, 0xff16324f), mark[16 * 2 + 2]);
+    var arrow: [16 * 16]u32 = undefined;
+    fillArrowCursor(&arrow, 16);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), arrow[0]);
+    try std.testing.expectEqual(@as(u32, 0xff000000), arrow[16 * 2 + 2]);
+    const hot = arrowHotspot(32);
+    try std.testing.expectEqual(@as(u32, 2), hot.x);
+    const packed_icon = try packNetWmIcon(std.testing.allocator, &.{ 16, 32 });
+    defer std.testing.allocator.free(packed_icon);
+    try std.testing.expectEqual(@as(u32, 16), packed_icon[0]);
+    try std.testing.expectEqual(@as(u32, 32), packed_icon[2 + 16 * 16]);
+    var bits: [64]u8 = undefined;
+    encodeBitmapPlane(&bits, &arrow, 16, 16, false);
+    try std.testing.expect(bits[0] & 1 != 0);
 }

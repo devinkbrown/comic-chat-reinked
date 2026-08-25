@@ -88,8 +88,11 @@ hash.
   variant). Clipboard MIME includes `text/plain;charset=utf8` and
   `text/uri-list`. X11 re-reads `Xft.dpi` when the root `RESOURCE_MANAGER`
   property changes. Both backends track maximized/fullscreen window state.
-  See `xkb.zig` and `compose_file.zig` for the exact parsing scope. Do not
-  add an AT-SPI bus or a Wayland→X11 fallback.
+  X11 installs a scaled core cursor and `_NET_WM_ICON`, and `notify` sets
+  urgency / `_NET_WM_STATE_DEMANDS_ATTENTION` until FocusIn. Wayland uses
+  `wp_cursor_shape_v1` or a scaled shm arrow and `xdg_toplevel_icon_v1`
+  when advertised. See `xkb.zig` and `compose_file.zig` for the exact
+  parsing scope. Do not add an AT-SPI bus or a Wayland→X11 fallback.
 
 ## Change rules
 
