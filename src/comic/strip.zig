@@ -170,6 +170,46 @@ const balloon_rect = original_balloon.Rect{
     .bottom = -@divTrunc(original_layout.default_unit_height, 2),
 };
 
+fn drawPanelBodies(
+    gpa: std.mem.Allocator,
+    canvas: *Canvas,
+    placements: []const original_layout.Placement,
+    avatars: []const []const u8,
+    poses: []const []const u8,
+    pose_states: []const ?udi.PoseState,
+    transform: original_raster.Transform,
+) !void {
+    for (placements) |placement| {
+        const source = placement.rect;
+        const draw_options = original_figure.LogicalOptions{
+            .client = .{
+                .left = source.x,
+                .top = -source.y,
+                .right = source.x + source.w,
+                .bottom = -(source.y + source.h),
+            },
+            .transform = transform,
+            .flipped = placement.flipped,
+        };
+        _ = if (pose_states[placement.body_index]) |pose_state|
+            try original_figure.drawSourcePoseLogical(
+                gpa,
+                canvas,
+                avatars[placement.body_index],
+                pose_state,
+                draw_options,
+            )
+        else
+            try original_figure.drawForTextLogical(
+                gpa,
+                canvas,
+                avatars[placement.body_index],
+                poses[placement.body_index],
+                draw_options,
+            );
+    }
+}
+
 fn nudgeColorDestsBelowBalloons(
     placements: []original_layout.Placement,
     bodies: []const original_layout.Body,
@@ -762,39 +802,17 @@ fn renderScene(
         false,
     );
 
-    // Microsoft draws bodies in the order produced by OrderAvatars, with
-    // masks/ROPs applied directly to the already-painted backdrop.
-    for (layout.placements) |placement| {
-        const source = placement.rect;
-        const draw_options = original_figure.LogicalOptions{
-            .client = .{
-                .left = source.x,
-                .top = -source.y,
-                .right = source.x + source.w,
-                .bottom = -(source.y + source.h),
-            },
-            .transform = transform,
-            .flipped = placement.flipped,
-        };
-        _ = if (pose_states[placement.body_index]) |pose_state|
-            try original_figure.drawSourcePoseLogical(
-                gpa,
-                &canvas,
-                avatars[placement.body_index],
-                pose_state,
-                draw_options,
-            )
-        else
-            try original_figure.drawForTextLogical(
-                gpa,
-                &canvas,
-                avatars[placement.body_index],
-                poses[placement.body_index],
-                draw_options,
-            );
+    // Microsoft `CUnitPanel::Draw` paints bodies, then balloons. Testdata
+    // dests keep that order so goldens do not move. Generated standing dests
+    // paint after balloons so a cloud that is still taller than the dest gap
+    // after docking at the top cannot cover the face.
+    if (any_recognizable) {
+        try original_raster.drawPanelBalloons(gpa, &canvas, balloon_layout.balloons, transform);
+        try drawPanelBodies(gpa, &canvas, layout.placements, avatars, poses, pose_states, transform);
+    } else {
+        try drawPanelBodies(gpa, &canvas, layout.placements, avatars, poses, pose_states, transform);
+        try original_raster.drawPanelBalloons(gpa, &canvas, balloon_layout.balloons, transform);
     }
-
-    try original_raster.drawPanelBalloons(gpa, &canvas, balloon_layout.balloons, transform);
     drawPanelBorder(&canvas);
 
     const pixels = try gpa.dupe(u32, canvas.px);
