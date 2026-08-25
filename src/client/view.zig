@@ -301,10 +301,12 @@ pub const View = struct {
                     if (self.status_panel_open) self.focused_status_action = .settings;
                 },
                 .home => {
-                    if (self.status_panel_open) self.focused_status_action = .connection;
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .connection;
                 },
                 .end => {
-                    if (self.status_panel_open) self.focused_status_action = .settings;
+                    if (!self.status_panel_open) return null;
+                    self.focused_status_action = .settings;
                 },
                 .page_up => {
                     if (!self.status_panel_open) return null;
@@ -373,6 +375,14 @@ pub const View = struct {
                     self.pageLater();
                     return true;
                 },
+                .home => if (self.shell.focus == .status) {
+                    self.shell.selectTranscriptLine(total_lines, 0, extend);
+                    return true;
+                } else return false,
+                .end => if (self.shell.focus == .status) {
+                    if (total_lines > 0) self.shell.selectTranscriptLine(total_lines, total_lines - 1, extend);
+                    return true;
+                } else return false,
                 else => return false,
             }
         }
@@ -574,7 +584,7 @@ pub const View = struct {
             else => "4 panels",
         };
         const members = if (self.shell.show_members) "Shown" else "Hidden";
-        const member_layout = if (self.shell.member_view == .list) "List" else "Icons";
+        const member_layout = if (self.shell.member_view == .list) "List" else "Portraits";
         const details = if (self.status_detailed) "Detailed" else "Compact";
         const values = [_][]const u8{ theme, accent, contrast, page, panels, members, member_layout, details };
         for (values, 0..) |value, index| {
@@ -2229,7 +2239,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             0 => "Sunday page",
             1 => "Conversation",
             2 => "Show CAST",
-            3 => "CAST icons",
+            3 => "CAST portraits",
             4 => "CAST list",
             else => "Page layout",
         },
@@ -4349,6 +4359,7 @@ test "extensive settings reveal focused controls in the compact dialog viewport"
     var view = try View.init(std.testing.allocator, min_width, min_height);
     defer view.deinit();
     view.openDialog(.settings);
+    try std.testing.expectEqualStrings("Portraits", view.dialogValueAt(6));
     const layout = dialogLayout(view.width(), view.height(), dialogs.get(.settings));
     try std.testing.expect(layout.visibleRows() < dialogs.fields(.settings).len);
     var tabs: usize = 0;
@@ -4882,7 +4893,7 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Named properties", menuItemLabel(4, 6));
     try std.testing.expectEqualStrings("Room events", menuItemLabel(4, 8));
     try std.testing.expectEqualStrings("Show CAST", menuItemLabel(2, 2));
-    try std.testing.expectEqualStrings("CAST icons", menuItemLabel(2, 3));
+    try std.testing.expectEqualStrings("CAST portraits", menuItemLabel(2, 3));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(2, 4));
     try std.testing.expectEqualStrings("CAST list", menuItemLabel(5, 0));
     try std.testing.expectEqualStrings("CAST card", menuItemLabel(3, 4));
@@ -5062,6 +5073,14 @@ test "composer Page Up and Page Down page the transcript" {
     view.shell.focus = .say_actions;
     try std.testing.expect(view.handleTranscriptKey(.page_down, transcript.lines.items.len, false));
     try std.testing.expectEqual(shell_mod.Focus.say_actions, view.shell.focus);
+
+    view.shell.focus = .status;
+    view.status_panel_open = false;
+    try std.testing.expect(view.handleTranscriptKey(.home, transcript.lines.items.len, false));
+    try std.testing.expectEqual(@as(?usize, 0), view.shell.transcript_cursor);
+    try std.testing.expect(view.handleTranscriptKey(.end, transcript.lines.items.len, false));
+    try std.testing.expectEqual(@as(?usize, transcript.lines.items.len - 1), view.shell.transcript_cursor);
+    try std.testing.expectEqual(shell_mod.Focus.status, view.shell.focus);
 }
 
 test "member context stays closed until the wire is live" {
@@ -5192,6 +5211,8 @@ test "status keyboard opens the panel and activates its actions" {
     try std.testing.expectEqual(@as(?StatusActionHover, .settings), view.focused_status_action);
     view.status_panel_open = false;
     try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.page_up));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.home));
+    try std.testing.expectEqual(@as(?Action, null), view.handleFocusedActionKey(.end));
     view.status_panel_open = true;
     try std.testing.expectEqual(Action.none, view.handleFocusedActionKey(.enter).?);
     try std.testing.expectEqual(dialogs.Id.settings, view.active_dialog.?);

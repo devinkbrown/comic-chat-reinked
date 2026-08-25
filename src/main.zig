@@ -2174,7 +2174,7 @@ fn prefillOpenedDialog(
             var panels: [16]u8 = undefined;
             try view.setDialogValueAt(4, try std.fmt.bufPrint(&panels, "{d} panels", .{view.shell.comic_columns}));
             try view.setDialogValueAt(5, if (view.shell.show_members) "Shown" else "Hidden");
-            try view.setDialogValueAt(6, if (view.shell.member_view == .icons) "Icons" else "List");
+            try view.setDialogValueAt(6, if (view.shell.member_view == .icons) "Portraits" else "List");
             try view.setDialogValueAt(7, if (view.status_detailed) "Detailed" else "Compact");
         },
         .about => {

@@ -266,7 +266,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
             3 => &.{ "Comic", "Text" },
             4 => &.{ "4 panels", "3 panels", "2 panels", "1 panel", "5 panels", "6 panels" },
             5 => &.{ "Shown", "Hidden" },
-            6 => &.{ "Icons", "List" },
+            6 => &.{ "Portraits", "List" },
             7 => &.{ "Detailed", "Compact" },
             else => &.{},
         },
@@ -447,6 +447,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Host", fields(.setup)[0].label);
     try std.testing.expectEqualStrings("Light studio", choiceOptions(.settings, 0)[0]);
     try std.testing.expectEqualStrings("Vermillion", choiceOptions(.settings, 1)[0]);
+    try std.testing.expectEqualStrings("Portraits", choiceOptions(.settings, 6)[0]);
     try std.testing.expectEqualStrings("Verified TLS", choiceOptions(.setup, 2)[0]);
     try std.testing.expectEqualStrings("Page layout", get(.comics_view).title);
     try std.testing.expectEqualStrings("Join room", get(.channel).title);
@@ -722,6 +723,8 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Disabled", &.{ "Off", "Disabled" }));
     try std.testing.expect(matchesAny("The room could not open on its own.", &.{ "The room could not open aside.", "The room could not open on its own." }));
     try std.testing.expect(matchesAny("None yet", &.{ "None on this wire yet", "None yet" }));
+    try std.testing.expect(matchesAny("Icons", &.{ "Portraits", "Icons" }));
+    try std.testing.expect(matchesAny("CAST icons", &.{ "CAST portraits", "CAST icons" }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 
