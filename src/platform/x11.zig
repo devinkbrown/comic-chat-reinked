@@ -2545,9 +2545,16 @@ fn internSessionAtoms(conn: *XConn) !void {
 
 fn setNetWmIcon(gpa: std.mem.Allocator, conn: *XConn, window: u32) !void {
     if (conn.net_wm_icon == 0) return;
-    const packed_icon = try services.packNetWmIcon(gpa, &.{ 16, 32, 64, 128 });
-    defer gpa.free(packed_icon);
-    try changePropertyCardinals(conn, window, conn.net_wm_icon, packed_icon);
+    const candidates = [_][]const u32{
+        &.{ 16, 32, 64, 128 },
+        &.{ 16, 32, 64 },
+        &.{ 16, 32 },
+    };
+    for (candidates) |sizes| {
+        const packed_icon = try services.packNetWmIcon(gpa, sizes);
+        defer gpa.free(packed_icon);
+        if (changePropertyCardinals(conn, window, conn.net_wm_icon, packed_icon)) |_| return else |_| {}
+    }
 }
 
 fn installScaledCursor(gpa: std.mem.Allocator, conn: *XConn, window: u32, scale: u32, env: []const u8, stash: ?*std.ArrayList([32]u8)) !u32 {
@@ -3096,7 +3103,11 @@ fn changeProperty32(conn: *XConn, window: u32, property: u32, typ: u32, values: 
 }
 
 fn changePropertyCardinals(conn: *XConn, window: u32, property: u32, values: []const u32) !void {
-    if (values.len > 16 * 1024) return error.PropertyTooLarge;
+    const header_units: usize = 6;
+    const max_units = @max(@as(usize, conn.max_request_units), min_max_request_units);
+    if (values.len + header_units > max_units or values.len + header_units > std.math.maxInt(u16)) {
+        return error.PropertyTooLarge;
+    }
     const total = 24 + values.len * 4;
     const req = try std.heap.page_allocator.alloc(u8, total);
     defer std.heap.page_allocator.free(req);
