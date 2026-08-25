@@ -2135,34 +2135,65 @@ fn leftoverStoryFaceHits(image: Image, kind: LeftoverFaceKind) !void {
 }
 
 fn leftoverDestXorHits(image: Image, empty: Image) !void {
+    try leftoverDestXorHitsMode(image, empty, false);
+}
+
+fn leftoverDestXorEachStoryPanel(image: Image, empty: Image) !void {
+    try leftoverDestXorHitsMode(image, empty, true);
+}
+
+fn leftoverDestXorHitsMode(image: Image, empty: Image, each_panel: bool) !void {
     try std.testing.expectEqual(empty.width, image.width);
     try std.testing.expectEqual(empty.height, image.height);
     const stride = panel_width + device_interstice;
-    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    const row_stride = panel_height + device_interstice;
+    const cols = if (stride == 0) 1 else (image.width + stride - 1) / stride;
+    const rows = if (row_stride == 0) 1 else (image.height + row_stride - 1) / row_stride;
     var dest_chrom: usize = 0;
     var dest_min: u32 = std.math.maxInt(u32);
     var dest_max: u32 = 0;
-    var col: u32 = 1;
-    while (col < cols) : (col += 1) {
-        const x0 = col * stride;
-        if (x0 + panel_width > image.width) continue;
-        var y: u32 = 0;
-        while (y < panel_height) : (y += 1) {
-            var x: u32 = 0;
-            while (x < panel_width) : (x += 1) {
-                const i = y * image.width + x0 + x;
-                if (image.pixels[i] == empty.pixels[i]) continue;
-                dest_min = @min(dest_min, y);
-                dest_max = @max(dest_max, y);
-                const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
-                const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
-                const blue: i32 = @as(u8, @truncate(image.pixels[i]));
-                const mx = @max(red, @max(green, blue));
-                const mn = @min(red, @min(green, blue));
-                if (mx > mn + 18 and mx > 40) dest_chrom += 1;
+    var checked: usize = 0;
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var panel_chrom: usize = 0;
+            var panel_min: u32 = std.math.maxInt(u32);
+            var panel_max: u32 = 0;
+            var y: u32 = 0;
+            while (y < panel_height) : (y += 1) {
+                var x: u32 = 0;
+                while (x < panel_width) : (x += 1) {
+                    const i = (y0 + y) * image.width + x0 + x;
+                    if (image.pixels[i] == empty.pixels[i]) continue;
+                    panel_min = @min(panel_min, y);
+                    panel_max = @max(panel_max, y);
+                    dest_min = @min(dest_min, y0 + y);
+                    dest_max = @max(dest_max, y0 + y);
+                    const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
+                    const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
+                    const blue: i32 = @as(u8, @truncate(image.pixels[i]));
+                    const mx = @max(red, @max(green, blue));
+                    const mn = @min(red, @min(green, blue));
+                    if (mx > mn + 18 and mx > 40) {
+                        panel_chrom += 1;
+                        dest_chrom += 1;
+                    }
+                }
             }
+            if (panel_max <= panel_min) continue;
+            if (each_panel) {
+                try std.testing.expect(panel_chrom > 200);
+                try std.testing.expect(panel_max > panel_min + 140);
+            }
+            checked += 1;
         }
     }
+    try std.testing.expect(checked >= 1);
     try std.testing.expect(dest_chrom > 200);
     try std.testing.expect(dest_max > dest_min + 140);
 }
@@ -2745,6 +2776,41 @@ test "leftover HD dest laugh and sad dests keep dest-only paint" {
                 defer image.deinit(gpa);
                 try leftoverDestXorHits(image, empty);
             }
+        }
+    }
+}
+
+test "leftover dest wrap continuation keeps dest-only paint on each story panel" {
+    // 2-col Color product pages place the continuation dest on row 2, col 0.
+    // The dest-XOR helper used to scan only row 0 col>=1.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "rebecca color" };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{
+            .{ .speaker = "anna", .text = first },
+            .{ .speaker = "anna", .text = second },
+        }, .{
+            .page_columns = 2,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorEachStoryPanel(image, empty);
         }
     }
 }
