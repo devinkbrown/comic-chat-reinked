@@ -97,8 +97,8 @@ pub const specs = [_]Spec{
     .{ .id = .whisper, .resource = "IDD_WHISPERBOX", .title = "Whisper", .group = .rooms, .source_w = 334, .source_h = 196 },
     .{ .id = .comics_view, .resource = "IDD_COMICS_VIEW", .title = "Page layout", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .automation, .resource = "IDD_AUTOMATION_PAGE", .title = "Greeting", .group = .automation, .source_w = 252, .source_h = 218 },
-    .{ .id = .rules, .resource = "IDD_RULESPAGE", .title = "Rules", .group = .automation, .source_w = 252, .source_h = 218 },
-    .{ .id = .edit_rule, .resource = "IDD_EDITRULE", .title = "Edit rule", .group = .automation, .source_w = 265, .source_h = 260 },
+    .{ .id = .rules, .resource = "IDD_RULESPAGE", .title = "Rule book", .group = .automation, .source_w = 252, .source_h = 218 },
+    .{ .id = .edit_rule, .resource = "IDD_EDITRULE", .title = "Change rule", .group = .automation, .source_w = 265, .source_h = 260 },
     .{ .id = .channel_create, .resource = "IDD_CHANNELCREATE", .title = "Create room", .group = .rooms, .source_w = 186, .source_h = 194 },
     .{ .id = .channel_password, .resource = "IDD_CHANPASSWORD", .title = "Room password", .group = .rooms, .source_w = 173, .source_h = 86 },
     .{ .id = .file_transfer, .resource = "IDD_FILE_TRANSFER", .title = "File transfer", .group = .files, .source_w = 300, .source_h = 236 },
@@ -202,7 +202,7 @@ pub fn fields(id: Id) []const Field {
             .{ .label = "CAST cap", .hint = "Optional" },
             .{ .label = "Room password", .kind = .password },
         },
-        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST cap", .hint = "Optional" }, .{ .label = "Room password", .kind = .password }, .{ .label = "Summary", .hint = "Topic, options and cap", .kind = .readonly } },
+        .channel_properties => &.{ .{ .label = "Topic", .hint = "Shown on the Sunday page" }, .{ .label = "Room options", .hint = "Optional; one word" }, .{ .label = "CAST cap", .hint = "Optional" }, .{ .label = "Room password", .kind = .password }, .{ .label = "Room note", .hint = "Topic, options and cap", .kind = .readonly } },
         .channel_password => &.{.{ .label = "Room password", .hint = "Needed if the room is locked" }},
         .room_list => &.{ .{ .label = "Room search", .hint = "For example #root or a size filter" }, .{ .label = "Room to join", .hint = "Optional, for example #root" }, .{ .label = "List cap", .hint = "Optional; blank means unlimited" } },
         .user_list => &.{ .{ .label = "CAST member", .hint = "Choose a visible CAST member" }, .{ .label = "Name filter", .hint = "Optional name filter" } },
@@ -367,7 +367,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .add_to_sets => "Add rule",
         .rename_loaded_set, .rename_set => "Rename set",
         .create_set => "Create set",
-        .notifications => "Save notifications",
+        .notifications => "Save watch",
         .notification_users => "Apply CAST",
         .ircx_properties => "Save properties",
         .room_access => "Save access",
@@ -511,7 +511,8 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Accent", fields(.settings)[1].label);
     try std.testing.expectEqualStrings("Color theme", fields(.settings)[0].label);
     try std.testing.expectEqualStrings("Ink", fields(.choose_color)[0].label);
-    try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
+    try std.testing.expectEqualStrings("Change rule", get(.edit_rule).title);
+    try std.testing.expectEqualStrings("Rule book", get(.rules).title);
     try std.testing.expectEqualStrings("Named properties", get(.ircx_properties).title);
     try std.testing.expectEqualStrings("Watch CAST", get(.notifications).title);
     try std.testing.expectEqualStrings("Room events", get(.ircx_events).title);
@@ -608,11 +609,11 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Rename set", primaryLabel(.rename_set));
     try std.testing.expectEqualStrings("Create set", primaryLabel(.create_set));
     try std.testing.expectEqualStrings("Save rule", primaryLabel(.rules));
-    try std.testing.expectEqualStrings("Save notifications", primaryLabel(.notifications));
+    try std.testing.expectEqualStrings("Save watch", primaryLabel(.notifications));
     try std.testing.expectEqualStrings("Address when offering a file", fields(.file_transfer)[3].hint);
     try std.testing.expectEqualStrings("Room", choiceOptions(.ircx_events, 1)[0]);
     try std.testing.expectEqualStrings("Link", choiceOptions(.ircx_events, 1)[4]);
-    try std.testing.expectEqualStrings("Summary", fields(.channel_properties)[4].label);
+    try std.testing.expectEqualStrings("Room note", fields(.channel_properties)[4].label);
     try std.testing.expectEqualStrings("Wire", fields(.servers)[0].label);
     try std.testing.expectEqualStrings("Live Onyx node", fields(.servers)[0].hint);
     try std.testing.expectEqualStrings("Implicit TLS", fields(.servers)[2].hint);
@@ -661,7 +662,17 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("Also ban pattern", &.{ "Also ban", "Also ban pattern" }));
     try std.testing.expect(matchesAny("Repeat window seconds", &.{ "Repeat window", "Repeat window seconds" }));
     try std.testing.expect(matchesAny("Save rule", &.{ "Apply set", "Add rule", "Save rule" }));
-    try std.testing.expect(matchesAny("Save notifications", &.{ "Apply CAST", "Save notifications" }));
+    try std.testing.expect(matchesAny("Save notifications", &.{ "Save watch", "Apply CAST", "Save notifications" }));
+    try std.testing.expect(matchesAny("Rules", &.{ "Rule book", "Rules" }));
+    try std.testing.expect(matchesAny("Edit rule", &.{ "Change rule", "Edit rule" }));
+    try std.testing.expect(matchesAny("Summary", &.{ "Room note", "Summary" }));
+    try std.testing.expect(matchesAny("Copy lines", &.{ "Copy ink", "Copy lines" }));
+    try std.testing.expect(matchesAny("Insert page break", &.{ "Insert page fold", "Insert page break" }));
+    try std.testing.expect(matchesAny("Delete lines", &.{ "Clear ink", "Delete lines" }));
+    try std.testing.expect(matchesAny("Open room separately", &.{ "Open room aside", "Open room separately" }));
+    try std.testing.expect(matchesAny("File", &.{ "Page", "File" }));
+    try std.testing.expect(matchesAny("Edit", &.{ "Ink", "Edit" }));
+    try std.testing.expect(matchesAny("View", &.{ "Show", "View" }));
     try std.testing.expect(matchesAny("Invitation note", &.{ "Note", "Invitation note" }));
     try std.testing.expect(matchesAny("Name filter", &.{ "Filter", "Name filter" }));
     try std.testing.expect(matchesAny("Greeting mode", &.{ "Greeting how", "Greeting mode" }));

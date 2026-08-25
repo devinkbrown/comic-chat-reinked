@@ -394,8 +394,9 @@ pub const View = struct {
         return true;
     }
 
-    /// Alt+letter opens File/Edit/View/Look/Room/CAST/Tools. Alt+Down
-    /// opens the hovered menu, or File. Alt+O still opens Look.
+    /// Alt+letter opens Page/Ink/Show/Look/Room/CAST/Tools. Alt+Down
+    /// opens the hovered menu, or Page. Alt+F/E/V still open those menus.
+    /// Alt+O still opens Look.
     pub fn handleMenuAccelerator(self: *View, key: platform_event.Key, alt: bool) ?Action {
         if (!alt or self.active_dialog != null or self.context_menu != null) return null;
         const menu: u8 = switch (key) {
@@ -1033,6 +1034,10 @@ pub const View = struct {
                     if (modifiers.shift) editor.extendRight() else editor.right();
             },
             .home => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .family;
+                    return .none;
+                }
                 if (self.dialog_action_focus != null or self.dialog_browse_focus or dialogJumpsFieldExtreme(id, self.dialog_field)) {
                     self.focusDialogExtreme(id, false);
                 } else if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
@@ -1042,6 +1047,10 @@ pub const View = struct {
                 }
             },
             .end => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .next;
+                    return .none;
+                }
                 if (self.dialog_action_focus != null or self.dialog_browse_focus or dialogJumpsFieldExtreme(id, self.dialog_field)) {
                     self.focusDialogExtreme(id, true);
                 } else if (dialogs.fields(id)[self.dialog_field].kind == .choice) {
@@ -1059,9 +1068,17 @@ pub const View = struct {
                     self.cycleDialogChoiceDirection(id, self.dialog_field, true);
             },
             .page_up => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .family;
+                    return .none;
+                }
                 if (self.dialog_first_field > 0) self.dialog_first_field -= 1;
             },
             .page_down => {
+                if (self.dialog_gallery_focus != null) {
+                    self.dialog_gallery_focus = .next;
+                    return .none;
+                }
                 const layout = dialogLayout(self.canvas.width, self.canvas.height, dialogs.get(id));
                 const maximum = dialogs.fields(id).len -| layout.visibleRows();
                 if (self.dialog_first_field < maximum) self.dialog_first_field += 1;
@@ -2125,7 +2142,7 @@ pub const View = struct {
     }
 };
 
-const menu_labels = [_][]const u8{ "File", "Edit", "View", "Look", "Room", "CAST", "Tools" };
+const menu_labels = [_][]const u8{ "Page", "Ink", "Show", "Look", "Room", "CAST", "Tools" };
 
 fn menuStart(menu: u8) i32 {
     var x: i32 = 170;
@@ -2159,9 +2176,9 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             else => "Quit",
         },
         1 => switch (item) {
-            0 => "Copy lines",
-            1 => "Insert page break",
-            2 => "Delete lines",
+            0 => "Copy ink",
+            1 => "Insert page fold",
+            2 => "Clear ink",
             else => "Studio",
         },
         2 => switch (item) {
@@ -2193,7 +2210,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             7 => "Room access",
             8 => "Room events",
             9 => "Favorite rooms",
-            10 => "Open room separately",
+            10 => "Open room aside",
             11 => "Room invitation",
             else => "Room password",
         },
@@ -2214,7 +2231,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             3 => "Sign-in name",
             4 => "Wire features",
             5 => "Greeting",
-            6 => "Rules",
+            6 => "Rule book",
             7 => "Rule sets",
             8 => "Watch CAST",
             9 => "Live CAST",
@@ -2234,7 +2251,7 @@ fn menuItemHint(menu: u8, item: u8, connected: bool) []const u8 {
         },
         1 => switch (item) {
             3 => "Studio",
-            else => "Edit",
+            else => "Ink",
         },
         2 => switch (item) {
             2, 3, 4 => "CAST",
@@ -3423,8 +3440,13 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
     return switch (id) {
         .settings => switch (index) {
             0 => "STUDIO",
+            1 => "INK",
+            2 => "TYPE",
             3 => "PAGE",
+            4 => "PAGE",
             5 => "CAST",
+            6 => "CAST",
+            7 => "LIST",
             else => "",
         },
         .setup, .servers => switch (index) {
@@ -3494,7 +3516,7 @@ fn settingsKicker(id: dialogs.Id, index: usize) []const u8 {
         .rule_sets, .add_to_sets => if (index == 0) "SET" else "",
         .favorite_rooms => if (index == 0) "ROOM" else "",
         .recent_files => if (index == 0) "FILE" else "",
-        .channel_properties => if (index == 0) "ROOM" else "",
+        .channel_properties => if (index == 0) "ROOM" else if (index == 4) "NOTE" else "",
         .ircx_events => if (index == 1) "WATCH" else "",
         .rename_loaded_set, .rename_set, .create_set => if (index == 0) "NAME" else "",
         .advanced_event_params, .advanced_rule_settings => if (index == 0) "RULE" else "",
@@ -4265,6 +4287,24 @@ test "character gallery browses adjacent cast members and previews expression" {
     try std.testing.expectEqualStrings("Happy", view.currentEmotionLabel());
 }
 
+test "character gallery Home and End jump first and last card" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.character);
+    view.dialog_field = 0;
+    view.dialog_gallery_focus = .selected;
+    _ = try view.handleDialogKey(.home, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.family, view.dialog_gallery_focus.?);
+    _ = try view.handleDialogKey(.end, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.next, view.dialog_gallery_focus.?);
+    view.dialog_gallery_focus = .previous;
+    _ = try view.handleDialogKey(.page_up, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.family, view.dialog_gallery_focus.?);
+    _ = try view.handleDialogKey(.page_down, .{});
+    try std.testing.expectEqual(DialogGalleryFocus.next, view.dialog_gallery_focus.?);
+    try std.testing.expectEqualStrings("Anna HD", view.dialogValueAt(0));
+}
+
 test "dialog keyboard focus includes actions and protects typed choices" {
     var view = try View.init(std.testing.allocator, 960, 720);
     defer view.deinit();
@@ -4727,8 +4767,9 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Connection failed - click for settings"));
     try std.testing.expectEqualStrings("Wire failed - open Wire setup", statusBarLabel("Wire failed - open Wire setup"));
     try std.testing.expectEqualStrings("Fail", statusTabLabel("Wire failed (refused) - open Wire setup"));
-    try std.testing.expectEqualStrings("Copy lines", menuItemLabel(1, 0));
-    try std.testing.expectEqualStrings("Delete lines", menuItemLabel(1, 2));
+    try std.testing.expectEqualStrings("Copy ink", menuItemLabel(1, 0));
+    try std.testing.expectEqualStrings("Insert page fold", menuItemLabel(1, 1));
+    try std.testing.expectEqualStrings("Clear ink", menuItemLabel(1, 2));
     try std.testing.expectEqualStrings("Studio", menuItemLabel(1, 3));
     try std.testing.expectEqualStrings("Greeting", menuItemLabel(6, 5));
     try std.testing.expectEqualStrings("Sunday page or conversation", dialogHelper(.comics_view, ""));
@@ -4784,8 +4825,13 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Away message", menuItemLabel(4, 4));
     try std.testing.expectEqualStrings("Away message", toolbarLabel(10));
     try std.testing.expectEqualStrings("Room details", menuItemLabel(4, 3));
-    try std.testing.expectEqualStrings("Open room separately", menuItemLabel(4, 10));
+    try std.testing.expectEqualStrings("Open room aside", menuItemLabel(4, 10));
+    try std.testing.expectEqualStrings("Page", menu_labels[0]);
+    try std.testing.expectEqualStrings("Ink", menu_labels[1]);
+    try std.testing.expectEqualStrings("Show", menu_labels[2]);
     try std.testing.expectEqualStrings("Look", menu_labels[3]);
+    try std.testing.expectEqualStrings("Rule book", menuItemLabel(6, 6));
+    try std.testing.expectEqualStrings("Ink", menuItemHint(1, 0, true));
     try std.testing.expectEqualStrings("Ink color", menuItemLabel(3, 1));
     try std.testing.expectEqualStrings("Choose ink", toolbarLabel(18));
     try std.testing.expectEqualStrings("Room", menuItemHint(4, 10, true));
@@ -4832,6 +4878,9 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("FILE", settingsKicker(.recent_files, 0));
     try std.testing.expectEqualStrings("WATCH", settingsKicker(.ircx_events, 1));
     try std.testing.expectEqualStrings("INK", settingsKicker(.about, 0));
+    try std.testing.expectEqualStrings("INK", settingsKicker(.settings, 1));
+    try std.testing.expectEqualStrings("NOTE", settingsKicker(.channel_properties, 4));
+    try std.testing.expectEqualStrings("LIST", settingsKicker(.settings, 7));
     try std.testing.expectEqualStrings("LIST", settingsKicker(.connection_features, 3));
     try std.testing.expectEqualStrings("NAME", settingsKicker(.user_list, 1));
     try std.testing.expectEqualStrings("Features appear after the wire is live", dialogHelper(.connection_features, "Offline"));

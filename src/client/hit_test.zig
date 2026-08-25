@@ -50,7 +50,7 @@ pub fn shell(layout: geometry.Layout, comic_mode: bool, member_icons: bool, x: i
 }
 
 fn menuIndex(pointer_x: i32) ?u8 {
-    const items = [_][]const u8{ "File", "Edit", "View", "Look", "Room", "CAST", "Tools" };
+    const items = [_][]const u8{ "Page", "Ink", "Show", "Look", "Room", "CAST", "Tools" };
     var x: i32 = 170;
     for (items, 0..) |item, index| {
         const right = x + Canvas.uiTextWidth(item) + 28;
@@ -80,7 +80,8 @@ fn iconIndex(rect: Rect, x: i32, y: i32) usize {
 test "source shell hit targets distinguish controls and content" {
     const layout = geometry.Layout.compute(960, 720, true, true);
     try std.testing.expectEqual(Target{ .toolbar = 5 }, shell(layout, true, true, 140, geometry.menu_height + 10, 3));
-    try std.testing.expectEqual(Target{ .menu = 1 }, shell(layout, true, true, 240, 10, 3));
+    const ink_x = 170 + Canvas.uiTextWidth("Page") + 28 + @divTrunc(Canvas.uiTextWidth("Ink") + 28, 2);
+    try std.testing.expectEqual(Target{ .menu = 1 }, shell(layout, true, true, ink_x, 10, 3));
     try std.testing.expectEqual(Target{ .say_action = 0 }, shell(layout, true, true, layout.say_actions.x + 2, layout.say.y + 2, 3));
     try std.testing.expectEqual(Target{ .member = 0 }, shell(layout, true, true, layout.members.x + 3, layout.members.y + 3, 3));
     try std.testing.expectEqual(Target.emotion, shell(layout, true, true, layout.body_camera.x + 3, layout.body_camera.y + 3, 3));

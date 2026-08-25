@@ -1984,7 +1984,7 @@ fn handleWindowEvent(
                     .child_window => child: {
                         spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                             view.openDialog(.channel);
-                            view.setDialogNotice("The room could not be opened separately.");
+                            view.setDialogNotice("The room could not open on its own.");
                         };
                         break :child true;
                     },
@@ -2089,7 +2089,7 @@ fn handleWindowEvent(
                 .child_window => child: {
                     spawnRoomWindow(gpa, io, network.runtime.executable, network.host, network.reconnect.port, nick, room.name) catch {
                         view.openDialog(.channel);
-                        view.setDialogNotice("The room could not be opened separately.");
+                        view.setDialogNotice("The room could not open on its own.");
                     };
                     break :child true;
                 },
@@ -2826,12 +2826,12 @@ fn applyDialogAction(
                 };
             } else if (std.ascii.eqlIgnoreCase(operation, "Import")) {
                 preferences.importRulesFile(io, path) catch {
-                    view.setDialogNotice("Could not import that .ccrules file.");
+                    view.setDialogNotice("That rule file could not open.");
                     return;
                 };
             } else if (std.ascii.eqlIgnoreCase(operation, "Export")) {
                 preferences.exportRulesFile(io, path, if (set_name.len == 0) null else set_name) catch {
-                    view.setDialogNotice("Could not export rules to that location.");
+                    view.setDialogNotice("That rule file could not save.");
                     return;
                 };
             }
@@ -3041,7 +3041,7 @@ fn applyDialogAction(
         },
         .open_conversation => {
             var loaded = cc.client.files.loadConversation(io, gpa, value) catch {
-                view.setDialogNotice("Could not open that conversation file.");
+                view.setDialogNotice("That conversation could not open.");
                 return;
             };
             errdefer loaded.deinit();
@@ -3072,7 +3072,7 @@ fn applyDialogAction(
         },
         .save_conversation => {
             cc.client.files.saveConversation(io, gpa, value, &room.transcript) catch {
-                view.setDialogNotice("Could not save to that location.");
+                view.setDialogNotice("That conversation could not save.");
                 return;
             };
             try preferences.rememberFile(value);
@@ -3080,19 +3080,19 @@ fn applyDialogAction(
         },
         .open_locator => {
             const document = std.Io.Dir.cwd().readFileAlloc(io, value, gpa, .limited(cc.client.files.max_document_bytes)) catch {
-                view.setDialogNotice("Could not open that locator.");
+                view.setDialogNotice("That locator could not open.");
                 return;
             };
             defer gpa.free(document);
             const locator = cc.client.files.parseLocator(document) catch {
-                view.setDialogNotice("That file is not a valid Comic Chat locator.");
+                view.setDialogNotice("That file is not a Comic Chat locator.");
                 return;
             };
             var locator_room_index = workspace.active.?;
             const changes_server = if (locator.server) |server| !std.ascii.eqlIgnoreCase(server, network.host) else false;
             if (locator.channel) |located_room| {
                 const index = workspace.ensure(located_room) catch {
-                    view.setDialogNotice("The locator contains an invalid room.");
+                    view.setDialogNotice("That locator room is not valid.");
                     return;
                 };
                 _ = workspace.activate(index);
@@ -3108,7 +3108,7 @@ fn applyDialogAction(
             };
             if (locator.server) |server| if (changes_server) {
                 network.reconfigure(server, network.reconnect.port, network.effectiveOptions().security, monotonicMilliseconds(io)) catch {
-                    view.setDialogNotice("The locator wire could not be opened.");
+                    view.setDialogNotice("The locator wire could not open.");
                     return;
                 };
                 resetChatConnectionState(state);
@@ -3117,23 +3117,23 @@ fn applyDialogAction(
         },
         .export_image => {
             const png = cc.render.png.encode(gpa, view.pixels(), view.width(), view.height()) catch {
-                view.setDialogNotice("Could not render the current view.");
+                view.setDialogNotice("The Sunday page could not render.");
                 return;
             };
             defer gpa.free(png);
             cc.client.files.saveBytesAtomic(io, gpa, value, png) catch {
-                view.setDialogNotice("Could not export to that location.");
+                view.setDialogNotice("The Sunday page could not export.");
                 return;
             };
         },
         .print_preview => {
             const pdf = cc.render.pdf.encode(gpa, view.pixels(), view.width(), view.height()) catch {
-                view.setDialogNotice("Could not create a printable preview.");
+                view.setDialogNotice("The Sunday PDF could not render.");
                 return;
             };
             defer gpa.free(pdf);
             cc.client.files.saveBytesAtomic(io, gpa, value, pdf) catch {
-                view.setDialogNotice("Could not save the printable PDF.");
+                view.setDialogNotice("The Sunday PDF could not save.");
                 return;
             };
             const print_action = view.dialogValueAt(1);
@@ -3172,7 +3172,7 @@ fn applyDialogAction(
 
 fn browseDialogFile(gpa: std.mem.Allocator, window: anytype, view: *cc.client.view.View, id: cc.client.dialogs.Id) !void {
     if (comptime !@hasDecl(@TypeOf(window.*), "chooseFile")) {
-        view.setDialogNotice("Native file selection is unavailable on this platform; enter a path.");
+        view.setDialogNotice("Choose a path; this platform has no file picker.");
         return;
     } else {
         const save = switch (id) {
