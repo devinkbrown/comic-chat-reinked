@@ -103,6 +103,16 @@ pub fn pointerEnterSequence(held: PointerButton, x: i32, y: i32) struct { first:
     };
 }
 
+/// Implicit-grab MotionNotify after LeaveNotify must not restore hover.
+pub fn shouldEmitPointerMove(inside: bool) bool {
+    return inside;
+}
+
+/// ButtonRelease after leave-up (or a release we never saw down) is not a second `.up`.
+pub fn shouldEmitPointerUp(was_held: bool) bool {
+    return was_held;
+}
+
 test "key input preserves the logical modifier contract" {
     const event: Event = .{ .key = .{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } } };
     try std.testing.expect(event.key.modifiers.control);
@@ -137,4 +147,11 @@ test "pointer enter synthesizes primary or secondary down then queues the hover 
     const hover = pointerEnterSequence(.none, 8, 9);
     try std.testing.expectEqual(PointerKind.move, hover.first.pointer.kind);
     try std.testing.expectEqual(@as(?Event, null), hover.queued);
+}
+
+test "pointer grab motion after leave does not restore hover or emit a second up" {
+    try std.testing.expect(!shouldEmitPointerMove(false));
+    try std.testing.expect(shouldEmitPointerMove(true));
+    try std.testing.expect(!shouldEmitPointerUp(false));
+    try std.testing.expect(shouldEmitPointerUp(true));
 }

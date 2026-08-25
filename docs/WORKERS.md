@@ -118,7 +118,9 @@ hash.
   held button before `(-1,-1)`, and XdndLeave
   moves to `(-1,-1)` to clear hover. X11 EnterNotify with Button1 or Button3
   already down emits `.down` then queues the hover move (middle is not
-  synthesized). X11 Enter/Leave ignore grab/ungrab
+  synthesized). Implicit-grab MotionNotify after LeaveNotify does not
+  restore hover, and a later ButtonRelease for an already-released button
+  is dropped. X11 Enter/Leave ignore grab/ungrab
   modes, and FocusIn/Out ignore grab/ungrab plus pointer-focus details.
   X11 wheel button releases do not emit pointer up. NumLock XOR Shift selects keypad
   digits on both backends. X11 Mod3 Mode_switch selects group 2.

@@ -36,7 +36,8 @@
 //!     still own CLIPBOARD), receive-only ISO-8859-1/2/3/4/5/6/7/8/9/13/15, Windows-1250/1251/1252/1253/1254/1255/1256/1257, KOI8-R, and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
-//!     hover clear (a held button emits `.up` first),
+//!     hover clear (a held button emits `.up` first; implicit-grab motion
+//!     and a later ButtonRelease do not restore hover or emit a second `.up`),
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden/shaded plus ICCCM
@@ -511,6 +512,7 @@ pub const Window = struct {
     held_primary: bool,
     held_middle: bool,
     held_secondary: bool,
+    pointer_inside: bool,
     pending_pointer: ?Event,
     compose_table: ?xkb.ComposeTable,
     compose: xkb.Compose,
@@ -589,6 +591,7 @@ pub const Window = struct {
             .held_primary = false,
             .held_middle = false,
             .held_secondary = false,
+            .pointer_inside = false,
             .pending_pointer = null,
             .compose_table = null,
             .compose = .{},
@@ -817,7 +820,10 @@ pub const Window = struct {
                 const raw_y: i32 = @as(i16, @bitCast(get16(event[26..28])));
                 const x = physicalPointToLogical(raw_x, self.scale);
                 const y = physicalPointToLogical(raw_y, self.scale);
-                if (kind == 6) return .{ .pointer = .{ .kind = .move, .x = x, .y = y } };
+                if (kind == 6) {
+                    if (!shared_event.shouldEmitPointerMove(self.pointer_inside)) return .other;
+                    return .{ .pointer = .{ .kind = .move, .x = x, .y = y } };
+                }
                 const detail = event[1];
                 if (detail == 4 or detail == 5) {
                     if (kind != 4) return .other;
@@ -845,8 +851,15 @@ pub const Window = struct {
                     self.middle_paste = false;
                     return .other;
                 }
-                if (kind == 4) self.noteHeldButton(button, true);
-                if (kind == 5) self.noteHeldButton(button, false);
+                if (kind == 4) {
+                    self.pointer_inside = true;
+                    self.noteHeldButton(button, true);
+                }
+                if (kind == 5) {
+                    const was_held = self.buttonIsHeld(button);
+                    self.noteHeldButton(button, false);
+                    if (!shared_event.shouldEmitPointerUp(was_held)) return .other;
+                }
                 var clicks: u8 = 1;
                 if (kind == 4 and button == .primary) {
                     const now = get32(event[4..8]);
@@ -873,6 +886,7 @@ pub const Window = struct {
                 const raw_y: i32 = @as(i16, @bitCast(get16(event[26..28])));
                 const x = physicalPointToLogical(raw_x, self.scale);
                 const y = physicalPointToLogical(raw_y, self.scale);
+                self.pointer_inside = true;
                 const state = get16(event[28..30]);
                 const held = shared_event.pointerEnterHeldButton(
                     state & x11_button1_mask != 0,
@@ -887,6 +901,7 @@ pub const Window = struct {
             },
             8 => { // LeaveNotify
                 if (x11NotifyModeIsGrab(event[30])) return .other;
+                self.pointer_inside = false;
                 return self.pointerLeave();
             },
             9 => { // FocusIn
@@ -1858,6 +1873,15 @@ pub const Window = struct {
             .secondary => self.held_secondary = down,
             .none => {},
         }
+    }
+
+    fn buttonIsHeld(self: *const Window, button: shared_event.PointerButton) bool {
+        return switch (button) {
+            .primary => self.held_primary,
+            .middle => self.held_middle,
+            .secondary => self.held_secondary,
+            .none => false,
+        };
     }
 
     fn pointerLeave(self: *Window) Event {
