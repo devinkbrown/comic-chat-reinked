@@ -1065,6 +1065,16 @@ test "leftover Color and HD title stars are standing silhouettes not smashed ico
         @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
         @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
     };
     for (blobs) |avb_data| {
         var star = try titleStarIcon(gpa, avb_data);
@@ -1079,6 +1089,44 @@ test "leftover Color and HD title stars are standing silhouettes not smashed ico
         var smashed = try bgb.decodeIcon(gpa, avb_data);
         defer smashed.deinit(gpa);
         try std.testing.expect(star.width != smashed.width or star.height != smashed.height);
+    }
+}
+
+test "leftover Color and HD bodycam figures stay standing with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+    };
+    const texts = [_][]const u8{ "", "ha ha leftover laugh", "oh no leftover sad" };
+    for (blobs) |avb_data| {
+        for (texts) |text| {
+            var body = try chromeBody(gpa, avb_data, text);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 140);
+            try std.testing.expect(body.height + 16 > body.width);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
     }
 }
 

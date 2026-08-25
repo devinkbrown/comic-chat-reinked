@@ -2607,6 +2607,8 @@ test "leftover dests keep dest-only paint on leftover HD and whacky rooms" {
         @embedFile("../assets/generated/whacky-friendly-castle.bgb"),
         @embedFile("../assets/generated/whacky-underwater-dome.bgb"),
         @embedFile("../assets/generated/whacky-cosmic-laundromat.bgb"),
+        @embedFile("../assets/generated/whacky-cloud-train-station.bgb"),
+        @embedFile("../assets/generated/whacky-arcade-planetarium.bgb"),
     };
     const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color" };
     const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
@@ -2625,6 +2627,124 @@ test "leftover dests keep dest-only paint on leftover HD and whacky rooms" {
             });
             defer image.deinit(gpa);
             try leftoverDestXorHits(image, empty);
+        }
+    }
+}
+
+test "leftover dest thought whisper and talk-to dests keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const cases = [_]struct { speaker: []const u8, modes: u16 }{
+        .{ .speaker = "hugh color", .modes = original_page.bm_think },
+        .{ .speaker = "maynard color", .modes = original_page.bm_think },
+        .{ .speaker = "cro color", .modes = original_page.bm_whisper },
+        .{ .speaker = "sage color", .modes = original_page.bm_action },
+    };
+    const text = "Great. The leftover dest must stay visible under this leftover balloon.";
+    for (rooms) |room| {
+        for (cases) |case| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text, .modes = case.modes }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = text, .modes = case.modes }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+
+    const mike = [_]Participant{.{ .identity = "mike", .avatar = "mike color" }};
+    const anna_target = [_]Participant{.{ .identity = "bob", .avatar = "anna" }};
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{
+            .speaker = "anna",
+            .text = "Great. The leftover dest talking to another leftover dest must keep both faces visible.",
+            .talk_targets = &anna_target,
+        }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        var image = try renderWithOptions(gpa, &.{.{
+            .speaker = "hugh color",
+            .text = "Great. The leftover dest talking to another leftover dest must keep both faces visible.",
+            .talk_targets = &mike,
+        }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        try leftoverDestXorHits(image, empty);
+    }
+}
+
+test "two leftover speakers keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const lines = [_]Line{
+        .{ .speaker = "hugh color", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "mike color", .text = "Standing dests still keep their faces visible." },
+    };
+    const empty_lines = [_]Line{
+        .{ .speaker = "anna", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "anna", .text = "Standing dests still keep their faces visible." },
+    };
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &empty_lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        var image = try renderWithOptions(gpa, &lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        try leftoverDestXorHits(image, empty);
+    }
+}
+
+test "leftover HD dest laugh and sad dests keep dest-only paint" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh hd", "xeno hd", "jordan hd", "cro hd" };
+    const texts = [_][]const u8{ "ha ha leftover laugh that is hilarious", "oh no leftover sad that is terrible" };
+    for (rooms) |room| {
+        for (texts) |text| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            for (dests) |dest| {
+                var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = text }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
         }
     }
 }
