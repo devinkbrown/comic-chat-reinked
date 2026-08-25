@@ -2006,9 +2006,9 @@ test "liftAbove docks a Color balloon above a standing dest" {
         .text = try gpa.dupe(u8, "HI"),
         .formatting = &.{},
         .lines = &lines,
-        .cloud_bbox = .{ .left = 100, .top = -100, .right = 800, .bottom = -1500 },
-        .route_region = .{ .left = 100, .top = -100, .right = 800, .bottom = -1500 },
-        .origin = .{ .x = 100, .y = -100 },
+        .cloud_bbox = .{ .left = 100, .top = -400, .right = 800, .bottom = -1200 },
+        .route_region = .{ .left = 100, .top = -400, .right = 800, .bottom = -1200 },
+        .origin = .{ .x = 100, .y = -400 },
         .outline_points = &.{},
         .outline_beziers = &.{},
         .tail = .{
@@ -2024,7 +2024,7 @@ test "liftAbove docks a Color balloon above a standing dest" {
     const world_tip_before = geo.origin.y + geo.tail.?.tip.y;
     geo.liftAbove(-900, -20);
     try std.testing.expectEqual(@as(i32, -900), geo.cloud_bbox.bottom);
-    try std.testing.expectEqual(@as(i32, -100 + (-900 - -1500)), geo.origin.y);
+    try std.testing.expectEqual(@as(i32, -400 + 300), geo.origin.y);
     try std.testing.expectEqual(world_tip_before, geo.origin.y + geo.tail.?.tip.y);
     try std.testing.expectEqual(geo.tail.?.tip.y, geo.tail.?.first_arc.end.y);
     try std.testing.expectEqual(geo.tail.?.tip.y, geo.tail.?.second_arc.start.y);
