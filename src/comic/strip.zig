@@ -3522,3 +3522,130 @@ test "leftover dests speaking the conversation UI lines keep dest-only paint on 
         try leftoverDestXorEachStoryPanel(image, empty);
     }
 }
+
+test "remaining leftover dest dests stay below the balloon on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/hd-school-hall.bgb"),
+        @embedFile("../assets/generated/hd-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-campsite.bgb"),
+        @embedFile("../assets/generated/hd-space-corridor.bgb"),
+    };
+    const dests = [_][]const u8{
+        "dan color", "mike color", "lynnea color", "scotty color", "kwensa color",
+        "tongtyed color", "rebecca color", "margaret color", "armando color", "sage color",
+        "hugh hd", "xeno hd", "jordan hd", "susan hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorBelowBalloon(image, empty);
+        }
+    }
+}
+
+test "leftover dest shout and wave dests stay below the balloon on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color" };
+    const texts = [_][]const u8{
+        "WATCH OUT LEFTOVER DEST SHOUTING NOW",
+        "Hello leftover dest wave from this unused room.",
+    };
+    for (rooms) |room| {
+        for (texts) |text| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            for (dests) |dest| {
+                var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = text }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorBelowBalloon(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest laugh and sad dests stay below the balloon on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "cro color" };
+    const texts = [_][]const u8{ "ha ha leftover laugh that is hilarious", "oh no leftover sad that is terrible" };
+    for (rooms) |room| {
+        for (texts) |text| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            for (dests) |dest| {
+                var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = text }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorBelowBalloon(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest wrap continuation fills leftover HD rooms without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/hd-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-school-hall.bgb"),
+        @embedFile("../assets/generated/hd-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-campsite.bgb"),
+        @embedFile("../assets/generated/hd-space-corridor.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "bolo color", "lance color", "bolo hd" };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            const checked = try leftoverWrapContinuationPaperBleed(image);
+            try std.testing.expect(checked >= 2);
+        }
+    }
+}
