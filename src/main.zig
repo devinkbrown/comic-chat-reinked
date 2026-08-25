@@ -4206,18 +4206,15 @@ fn sendCreateSlash(
     var limit: []const u8 = "";
     var key: []const u8 = "";
     var index: usize = 1;
-    var skip: usize = 1;
     if (index < count and (words[index][0] == '+' or words[index][0] == '-')) {
         modes = words[index];
         index += 1;
-        skip += 1;
     }
     if (index < count and isPositiveCount(words[index])) {
         limit = words[index];
         index += 1;
-        skip += 1;
     }
-    key = slashRestAfter(rest, skip);
+    if (index < count) key = words[index];
     if (modes.len != 0 and std.mem.indexOfAny(u8, modes, " \r\n\x00") != null) {
         try appendSessionNotice(workspace, "Enter modes as one token, for example +nt.");
         return true;
@@ -6177,6 +6174,7 @@ fn requestJoinWithKey(
 ) !?[]const u8 {
     client.joinWithKey(channel, key) catch |err| switch (err) {
         error.InvalidIrcParameter => return sessionLimitFailureNotice(.join, workspace, channel, key),
+        error.InvalidRestoreTarget => return "Enter the room password as one token.",
         error.TxBackpressure => return "The connection is busy. Try again in a moment.",
         else => return err,
     };
@@ -6193,6 +6191,7 @@ fn requestCreateRoom(
 ) !?[]const u8 {
     client.create(channel, creation_modes, limit, key) catch |err| switch (err) {
         error.InvalidIrcParameter => return sessionLimitFailureNotice(.create, workspace, channel, key),
+        error.InvalidRestoreTarget => return "Enter the room password as one token.",
         error.TxBackpressure => return "The connection is busy. Try again in a moment.",
         else => return err,
     };
@@ -8227,7 +8226,6 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expectEqualStrings("my horse", slashRestAfter("alice * my horse", 2));
     try std.testing.expectEqualStrings("my secret", slashRestAfter("alice my secret", 1));
     try std.testing.expectEqualStrings("new pass", slashRestAfter("old new pass", 1));
-    try std.testing.expectEqualStrings("secret key", slashRestAfter("#made +nt 20 secret key", 3));
     try std.testing.expect(!isOnyxServiceReply("WHOIS"));
     try std.testing.expect(!isOnyxServiceReply("MOTD"));
     try std.testing.expect(!isOnyxServiceSlash("users"));
@@ -8775,18 +8773,18 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expect((try workspaceRoomForIncoming(&workspace, "@#x", "me")) == null);
     try std.testing.expectEqualStrings("You have joined as many rooms as the server allows.", sessionLimitFailureNotice(.join, &workspace, "#x", ""));
     try std.testing.expectEqualStrings("You have opened as many rooms as the server allows.", roomEnsureFailureNotice(error.TooManyRooms));
-    const forward_before = workspace.activeRoom().?.transcript.lines.items.len;
-    try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #renamed #blocked :Forwarding")));
-    var saw_forward_limit = false;
-    for (workspace.activeRoom().?.transcript.lines.items[forward_before..]) |line| {
-        if (std.mem.indexOf(u8, line.text, "as many rooms") != null) saw_forward_limit = true;
-    }
-    try std.testing.expect(saw_forward_limit);
     try std.testing.expect(std.mem.indexOf(
         u8,
         workspace.activeRoom().?.transcript.lines.items[workspace.activeRoom().?.transcript.lines.items.len - 1].text,
         "as many rooms",
     ) != null);
+    const forward_before = workspace.activeRoom().?.transcript.lines.items.len;
+    try std.testing.expect(try applyChannelForward(&workspace, &client, &state, &cc.net.message.parse(":server 470 me #old #next :Forwarding")));
+    var saw_forward_limit = false;
+    for (workspace.activeRoom().?.transcript.lines.items[forward_before..]) |line| {
+        if (std.mem.indexOf(u8, line.text, "as many rooms") != null) saw_forward_limit = true;
+    }
+    try std.testing.expect(saw_forward_limit);
 
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expect(!workspace.rooms.items[old].want_rejoin);
@@ -8910,9 +8908,12 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PING") != null);
     try std.testing.expect(try sendCreateSlash(&client, &workspace, gpa, "/create #made +nt 20 secret"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CREATE #made +nt 20 secret") != null);
-    try std.testing.expect(try sendCreateSlash(&client, &workspace, gpa, "/create #keyed +nt 20 secret key"));
-    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "CREATE #keyed +nt 20 :secret key") != null);
-    try std.testing.expect(workspace.find("#keyed") != null);
+    try std.testing.expect(try sendJoinSlash(&client, &workspace, gpa, "/join #held secret key"));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        workspace.activeRoom().?.transcript.lines.items[workspace.activeRoom().?.transcript.lines.items.len - 1].text,
+        "one token",
+    ) != null);
     try std.testing.expect(workspace.find("#made") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/op alice #root"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE #root +o alice") != null);

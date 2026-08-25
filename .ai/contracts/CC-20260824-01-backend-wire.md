@@ -182,9 +182,10 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Composer speech before JOIN is an English notice, not a silent drop
 - `/avatar` `InvalidIrcParameter`, pending-topic rejection, 470 dest
   `ensure`, and toolbar PART stay English
-- `/create` key, `/identify`/`/register`/`/ghost`/`/drop` passwords, and
-  `/setpass` keep leftover-of-line text; IDENTIFY/GHOST/DROP/REGISTER
-  honor UTF8ONLY; slash `/ban`/`/except`/`/invex` honor advertised EXTBAN
+- `/identify`/`/register`/`/ghost`/`/drop` passwords and `/setpass` keep
+  leftover-of-line text; JOIN/CREATE reject spaced restore keys in English;
+  IDENTIFY/GHOST/DROP/REGISTER honor UTF8ONLY; slash `/ban`/`/except`/`/invex`
+  honor advertised EXTBAN
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
