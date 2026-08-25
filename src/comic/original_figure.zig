@@ -125,9 +125,7 @@ pub fn stretchRop(canvas: *Canvas, source: Image, destination: Rect, flipped: bo
                 .src_and => (old & sampled) & 0x00ffffff,
                 .merge_paint => (old | ~sampled) & 0x00ffffff,
                 .merge_paint_sticker => blk: {
-                    const rgb = sampled & 0x00ffffff;
-                    const ink = (sampled >> 24) != 0 and rgb != 0x00ffffff;
-                    const sticker: u32 = if (ink) 0x00000000 else 0x00ffffff;
+                    const sticker: u32 = if (stickerInk(sampled)) 0x00000000 else 0x00ffffff;
                     break :blk (old | ~sticker) & 0x00ffffff;
                 },
             };
@@ -776,6 +774,18 @@ fn drawingHasChromaticInk(image: Image) bool {
     return false;
 }
 
+/// Near-white anti-alias on Color/HD cards is paper, not silhouette. Treating
+/// it as ink MERGEPAINTs a pale halo around the woman on colored rooms.
+fn stickerInk(sampled: u32) bool {
+    if (sampled >> 24 == 0) return false;
+    const rgb = sampled & 0x00ffffff;
+    if (rgb == 0x00ffffff) return false;
+    const red: u8 = @truncate(sampled >> 16);
+    const green: u8 = @truncate(sampled >> 8);
+    const blue: u8 = @truncate(sampled);
+    return red < 242 or green < 242 or blue < 242;
+}
+
 /// `CBodySingle::DrawBody` MERGEPAINTs an aura before SRCAND (`bodycam.cpp:602-609`).
 /// Color/HD packages have no authored aura; synthesize the 1-bit white sticker
 /// from chromatic ink so SRCAND does not AND those colors into the backdrop.
@@ -967,6 +977,24 @@ test "color DIB MERGEPAINT sticker keeps chromatic ink off a colored dest" {
     }
     try std.testing.expect(colorful > 100);
     try std.testing.expect(and_black < colorful);
+}
+
+test "Color sticker ignores near-white AA so dest is not bleached" {
+    try std.testing.expect(!stickerInk(0xfff8f4f2));
+    try std.testing.expect(!stickerInk(0xffffffff));
+    try std.testing.expect(stickerInk(0xffff2040));
+    try std.testing.expect(stickerInk(0xffe0b090));
+
+    var fringe = [_]u32{0xfff8f4f2};
+    const pose = PoseLayers{ .drawing = .{ .width = 1, .height = 1, .pixels = &fringe } };
+    var canvas = try Canvas.init(std.testing.allocator, 1, 1);
+    defer canvas.deinit(std.testing.allocator);
+    canvas.clear(0xff00aa33);
+    _ = try drawSingle(&canvas, pose, .{ .client = .{ .x = 0, .y = 0, .w = 1, .h = 1 } });
+    const rgb = canvas.px[0] & 0x00ffffff;
+    try std.testing.expect(rgb != 0x00ffffff);
+    const green: u8 = @truncate(rgb >> 8);
+    try std.testing.expect(green > 80);
 }
 
 test "negative StretchDIBits width is reproduced by horizontal flip" {

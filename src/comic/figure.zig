@@ -1281,6 +1281,18 @@ test "Anna Color uses peach skin and a red top instead of a purple wash" {
     try std.testing.expect(assembled.generated_standing);
     try std.testing.expect(assembled.image.height > assembled.image.width);
     try std.testing.expect(assembled.image.height >= 160);
+    var top_edge: usize = 0;
+    var bot_edge: usize = 0;
+    const edge_h = @max(@as(u32, 1), assembled.image.height / 16);
+    for (assembled.image.pixels, 0..) |pixel, index| {
+        if (pixel >> 24 == 0) continue;
+        if (pixel & 0x00ffffff == 0x00ffffff) continue;
+        const y = index / assembled.image.width;
+        if (y < edge_h) top_edge += 1;
+        if (y + edge_h >= assembled.image.height) bot_edge += 1;
+    }
+    try std.testing.expect(top_edge > 4);
+    try std.testing.expect(bot_edge > 4);
 
     var peach: usize = 0;
     var red: usize = 0;

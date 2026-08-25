@@ -1617,6 +1617,8 @@ test "Anna Color continuation keeps her head in the panel" {
             if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
             var high_red: usize = 0;
             var high_peach: usize = 0;
+            var ink_min_y: u32 = panel_height;
+            var ink_max_y: u32 = 0;
             var y: u32 = 0;
             while (y < panel_height) : (y += 1) {
                 var x: u32 = 0;
@@ -1627,18 +1629,27 @@ test "Anna Color continuation keeps her head in the panel" {
                     const blue: i32 = @as(u8, @truncate(pixel));
                     if (red == green and green == blue) continue;
                     if (red >= 245 and green >= 245 and blue >= 245) continue;
+                    const peach = red > green + 15 and red > blue + 15 and green + 25 > blue and
+                        red > 90 and red < 230 and green > 60 and blue > 40;
+                    const tube = red > 120 and red > green + 40 and red > blue + 40 and green < 90;
+                    if (peach or tube) {
+                        ink_min_y = @min(ink_min_y, y);
+                        ink_max_y = @max(ink_max_y, y + 1);
+                    }
                     if (y >= (panel_height * 6) / 10) continue;
-                    if (red > 120 and red > green + 40 and red > blue + 40 and green < 90)
-                        high_red += 1;
-                    if (red > green + 15 and red > blue + 15 and green + 25 > blue and
-                        red > 90 and red < 230 and green > 60 and blue > 40)
-                        high_peach += 1;
+                    if (tube) high_red += 1;
+                    if (peach) high_peach += 1;
                 }
             }
             if (high_red + high_peach < 20) continue;
             // A legs-only dest has the red top and face below the midline.
             try std.testing.expect(high_peach > 10);
             try std.testing.expect(high_red > 8);
+            // Full standing dest occupies most of the panel, not a mid-thigh crop.
+            try std.testing.expect(ink_max_y > ink_min_y);
+            try std.testing.expect(ink_max_y - ink_min_y >= (panel_height * 45) / 100);
+            try std.testing.expect(ink_min_y < panel_height / 3);
+            try std.testing.expect(ink_max_y > (panel_height * 7) / 10);
             checked += 1;
         }
     }

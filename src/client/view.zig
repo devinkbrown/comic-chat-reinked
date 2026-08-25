@@ -2830,7 +2830,7 @@ fn characterGalleryRect(layout: ui.DialogLayout, first_field: usize) Rect {
     // Standing Color/HD cards are ~93×189. A 96px strip contain-fits them into
     // a sliver. Use the room down to the dialog buttons so the full silhouette
     // stays readable.
-    rect.h = @min(220, @max(30, layout.primary.y - rect.y - 28));
+    rect.h = @min(280, @max(30, layout.primary.y - rect.y - 28));
     return rect;
 }
 
@@ -3167,13 +3167,14 @@ test "character gallery browses adjacent cast members and previews expression" {
     try std.testing.expectEqualStrings("Happy", view.dialogValueAt(1));
     try std.testing.expectEqualStrings("Happy", view.currentEmotionLabel());
     try std.testing.expect(gallery.h >= 72);
+    try std.testing.expect(gallery.h >= 180);
     const preview = ui.AssetPreviewLayout.card(.{
         .x = cards.x + 6 + @divTrunc(cards.w - 16, 3),
         .y = cards.y + 4,
         .w = @divTrunc(cards.w - 16, 3) - 6,
         .h = cards.h - 8,
     });
-    try std.testing.expect(preview.artwork.h >= 40);
+    try std.testing.expect(preview.artwork.h >= 120);
 }
 
 test "dialog keyboard focus includes actions and protects typed choices" {

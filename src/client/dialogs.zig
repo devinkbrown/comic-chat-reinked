@@ -83,7 +83,7 @@ pub const specs = [_]Spec{
     .{ .id = .room_list, .resource = "IDD_ROOMLIST", .title = "Room List", .group = .rooms, .source_w = 400, .source_h = 255 },
     .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Settings", .group = .application, .source_w = 360, .source_h = 300 },
     .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "Personal Profile", .group = .connection, .source_w = 252, .source_h = 218 },
-    .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose Character", .group = .connection, .source_w = 360, .source_h = 260 },
+    .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose Character", .group = .connection, .source_w = 360, .source_h = 360 },
     .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Background", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick Member", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Nickname", .group = .connection, .source_w = 188, .source_h = 71 },
