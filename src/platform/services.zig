@@ -169,6 +169,93 @@ fn fileUrlToPath(url: []const u8, buf: []u8) ?[]const u8 {
     return percentDecode(rest, buf);
 }
 
+/// True for `text/html` and `text/html;charset=...` (receive-only MIME).
+pub fn isHtmlMime(mime: []const u8) bool {
+    const prefix = "text/html";
+    if (mime.len < prefix.len) return false;
+    if (!std.ascii.eqlIgnoreCase(mime[0..prefix.len], prefix)) return false;
+    return mime.len == prefix.len or mime[prefix.len] == ';';
+}
+
+/// Last-resort clipboard/drop payload: strip tags from `text/html`.
+/// Leaves already-plain text unchanged. Script/style bodies are dropped.
+pub fn htmlToPlainText(gpa: std.mem.Allocator, html: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, html, '<') == null) {
+        return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, html));
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    var skip_depth: u8 = 0;
+    while (i < html.len) {
+        if (html[i] == '<') {
+            const end = std.mem.indexOfScalarPos(u8, html, i + 1, '>') orelse break;
+            const raw = html[i + 1 .. end];
+            const closing = raw.len != 0 and raw[0] == '/';
+            const inner = std.mem.trim(u8, raw, " \t\r\n/");
+            var name = inner;
+            if (std.mem.indexOfAny(u8, inner, " \t\r\n")) |sp| name = inner[0..sp];
+            if (isHtmlBreak(name)) {
+                if (skip_depth == 0 and !closing and out.items.len != 0) try out.append(gpa, '\n');
+            } else if (isHtmlSkip(name)) {
+                if (!closing) {
+                    skip_depth +|= 1;
+                } else if (skip_depth != 0) {
+                    skip_depth -= 1;
+                }
+            }
+            i = end + 1;
+            continue;
+        }
+        if (skip_depth != 0) {
+            i += 1;
+            continue;
+        }
+        if (html[i] == '&') {
+            const decoded = decodeHtmlEntity(html[i..]);
+            try out.appendSlice(gpa, decoded.bytes[0..decoded.len]);
+            i += decoded.consumed;
+            continue;
+        }
+        try out.append(gpa, html[i]);
+        i += 1;
+    }
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn isHtmlBreak(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "br") or
+        std.ascii.eqlIgnoreCase(name, "p") or
+        std.ascii.eqlIgnoreCase(name, "div") or
+        std.ascii.eqlIgnoreCase(name, "tr") or
+        std.ascii.eqlIgnoreCase(name, "li");
+}
+
+fn isHtmlSkip(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "script") or std.ascii.eqlIgnoreCase(name, "style");
+}
+
+fn decodeHtmlEntity(text: []const u8) struct { bytes: [4]u8, len: u8, consumed: usize } {
+    if (text.len >= 5 and std.mem.startsWith(u8, text, "&amp;")) return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 5 };
+    if (text.len >= 4 and std.mem.startsWith(u8, text, "&lt;")) return .{ .bytes = "<\x00\x00\x00".*, .len = 1, .consumed = 4 };
+    if (text.len >= 4 and std.mem.startsWith(u8, text, "&gt;")) return .{ .bytes = ">\x00\x00\x00".*, .len = 1, .consumed = 4 };
+    if (text.len >= 6 and std.mem.startsWith(u8, text, "&nbsp;")) return .{ .bytes = " \x00\x00\x00".*, .len = 1, .consumed = 6 };
+    if (text.len >= 4 and text[1] == '#') {
+        const semi = std.mem.indexOfScalarPos(u8, text, 2, ';') orelse return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+        const digits = text[2..semi];
+        const value = if (digits.len != 0 and (digits[0] == 'x' or digits[0] == 'X'))
+            std.fmt.parseInt(u21, digits[1..], 16) catch return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 }
+        else
+            std.fmt.parseInt(u21, digits, 10) catch return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+        var encoded: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(value, &encoded) catch return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+        var bytes: [4]u8 = @splat(0);
+        @memcpy(bytes[0..n], encoded[0..n]);
+        return .{ .bytes = bytes, .len = @intCast(n), .consumed = semi + 1 };
+    }
+    return .{ .bytes = "&\x00\x00\x00".*, .len = 1, .consumed = 1 };
+}
+
 /// Clipboard bytes to UTF-8: strip a UTF-8 BOM or decode UTF-16 with BOM.
 pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, bytes, "\xEF\xBB\xBF")) {
@@ -805,4 +892,26 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     const crlf = try clipboardBytesToUtf8(gpa, "a\r\nb\rc");
     defer gpa.free(crlf);
     try std.testing.expectEqualStrings("a\nb\nc", crlf);
+}
+
+test "isHtmlMime accepts charset parameters" {
+    try std.testing.expect(isHtmlMime("text/html"));
+    try std.testing.expect(isHtmlMime("text/html;charset=utf-8"));
+    try std.testing.expect(isHtmlMime("TEXT/HTML;charset=UTF-8"));
+    try std.testing.expect(!isHtmlMime("text/htmlx"));
+    try std.testing.expect(!isHtmlMime("text/plain"));
+}
+
+test "htmlToPlainText strips tags and decodes common entities" {
+    const gpa = std.testing.allocator;
+    const plain = try htmlToPlainText(gpa, "already plain");
+    defer gpa.free(plain);
+    try std.testing.expectEqualStrings("already plain", plain);
+    const html = try htmlToPlainText(gpa, "<p>Hello&nbsp;&amp;&lt;world&gt;</p><script>x()</script>done");
+    defer gpa.free(html);
+    try std.testing.expectEqual(@as(usize, 18), html.len);
+    try std.testing.expectEqualStrings("Hello &<world>done", html);
+    const numeric = try htmlToPlainText(gpa, "&#x20ac;&#32;ok");
+    defer gpa.free(numeric);
+    try std.testing.expectEqualStrings("€ ok", numeric);
 }

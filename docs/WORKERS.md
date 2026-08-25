@@ -87,7 +87,8 @@ hash.
   on FocusOut, honors group bits 13–14, and refreshes GetKeyboardMapping on
   MappingNotify without dropping queued events. Wayland restores held
   Shift/Ctrl/Alt/Super from the keyboard-enter keys array and Caps Lock
-  from the conventional Lock modifier bit when the compositor reports it.
+  from the conventional Lock modifier bit when the compositor reports it,
+  and refreshes text-input on keyboard enter.
   It does not
   speak XIM. Text and `file:` drops use XDND / `wl_data_device` and are
   injected as existing key events (no new Event variant); Wayland sends
@@ -95,7 +96,10 @@ hash.
   includes `text/plain;charset=utf8`, `text/uri-list`, and
   `UTF16_STRING` / `text/plain;charset=utf-16` on receive, with UTF-8 BOM
   strip and UTF-16 decode. X11 paste prefers the owner's TARGETS list and
-  stashes events that arrive during GetProperty. Clipboard text normalizes
+  stashes events that arrive during GetProperty. ConvertSelection uses a
+  user timestamp rather than CurrentTime. XDND also prefers TARGETS and
+  uses the drop timestamp. Middle-click pastes PRIMARY as typed keys.
+  Receive-only `text/html` strips tags to plain text. Clipboard text normalizes
   CR/LF to LF. Central European Latin-2, Latin-9, Greek, Hebrew, Arabic,
   and named keysyms type
   without an IME. X11 paste also serves ICCCM `MULTIPLE` atom-pair

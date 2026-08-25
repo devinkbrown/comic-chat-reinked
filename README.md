@@ -282,8 +282,8 @@ the compositor configures client-side mode), coalesces `present()`
 commits behind `wl_surface.frame`, copies through
 `wl_data_device` and `zwp_primary_selection_v1` (including
 `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
-decode including receive-only `text/plain;charset=utf-16`, and CR/LF
-normalized to LF), injects
+decode including receive-only `text/plain;charset=utf-16` and `text/html`, and CR/LF
+normalized to LF), pastes PRIMARY on middle-click as typed keys, injects
 text/`file:` drops as typed keys with `data_offer.set_actions(copy)`, shows
 a `wp_cursor_shape_v1` or scaled shm pointer, and sets
 `xdg_toplevel_icon_v1` when advertised.
@@ -296,8 +296,9 @@ millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
 `text/uri-list`, `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
-TARGETS list), accepts XDND text/`file:`
-drops as typed keys, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
+TARGETS list and sending a user ConvertSelection timestamp), accepts XDND text/`file:`
+drops as typed keys (TARGETS-first, drop timestamp), pastes PRIMARY on
+middle-click as typed keys, accepts receive-only `text/html`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE`, honors keyboard group bits and
 MappingNotify without dropping queued events, resets compose on FocusOut,
 installs a scaled core pointer and `_NET_WM_ICON`, raises urgency on

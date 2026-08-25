@@ -20,7 +20,9 @@
 //!     core cursor and physical WM size hints reinstalled), ICCCM
 //!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
 //!     including `text/plain;charset=utf8`, `text/uri-list`, and
-//!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests,
+//!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, receive-only
+//!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
+//!     paste as typed keys, TARGETS-first XDND,
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
@@ -140,6 +142,9 @@ const XConn = struct {
     net_wm_state_attention: u32 = 0,
     net_wm_state_hidden: u32 = 0,
     utf16_string: u32 = 0,
+    mime_text_html: u32 = 0,
+    mime_text_html_utf8: u32 = 0,
+    mime_text_html_utf8_alt: u32 = 0,
     wm_state: u32 = 0,
     wm_change_state: u32 = 0,
     multiple: u32 = 0,
@@ -336,6 +341,8 @@ pub const Window = struct {
     incr_offset: usize,
     clipboard_time: u32,
     last_user_time: u32,
+    selection_time: u32,
+    middle_paste: bool,
     compose_table: ?xkb.ComposeTable,
     compose: xkb.Compose,
     pending_chars: std.ArrayList(u21),
@@ -396,6 +403,8 @@ pub const Window = struct {
             .incr_offset = 0,
             .clipboard_time = 0,
             .last_user_time = 0,
+            .selection_time = 0,
+            .middle_paste = false,
             .compose_table = null,
             .compose = .{},
             .pending_chars = .empty,
@@ -595,6 +604,16 @@ pub const Window = struct {
                     3 => .secondary,
                     else => .none,
                 };
+                if (kind == 4 and button == .middle) {
+                    if (self.pastePrimaryAsKeys()) |ev| {
+                        self.middle_paste = true;
+                        return ev;
+                    }
+                }
+                if (kind == 5 and button == .middle and self.middle_paste) {
+                    self.middle_paste = false;
+                    return .other;
+                }
                 var clicks: u8 = 1;
                 if (kind == 4 and button == .primary) {
                     const now = get32(event[4..8]);
@@ -824,7 +843,27 @@ pub const Window = struct {
         if (self.convertTarget(gpa, selection, self.conn.text, self.conn.text)) |text| {
             if (text) |bytes| return try self.decodeClipboardBytes(gpa, bytes);
         } else |_| {}
+        if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html)) |text| return text;
+        if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html_utf8)) |text| return text;
+        if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html_utf8_alt)) |text| return text;
         return null;
+    }
+
+    fn readHtmlTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
+        if (target == 0) return null;
+        const text = (self.convertTarget(gpa, selection, target, target) catch return null) orelse return null;
+        if (text.len == 0) {
+            gpa.free(text);
+            return null;
+        }
+        return self.decodeHtmlBytes(gpa, text) catch null;
+    }
+
+    fn decodeHtmlBytes(self: *Window, gpa: std.mem.Allocator, bytes: []u8) ![]u8 {
+        const decoded = try self.decodeClipboardBytes(gpa, bytes);
+        const plain = services.htmlToPlainText(gpa, decoded) catch return decoded;
+        gpa.free(decoded);
+        return plain;
     }
 
     fn bestOfferedTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32) ?u32 {
@@ -852,6 +891,9 @@ pub const Window = struct {
             gpa.free(bytes);
             return decoded;
         }
+        if (isHtmlAtom(&self.conn, target)) {
+            return try self.decodeHtmlBytes(gpa, bytes);
+        }
         return try self.decodeClipboardBytes(gpa, bytes);
     }
 
@@ -863,8 +905,29 @@ pub const Window = struct {
         return owned;
     }
 
+    fn convertStamp(self: *const Window) u32 {
+        if (self.selection_time != 0) return self.selection_time;
+        if (self.last_user_time != 0) return self.last_user_time;
+        return 1;
+    }
+
+    fn pastePrimaryAsKeys(self: *Window) ?Event {
+        const text = self.readPrimaryNative(self.gpa) catch return null;
+        const bytes = text orelse return null;
+        defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn readPrimaryNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
+        if (self.owns_primary or self.owns_clipboard) {
+            if (self.clipboard_text.len == 0) return null;
+            return try gpa.dupe(u8, self.clipboard_text);
+        }
+        return self.convertAndRead(gpa, atom_primary);
+    }
+
     fn convertTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32, property: u32) !?[]u8 {
-        try convertSelection(&self.conn, self.window, selection, target, property);
+        try convertSelection(&self.conn, self.window, selection, target, property, self.convertStamp());
         var attempts: u16 = 0;
         while (attempts < 64) : (attempts += 1) {
             var raw: [32]u8 = undefined;
@@ -1160,7 +1223,7 @@ pub const Window = struct {
             n += 1;
         }
         changePropertyAtoms(&self.conn, self.window, self.conn.save_targets, targets[0..n]) catch return;
-        convertSelection(&self.conn, self.window, self.conn.clipboard_manager, self.conn.save_targets, self.conn.save_targets) catch return;
+        convertSelection(&self.conn, self.window, self.conn.clipboard_manager, self.conn.save_targets, self.conn.save_targets, self.convertStamp()) catch return;
         var attempts: u16 = 0;
         while (attempts < 32) : (attempts += 1) {
             var raw: [32]u8 = undefined;
@@ -1328,7 +1391,10 @@ pub const Window = struct {
             self.finishXdnd(false);
             return null;
         }
-        const text = self.convertFirstTextTarget(self.gpa, self.conn.xdnd_selection) catch null;
+        const drop_time = get32(event[20..24]);
+        if (drop_time != 0) self.selection_time = drop_time;
+        const text = self.convertAndRead(self.gpa, self.conn.xdnd_selection) catch null;
+        self.selection_time = 0;
         self.finishXdnd(text != null);
         if (text) |bytes| {
             defer self.gpa.free(bytes);
@@ -1338,38 +1404,7 @@ pub const Window = struct {
     }
 
     fn convertFirstTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32) !?[]u8 {
-        const targets = [_]u32{
-            self.conn.utf8_string,
-            self.conn.mime_text_utf8,
-            self.conn.mime_text_utf8_alt,
-            self.conn.mime_text_plain,
-            self.conn.mime_uri_list,
-            self.conn.utf16_string,
-            self.conn.text,
-            atom_string,
-        };
-        for (targets) |target| {
-            if (target == 0) continue;
-            if (self.convertTarget(gpa, selection, target, target)) |text| {
-                if (text) |bytes| {
-                    if (target == self.conn.mime_uri_list) {
-                        if (self.takeUriListPath(gpa, bytes)) |path| return path;
-                    }
-                    if (bytes.len != 0) {
-                        if (target == self.conn.utf16_string) {
-                            const decoded = services.clipboardUtf16BytesToUtf8(gpa, bytes) catch {
-                                return try self.decodeClipboardBytes(gpa, bytes);
-                            };
-                            gpa.free(bytes);
-                            return decoded;
-                        }
-                        return try self.decodeClipboardBytes(gpa, bytes);
-                    }
-                    gpa.free(bytes);
-                }
-            } else |_| {}
-        }
-        return null;
+        return self.convertAndRead(gpa, selection);
     }
 
     fn finishXdnd(self: *Window, accepted: bool) void {
@@ -2067,6 +2102,9 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.net_wm_state_attention = try internAtom(conn, "_NET_WM_STATE_DEMANDS_ATTENTION");
     conn.net_wm_state_hidden = try internAtom(conn, "_NET_WM_STATE_HIDDEN");
     conn.utf16_string = try internAtom(conn, "UTF16_STRING");
+    conn.mime_text_html = try internAtom(conn, "text/html");
+    conn.mime_text_html_utf8 = try internAtom(conn, "text/html;charset=utf-8");
+    conn.mime_text_html_utf8_alt = try internAtom(conn, "text/html;charset=utf8");
     conn.wm_state = try internAtom(conn, "WM_STATE");
     conn.wm_change_state = try internAtom(conn, "WM_CHANGE_STATE");
     conn.multiple = try internAtom(conn, "MULTIPLE");
@@ -2710,7 +2748,12 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.utf16_string or atom == conn.mime_uri_list) return 3;
     if (atom == conn.text) return 2;
     if (atom == atom_string) return 1;
+    if (isHtmlAtom(conn, atom)) return 1;
     return 0;
+}
+
+fn isHtmlAtom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_html or atom == conn.mime_text_html_utf8 or atom == conn.mime_text_html_utf8_alt);
 }
 
 fn preferredTextAtom(conn: *const XConn, atoms: []const u8) ?u32 {
@@ -2733,7 +2776,7 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
     return target == conn.utf8_string or target == atom_string or target == conn.text or
         target == conn.mime_text_plain or target == conn.mime_text_utf8 or
         target == conn.mime_text_utf8_alt or target == conn.mime_uri_list or
-        target == conn.utf16_string;
+        target == conn.utf16_string or isHtmlAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -2766,7 +2809,7 @@ fn setInputFocus(conn: *XConn, window: u32, time: u32) !void {
     try writeAll(conn, &req);
 }
 
-fn convertSelection(conn: *XConn, requestor: u32, selection: u32, target: u32, property: u32) !void {
+fn convertSelection(conn: *XConn, requestor: u32, selection: u32, target: u32, property: u32, time: u32) !void {
     var req: [24]u8 = @splat(0);
     req[0] = 24;
     put16(req[2..4], 6);
@@ -2774,7 +2817,14 @@ fn convertSelection(conn: *XConn, requestor: u32, selection: u32, target: u32, p
     put32(req[8..12], selection);
     put32(req[12..16], target);
     put32(req[16..20], property);
+    put32(req[20..24], if (time != 0) time else 1);
     try writeAll(conn, &req);
+}
+
+fn convertSelectionTime(last_user_time: u32, selection_time: u32) u32 {
+    if (selection_time != 0) return selection_time;
+    if (last_user_time != 0) return last_user_time;
+    return 1;
 }
 
 fn sendSelectionNotify(conn: *XConn, requestor: u32, time: u32, selection: u32, target: u32, property: u32) !void {
@@ -2993,6 +3043,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_utf8_alt = 105,
         .mime_uri_list = 106,
         .utf16_string = 107,
+        .mime_text_html = 108,
+        .mime_text_html_utf8 = 109,
+        .mime_text_html_utf8_alt = 110,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
@@ -3000,6 +3053,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 105));
     try std.testing.expect(isClipboardTextTarget(&conn, 106));
     try std.testing.expect(isClipboardTextTarget(&conn, 107));
+    try std.testing.expect(isClipboardTextTarget(&conn, 108));
+    try std.testing.expect(isClipboardTextTarget(&conn, 109));
+    try std.testing.expect(isClipboardTextTarget(&conn, 110));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 
     var atoms: [12]u8 = undefined;
@@ -3103,6 +3159,12 @@ test "cached RANDR CRTC hit-test uses inclusive origin and exclusive max" {
     try std.testing.expect(!crtcContains(left, 1920, 10));
     try std.testing.expectEqual(@as(u32, 2560), crtcContaining(&crtcs, 2000, 20).?.width);
     try std.testing.expect(crtcContaining(&crtcs, -1, 0) == null);
+}
+
+test "ConvertSelection timestamp prefers the drop time then last user time" {
+    try std.testing.expectEqual(@as(u32, 42), convertSelectionTime(7, 42));
+    try std.testing.expectEqual(@as(u32, 7), convertSelectionTime(7, 0));
+    try std.testing.expectEqual(@as(u32, 1), convertSelectionTime(0, 0));
 }
 
 test "MULTIPLE atom-pair payload is an even list of 32-bit atoms" {

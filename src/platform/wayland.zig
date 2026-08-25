@@ -29,7 +29,8 @@
 //! `wl_data_device` and `zwp_primary_selection_v1` when present, including
 //! `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip /
 //! UTF-16 decode (including `text/plain;charset=utf-16` / `UTF16_STRING`
-//! on receive only). Text and `file:` drops arrive as typed keys (no new
+//! on receive only) and receive-only `text/html`. Middle-click pastes
+//! PRIMARY as typed keys. Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
 //! advertised, otherwise a scaled shm arrow. `xdg_toplevel_icon_v1` is set
@@ -170,6 +171,13 @@ const text_mime_types = [_][]const u8{
 const utf16_mime_types = [_][]const u8{
     "text/plain;charset=utf-16",
     "UTF16_STRING",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const html_mime_types = [_][]const u8{
+    "text/html",
+    "text/html;charset=utf-8",
+    "text/html;charset=utf8",
 };
 
 pub const Key = shared_event.Key;
@@ -520,6 +528,7 @@ pub const Window = struct {
     frame_callback_id: u32 = 0,
     pending_present: ?PendingPresent = null,
     last_serial: u32 = 0,
+    middle_paste: bool = false,
     clipboard_text: []u8 = &.{},
     axis_have_discrete: bool = false,
     ime_composing: bool = false,
@@ -1323,6 +1332,16 @@ pub const Window = struct {
                     else => .none,
                 };
                 const pressed = get32(body[12..16]) != 0;
+                if (pressed and button == .middle) {
+                    if (self.pastePrimaryAsKeys()) |ev| {
+                        self.middle_paste = true;
+                        return ev;
+                    }
+                }
+                if (!pressed and button == .middle and self.middle_paste) {
+                    self.middle_paste = false;
+                    return null;
+                }
                 var clicks: u8 = 1;
                 if (pressed and button == .primary) {
                     const now = get32(body[4..8]);
@@ -1411,6 +1430,7 @@ pub const Window = struct {
                 const keys_len: usize = @intCast(get32(body[8..12]));
                 if (12 + pad4(keys_len) != body.len) return error.InvalidWaylandMessage;
                 self.applyHeldKeys(body[12 .. 12 + keys_len]);
+                self.refreshTextInput() catch {};
                 return null;
             },
             2 => { // leave
@@ -1693,6 +1713,23 @@ pub const Window = struct {
         return null;
     }
 
+    fn pastePrimaryAsKeys(self: *Window) ?Event {
+        const text = self.readPrimaryNative(self.gpa) catch return null;
+        const bytes = text orelse return null;
+        defer self.gpa.free(bytes);
+        return self.enqueueDropText(bytes) catch null;
+    }
+
+    fn readPrimaryNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
+        if (self.clipboard_text.len != 0 and self.primary_source_id != 0) {
+            return try gpa.dupe(u8, self.clipboard_text);
+        }
+        if (self.primary_offer_id != 0 and self.primary_offer_has_text) {
+            return try self.receiveOffer(gpa, self.primary_offer_id, primary_offer_receive);
+        }
+        return null;
+    }
+
     fn writeClipboardNative(self: *Window, text: []const u8) !void {
         if (text.len > max_clipboard_bytes) return error.ClipboardTooLarge;
         if (self.data_device_id == 0) return error.MissingDataDevice;
@@ -1762,6 +1799,19 @@ pub const Window = struct {
                     };
                     gpa.free(text);
                     return decoded;
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (html_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = decodeClipboardBytes(gpa, text) catch return text;
+                    const plain = services.htmlToPlainText(gpa, decoded) catch return decoded;
+                    gpa.free(decoded);
+                    return plain;
                 }
                 if (last_empty) |prev| gpa.free(prev);
                 last_empty = text;
@@ -2434,11 +2484,15 @@ fn isPlainTextMime(mime: []const u8) bool {
 
 fn knownTextMime(mime: []const u8) ?[]const u8 {
     for (text_mime_types) |known| {
-        if (std.mem.eql(u8, mime, known)) return known;
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
     }
     for (utf16_mime_types) |known| {
-        if (std.mem.eql(u8, mime, known)) return known;
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
     }
+    for (html_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
+    if (services.isHtmlMime(mime)) return "text/html";
     return null;
 }
 
@@ -2450,6 +2504,7 @@ fn textMimeRank(mime: []const u8) u8 {
     if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
     if (std.mem.eql(u8, mime, "text/uri-list")) return 2;
     if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
+    if (services.isHtmlMime(mime)) return 1;
     return 0;
 }
 
@@ -3190,6 +3245,8 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("UTF8_STRING"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=utf-16"));
     try std.testing.expect(isPlainTextMime("UTF16_STRING"));
+    try std.testing.expect(isPlainTextMime("text/html"));
+    try std.testing.expect(isPlainTextMime("text/html;charset=utf-8"));
     try std.testing.expect(!isPlainTextMime("image/png"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));
