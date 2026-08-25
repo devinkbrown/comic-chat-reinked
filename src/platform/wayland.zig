@@ -34,8 +34,14 @@
 //! file-list MIME (`x-special/gnome-copied-files`, `text/x-moz-url`,
 //! `application/x-moz-file`). Middle-click pastes PRIMARY as typed keys
 //! and falls back to `wl-paste --primary` when the native primary protocol
-//! is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed keys.
-//! `present()` skips commits while the toplevel is suspended.
+//! is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed keys;
+//! CLIPBOARD paste does not read PRIMARY. A copy before the first seat
+//! serial is stored and advertised once a serial arrives. NumLock (Mod2
+//! lock bit or KEY_NUMLOCK) selects keypad digits. XKB groups 3–4 wrap
+//! and AltGr reads the active group's Level3. Receive-only COMPOUND_TEXT
+//! and extra KDE5/Mozilla-priv file MIME are accepted. `present()` skips
+//! commits while the toplevel is suspended; leaving suspended or gaining
+//! xdg activated exposes, and text-input disables when not activated.
 //! Text and `file:` drops arrive as typed keys (no new
 //! Event variant) and `data_offer.set_actions(copy, copy)` is sent when
 //! accepting a drop. A `wp_cursor_shape_v1` default pointer is used when
@@ -155,6 +161,7 @@ const xdg_wm_cap_maximize: u32 = 2;
 const xdg_wm_cap_fullscreen: u32 = 3;
 const xdg_wm_cap_minimize: u32 = 4;
 const xkb_mod_lock: u32 = 1 << 1;
+const xkb_mod_num: u32 = 1 << 2;
 const data_offer_accept: u16 = 0;
 const data_offer_finish: u16 = 3;
 const data_offer_set_actions: u16 = 4;
@@ -215,6 +222,13 @@ const desktop_file_mime_types = [_][]const u8{
     "text/x-moz-url",
     "application/x-moz-file",
     "application/x-kde4-urilist",
+    "application/x-kde5-urilist",
+    "text/x-moz-url-priv",
+};
+
+/// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
+const compound_text_mime_types = [_][]const u8{
+    "COMPOUND_TEXT",
 };
 
 pub const Key = shared_event.Key;
@@ -545,6 +559,7 @@ pub const Window = struct {
     toplevel_fullscreen: bool = false,
     toplevel_tiled: bool = false,
     toplevel_suspended: bool = false,
+    toplevel_activated: bool = false,
     bounds_width: i32 = 0,
     bounds_height: i32 = 0,
     wm_can_window_menu: bool = false,
@@ -552,6 +567,7 @@ pub const Window = struct {
     wm_can_fullscreen: bool = false,
     wm_can_minimize: bool = false,
     caps_from_compositor: bool = false,
+    num_from_compositor: bool = false,
     cursor_shape_manager_id: u32 = 0,
     cursor_shape_device_id: u32 = 0,
     cursor_surface_id: u32 = 0,
@@ -570,6 +586,7 @@ pub const Window = struct {
     frame_callback_id: u32 = 0,
     pending_present: ?PendingPresent = null,
     last_serial: u32 = 0,
+    clipboard_needs_serial: bool = false,
     middle_paste: bool = false,
     clipboard_text: []u8 = &.{},
     axis_have_discrete: bool = false,
@@ -595,6 +612,7 @@ pub const Window = struct {
     super_left: bool = false,
     super_right: bool = false,
     caps_lock: bool = false,
+    num_lock: bool = false,
     /// The compositor's layout, once a keymap event with a supported format
     /// has been received and successfully parsed. Null before that (falls
     /// back to evdevToKey's hardcoded US table) and if the compositor sent
@@ -1147,9 +1165,21 @@ pub const Window = struct {
                         configureContainsState(states, xdg_state_tiled_right) or
                         configureContainsState(states, xdg_state_tiled_top) or
                         configureContainsState(states, xdg_state_tiled_bottom);
+                    const was_suspended = self.toplevel_suspended;
                     self.toplevel_suspended = configureContainsState(states, xdg_state_suspended);
-                    if (configureContainsState(states, xdg_state_activated)) {
+                    const was_activated = self.toplevel_activated;
+                    self.toplevel_activated = configureContainsState(states, xdg_state_activated);
+                    if (!was_activated and self.toplevel_activated) {
+                        self.enableTextInput() catch {};
+                    } else if (was_activated and !self.toplevel_activated) {
+                        self.disableTextInput() catch {};
+                    } else if (self.toplevel_activated) {
                         self.refreshTextInput() catch {};
+                    }
+                    if ((was_suspended and !self.toplevel_suspended) or
+                        (!was_activated and self.toplevel_activated))
+                    {
+                        return Event.expose;
                     }
                     return null;
                 },
@@ -1291,8 +1321,7 @@ pub const Window = struct {
                 if (body.len != 4) return error.InvalidWaylandMessage;
                 self.ime_composing = false;
                 self.last_committed = null;
-                try sendEmpty(&self.conn, self.text_input_id, text_input_disable);
-                try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
+                try self.disableTextInput();
             },
             2 => { // preedit_string(text, cursor_begin, cursor_end)
                 const text = try parseLeadingString(body);
@@ -1325,6 +1354,13 @@ pub const Window = struct {
         try sendEmpty(&self.conn, self.text_input_id, text_input_enable);
         try sendTwoU32(&self.conn, self.text_input_id, text_input_set_content_type, text_input_hint_multiline, 0);
         try self.sendCursorRectangle();
+        try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
+    }
+
+    fn disableTextInput(self: *Window) !void {
+        if (self.text_input_id == 0) return;
+        self.ime_composing = false;
+        try sendEmpty(&self.conn, self.text_input_id, text_input_disable);
         try sendEmpty(&self.conn, self.text_input_id, text_input_commit);
     }
 
@@ -1362,7 +1398,7 @@ pub const Window = struct {
         switch (opcode) {
             0 => { // enter(serial, surface, x, y)
                 if (body.len != 16) return error.InvalidWaylandMessage;
-                self.last_serial = get32(body[0..4]);
+                self.noteSerial(get32(body[0..4]));
                 self.pointer_x = @divTrunc(getI32(body[8..12]), 256);
                 self.pointer_y = @divTrunc(getI32(body[12..16]), 256);
                 self.applyPointerCursor();
@@ -1380,7 +1416,7 @@ pub const Window = struct {
             },
             3 => { // button(serial, time, button, state)
                 if (body.len != 16) return error.InvalidWaylandMessage;
-                self.last_serial = get32(body[0..4]);
+                self.noteSerial(get32(body[0..4]));
                 self.applyPointerCursor();
                 const button: shared_event.PointerButton = switch (get32(body[8..12])) {
                     0x110 => .primary,
@@ -1483,7 +1519,7 @@ pub const Window = struct {
             },
             1 => { // enter(serial, surface, keys array)
                 if (body.len < 12) return error.InvalidWaylandMessage;
-                self.last_serial = get32(body[0..4]);
+                self.noteSerial(get32(body[0..4]));
                 const keys_len: usize = @intCast(get32(body[8..12]));
                 if (12 + pad4(keys_len) != body.len) return error.InvalidWaylandMessage;
                 self.applyHeldKeys(body[12 .. 12 + keys_len]);
@@ -1503,11 +1539,12 @@ pub const Window = struct {
                 self.held_key_code = null;
                 self.ime_composing = false;
                 self.compose.reset();
+                self.disableTextInput() catch {};
                 return null;
             },
             3 => { // key(serial, time, key, state)
                 if (body.len != 16) return error.InvalidWaylandMessage;
-                self.last_serial = get32(body[0..4]);
+                self.noteSerial(get32(body[0..4]));
                 const code = get32(body[8..12]);
                 const state = get32(body[12..16]);
                 const down = state != 0;
@@ -1523,9 +1560,12 @@ pub const Window = struct {
                     58 => if (state == 1) {
                         self.caps_lock = !self.caps_lock;
                     },
+                    69 => if (state == 1) {
+                        self.num_lock = !self.num_lock;
+                    },
                     else => {},
                 }
-                const is_modifier = code == 42 or code == 54 or code == 29 or code == 97 or code == 56 or code == 100 or code == 125 or code == 126 or code == 58;
+                const is_modifier = code == 42 or code == 54 or code == 29 or code == 97 or code == 56 or code == 100 or code == 125 or code == 126 or code == 58 or code == 69;
                 if (!is_modifier) {
                     if (down) {
                         self.held_key_code = code;
@@ -1586,6 +1626,7 @@ pub const Window = struct {
                 // keyboard enter is not missed. Group is the layout slot.
                 const locked = get32(body[12..16]);
                 self.caps_lock = capsLockFromLocked(locked, self.caps_lock, &self.caps_from_compositor);
+                self.num_lock = lockFromLocked(locked, xkb_mod_num, self.num_lock, &self.num_from_compositor);
                 self.xkb_group = get32(body[16..20]);
                 return null;
             },
@@ -1626,32 +1667,40 @@ pub const Window = struct {
     /// simply the base character's uppercase form).
     fn translateKey(self: *Window, code: u32, shift: bool) Key {
         if (self.xkb_keymap) |*keymap| {
-            if (self.xkb_group == 0 and self.alt_right) {
-                if (keymap.keysymForLevel(code, .level3)) |keysym| {
+            if (self.alt_right) {
+                if (keymap.keysymForGroupLevel(code, self.xkb_group, .level3)) |keysym| {
                     if (xkb.charForKeysym(keysym)) |ch| return .{ .char = ch };
                     if (xkb.namedKeyForKeysym(keysym)) |named| return namedKeyToKey(named);
                 }
             }
             if (keymap.keysymForGroupLevel(code, self.xkb_group, .base)) |base_keysym| {
-                const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
-                const effective_shift = if (is_letter) (shift != self.caps_lock) else shift;
+                const shift_name = keymap.keysymForGroupLevel(code, self.xkb_group, .shift);
+                const effective_shift = self.effectiveLevelShift(base_keysym, shift_name, shift);
                 if (keymap.keysymForGroupLevel(code, self.xkb_group, if (effective_shift) .shift else .base)) |keysym| {
                     if (xkb.charForKeysym(keysym)) |ch| return .{ .char = ch };
                     if (xkb.namedKeyForKeysym(keysym)) |named| return namedKeyToKey(named);
                 }
             }
         }
-        return evdevToKey(code, shift, self.caps_lock);
+        return evdevToKey(code, shift, self.caps_lock, self.num_lock);
+    }
+
+    fn effectiveLevelShift(self: *const Window, base_keysym: []const u8, shift_keysym: ?[]const u8, shift: bool) bool {
+        if (xkb.isKeypadKeysymName(base_keysym) or (shift_keysym != null and xkb.isKeypadKeysymName(shift_keysym.?))) {
+            return xkb.keypadUsesNumeric(self.num_lock, shift);
+        }
+        const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
+        return if (is_letter) (shift != self.caps_lock) else shift;
     }
 
     fn currentKeysymName(self: *const Window, code: u32, shift: bool) ?[]const u8 {
         const keymap = self.xkb_keymap orelse return null;
-        if (self.xkb_group == 0 and self.alt_right) {
-            if (keymap.keysymForLevel(code, .level3)) |name| return name;
+        if (self.alt_right) {
+            if (keymap.keysymForGroupLevel(code, self.xkb_group, .level3)) |name| return name;
         }
         if (keymap.keysymForGroupLevel(code, self.xkb_group, .base)) |base_keysym| {
-            const is_letter = base_keysym.len == 1 and std.ascii.isAlphabetic(base_keysym[0]);
-            const effective_shift = if (is_letter) (shift != self.caps_lock) else shift;
+            const shift_name = keymap.keysymForGroupLevel(code, self.xkb_group, .shift);
+            const effective_shift = self.effectiveLevelShift(base_keysym, shift_name, shift);
             return keymap.keysymForGroupLevel(code, self.xkb_group, if (effective_shift) .shift else .base);
         }
         return null;
@@ -1816,13 +1865,32 @@ pub const Window = struct {
         return null;
     }
 
+    fn noteSerial(self: *Window, serial: u32) void {
+        if (serial == 0) return;
+        self.last_serial = serial;
+        self.flushPendingClipboard() catch {};
+    }
+
     fn writeClipboardNative(self: *Window, text: []const u8) !void {
         if (text.len > max_clipboard_bytes) return error.ClipboardTooLarge;
         if (self.data_device_id == 0) return error.MissingDataDevice;
-        if (self.last_serial == 0) return error.MissingSelectionSerial;
         const copy = try self.gpa.dupe(u8, text);
         if (self.clipboard_text.len != 0) self.gpa.free(self.clipboard_text);
         self.clipboard_text = copy;
+        if (self.last_serial == 0) {
+            self.clipboard_needs_serial = true;
+            return;
+        }
+        try self.advertiseClipboard();
+    }
+
+    fn flushPendingClipboard(self: *Window) !void {
+        if (!self.clipboard_needs_serial) return;
+        if (self.last_serial == 0 or self.data_device_id == 0 or self.clipboard_text.len == 0) return;
+        try self.advertiseClipboard();
+    }
+
+    fn advertiseClipboard(self: *Window) !void {
         if (self.data_source_id != 0) {
             sendEmpty(&self.conn, self.data_source_id, data_source_destroy) catch {};
             self.data_source_id = 0;
@@ -1841,17 +1909,15 @@ pub const Window = struct {
             try self.offerTextMimes(self.primary_source_id, primary_source_offer);
             try sendTwoU32(&self.conn, self.primary_device_id, primary_device_set_selection, self.primary_source_id, self.last_serial);
         }
+        self.clipboard_needs_serial = false;
     }
 
     fn readClipboardNative(self: *Window, gpa: std.mem.Allocator) !?[]u8 {
-        if (self.clipboard_text.len != 0 and (self.data_source_id != 0 or self.primary_source_id != 0)) {
+        if (self.clipboard_text.len != 0 and (self.data_source_id != 0 or self.primary_source_id != 0 or self.clipboard_needs_serial)) {
             return try gpa.dupe(u8, self.clipboard_text);
         }
         if (self.data_offer_id != 0 and self.offer_has_text) {
             return try self.receiveOffer(gpa, self.data_offer_id, data_offer_receive);
-        }
-        if (self.primary_offer_id != 0 and self.primary_offer_has_text) {
-            return try self.receiveOffer(gpa, self.primary_offer_id, primary_offer_receive);
         }
         return error.MissingDataOffer;
     }
@@ -1915,6 +1981,18 @@ pub const Window = struct {
                     if (last_empty) |prev| gpa.free(prev);
                     if (self.takeDesktopFilePath(gpa, text)) |path| return path;
                     return decodeClipboardBytes(gpa, text);
+                }
+                if (last_empty) |prev| gpa.free(prev);
+                last_empty = text;
+            } else |_| {}
+        }
+        for (compound_text_mime_types) |mime| {
+            if (self.receiveMime(gpa, offer_id, opcode, mime)) |text| {
+                if (text.len != 0) {
+                    if (last_empty) |prev| gpa.free(prev);
+                    const decoded = services.compoundTextToUtf8(gpa, text) catch return text;
+                    gpa.free(text);
+                    return decoded;
                 }
                 if (last_empty) |prev| gpa.free(prev);
                 last_empty = text;
@@ -1989,7 +2067,7 @@ pub const Window = struct {
             },
             1 => { // enter(serial, surface, x, y, id)
                 if (body.len != 20) return error.InvalidWaylandMessage;
-                self.last_serial = get32(body[0..4]);
+                self.noteSerial(get32(body[0..4]));
                 self.pointer_x = @divTrunc(getI32(body[8..12]), 256);
                 self.pointer_y = @divTrunc(getI32(body[12..16]), 256);
                 const id = get32(body[16..20]);
@@ -2647,7 +2725,11 @@ fn decorationModeIsClientSide(mode: u32) bool {
 }
 
 fn capsLockFromLocked(locked: u32, current: bool, from_compositor: *bool) bool {
-    if (locked & xkb_mod_lock != 0) {
+    return lockFromLocked(locked, xkb_mod_lock, current, from_compositor);
+}
+
+fn lockFromLocked(locked: u32, bit: u32, current: bool, from_compositor: *bool) bool {
+    if (locked & bit != 0) {
         from_compositor.* = true;
         return true;
     }
@@ -2691,10 +2773,14 @@ fn knownTextMime(mime: []const u8) ?[]const u8 {
     for (desktop_file_mime_types) |known| {
         if (std.ascii.eqlIgnoreCase(mime, known)) return known;
     }
+    for (compound_text_mime_types) |known| {
+        if (std.ascii.eqlIgnoreCase(mime, known)) return known;
+    }
     if (services.isHtmlMime(mime)) return "text/html";
     if (services.isUriListMime(mime)) return "text/uri-list";
     if (services.isRtfMime(mime)) return "text/rtf";
     if (services.isDesktopFileMime(mime)) return "x-special/gnome-copied-files";
+    if (services.isCompoundTextMime(mime)) return "COMPOUND_TEXT";
     return null;
 }
 
@@ -2706,7 +2792,7 @@ fn textMimeRank(mime: []const u8) u8 {
     if (std.mem.eql(u8, mime, "text/plain;charset=utf-16") or std.mem.eql(u8, mime, "UTF16_STRING")) return 3;
     if (services.isUriListMime(mime) or services.isDesktopFileMime(mime)) return 2;
     if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return 1;
-    if (services.isHtmlMime(mime) or services.isRtfMime(mime)) return 1;
+    if (services.isHtmlMime(mime) or services.isRtfMime(mime) or services.isCompoundTextMime(mime)) return 1;
     return 0;
 }
 
@@ -2743,7 +2829,7 @@ fn isClipboardPasteEvdev(code: u32, shift: bool, control: bool) bool {
 
 fn isModifierEvdev(code: u32) bool {
     return switch (code) {
-        29, 42, 54, 56, 58, 97, 100, 125, 126 => true,
+        29, 42, 54, 56, 58, 69, 97, 100, 125, 126 => true,
         else => false,
     };
 }
@@ -2757,7 +2843,7 @@ fn heldNonModifierFromKeyArray(keys: []const u8) ?u32 {
     return null;
 }
 
-fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
+fn evdevToKey(code: u32, shift: bool, caps_lock: bool, num_lock: bool) Key {
     return switch (code) {
         1 => .escape,
         14 => .backspace,
@@ -2819,7 +2905,22 @@ fn evdevToKey(code: u32, shift: bool, caps_lock: bool) Key {
         51 => asciiPair(',', '<', shift),
         52 => asciiPair('.', '>', shift),
         53 => asciiPair('/', '?', shift),
+        55 => .{ .char = '*' },
         57 => .{ .char = ' ' },
+        71 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '7' } else .home,
+        72 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '8' } else .up,
+        73 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '9' } else .page_up,
+        74 => .{ .char = '-' },
+        75 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '4' } else .left,
+        76 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '5' } else .other,
+        77 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '6' } else .right,
+        78 => .{ .char = '+' },
+        79 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '1' } else .end,
+        80 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '2' } else .down,
+        81 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '3' } else .page_down,
+        82 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '0' } else .other,
+        83 => if (xkb.keypadUsesNumeric(num_lock, shift)) .{ .char = '.' } else .delete,
+        98 => .{ .char = '/' },
         else => .other,
     };
 }
@@ -2997,14 +3098,31 @@ test "Wayland socket path honors absolute display and runtime directory" {
 }
 
 test "US evdev fallback maps text modifiers and navigation" {
-    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, false, false));
-    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, true, false));
-    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, false, true));
-    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, true, true));
-    try std.testing.expectEqual(Key{ .char = '!' }, evdevToKey(2, true, false));
-    try std.testing.expectEqual(Key.left, evdevToKey(105, false, false));
-    try std.testing.expectEqual(Key.delete, evdevToKey(111, false, false));
-    try std.testing.expectEqual(Key.other, evdevToKey(59, false, false));
+    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, false, false, false));
+    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, true, false, false));
+    try std.testing.expectEqual(Key{ .char = 'A' }, evdevToKey(30, false, true, false));
+    try std.testing.expectEqual(Key{ .char = 'a' }, evdevToKey(30, true, true, false));
+    try std.testing.expectEqual(Key{ .char = '!' }, evdevToKey(2, true, false, false));
+    try std.testing.expectEqual(Key.left, evdevToKey(105, false, false, false));
+    try std.testing.expectEqual(Key.delete, evdevToKey(111, false, false, false));
+    try std.testing.expectEqual(Key.other, evdevToKey(59, false, false, false));
+    try std.testing.expectEqual(Key.home, evdevToKey(71, false, false, false));
+    try std.testing.expectEqual(Key{ .char = '7' }, evdevToKey(71, false, false, true));
+    try std.testing.expectEqual(Key.home, evdevToKey(71, true, false, true));
+    try std.testing.expectEqual(Key{ .char = '7' }, evdevToKey(71, true, false, false));
+    try std.testing.expectEqual(Key{ .char = '.' }, evdevToKey(83, false, false, true));
+    try std.testing.expectEqual(Key.delete, evdevToKey(83, false, false, false));
+}
+
+test "compositor lock bits report CapsLock and NumLock" {
+    var from_caps = false;
+    try std.testing.expect(capsLockFromLocked(xkb_mod_lock, false, &from_caps));
+    try std.testing.expect(from_caps);
+    try std.testing.expect(!capsLockFromLocked(0, true, &from_caps));
+    var from_num = false;
+    try std.testing.expect(lockFromLocked(xkb_mod_num, xkb_mod_num, false, &from_num));
+    try std.testing.expect(from_num);
+    try std.testing.expect(!lockFromLocked(0, xkb_mod_num, true, &from_num));
 }
 
 test "SCM control alignment is sufficient for one fd" {
@@ -3465,15 +3583,20 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("text/x-moz-url"));
     try std.testing.expect(isPlainTextMime("application/x-moz-file"));
     try std.testing.expect(isPlainTextMime("application/x-kde4-urilist"));
+    try std.testing.expect(isPlainTextMime("application/x-kde5-urilist"));
+    try std.testing.expect(isPlainTextMime("text/x-moz-url-priv"));
     try std.testing.expect(isPlainTextMime("text/x-uri-list"));
     try std.testing.expect(isPlainTextMime("text/rtf"));
     try std.testing.expect(isPlainTextMime("application/rtf"));
+    try std.testing.expect(isPlainTextMime("COMPOUND_TEXT"));
     try std.testing.expect(!isPlainTextMime("image/png"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("text/uri-list"));
     try std.testing.expect(textMimeRank("text/plain;charset=utf-8") > textMimeRank("UTF16_STRING"));
     try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("text/x-uri-list"));
     try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("x-special/gnome-copied-files"));
+    try std.testing.expectEqual(textMimeRank("text/uri-list"), textMimeRank("application/x-kde5-urilist"));
     try std.testing.expectEqual(textMimeRank("text/html"), textMimeRank("text/rtf"));
+    try std.testing.expectEqual(textMimeRank("text/html"), textMimeRank("COMPOUND_TEXT"));
 }
 
 test "keyboard-enter key array restores held modifiers" {

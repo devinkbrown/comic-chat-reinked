@@ -75,7 +75,7 @@ hash.
 - `src/client/` owns portable view/input behavior shared by native backends.
 - The direct Wayland keyboard path parses the compositor's real XKB keymap
   (`src/platform/xkb.zig`, base + Shift + AltGr/ISO Level3 when a third
-  keysym is listed, plus group 2 when a second keysym list is published),
+  keysym is listed, plus groups 2–4 when extra keysym lists are published),
   implements client-side key-repeat (`repeat_info` + `Window.checkRepeat`),
   and applies a bounded dead-key / Multi_key composer plus optional XCompose
   locale tables (`XCOMPOSEFILE`, `~/.XCompose`, system `%L`, capped file
@@ -88,7 +88,8 @@ hash.
   MappingNotify without dropping queued events. Wayland restores held
   Shift/Ctrl/Alt/Super from the keyboard-enter keys array and Caps Lock
   from the conventional Lock modifier bit when the compositor reports it,
-  and refreshes text-input on keyboard enter.
+  honors XKB groups 3–4 with wrap, and refreshes text-input on keyboard enter
+  and xdg activate (disabling it when the toplevel is not activated).
   It does not
   speak XIM.   X11 maps XI2 touch contacts to the shared pointer contract when the
   device is not pointer-emulating. Text and `file:` drops use XDND / `wl_data_device` and are
@@ -107,7 +108,12 @@ hash.
   uses the drop timestamp. Middle-click pastes PRIMARY as typed keys, with
   `wl-paste --primary` / `xclip`/`xsel` PRIMARY fallback when the native
   protocol is missing. Shift+Insert and XF86Paste paste CLIPBOARD as typed
-  keys. Receive-only `text/html` strips tags to plain text.
+  keys. CLIPBOARD paste does not fall through to PRIMARY. A Wayland copy
+  before the first seat serial is advertised once a serial arrives.
+  NumLock XOR Shift selects keypad digits on both backends. X11 Mod3
+  Mode_switch selects group 2. Receive-only `COMPOUND_TEXT` decodes to
+  UTF-8. Extra KDE5 / Mozilla-priv file MIME yields a local path.
+  Receive-only `text/html` strips tags to plain text.
   Clipboard text normalizes
   CR/LF to LF. `notify-send` uses `--urgency=normal` and
   `--icon=applications-internet`.   Central European Latin-2, Latin-3, Latin-4, Latin-9, Greek, Hebrew, Arabic,
@@ -132,7 +138,8 @@ hash.
   `WM_STATE` / `WM_CHANGE_STATE` and skips `present()` while hidden or
   fully obscured (MapNotify exposes), and Wayland records tiled/suspended xdg
   states plus `wm_capabilities` / `configure_bounds` when xdg-shell is v5+
-  and skips `present()` while suspended.
+  and skips `present()` while suspended (leaving suspended or gaining
+  activated exposes). X11 FocusIn and leaving hidden expose.
   When advertised, Wayland requests server-side decorations and
   re-requests SSD once if the compositor configures client-side mode.
   `present()` waits for `wl_surface.frame` before the next commit. X11 installs a scaled core cursor and `_NET_WM_ICON`, and

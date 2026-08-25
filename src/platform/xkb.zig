@@ -12,7 +12,9 @@
 //! levels 1–3: unshifted, Shift, and AltGr/ISO Level3 when the keymap lists
 //! a third keysym, plus a second group when the keymap publishes two
 //! `[ ... ]` lists). That is what makes the base, shifted, AltGr, and
-//! group-2 character of a non-US or dual-layout keymap actually correct.
+//! group-2 through group-4 character of a non-US or multi-layout keymap
+//! actually correct (groups wrap). Keypad `KP_*` names type digits or
+//! navigation from NumLock XOR Shift.
 //! Named Central European letters, X11 Latin-2 keysyms (`0x01a0`–`0x01ff`),
 //! Latin-3 (`0x02a1`–`0x02fe`), Latin-4 (`0x03a2`–`0x03fe`),
 //! Latin-9 OE/Ydiaeresis, Greek, Hebrew, Arabic, Armenian, Georgian, and Thai
@@ -53,12 +55,16 @@ pub const ParseError = error{
 /// .{ "1", "exclam" }. A key with only one level (rare; some symbol keys)
 /// repeats it in both Shift slots. Level3 is null when the keymap lists
 /// fewer than three symbols.
-const Levels = struct {
+pub const max_layout_groups: usize = 4;
+
+const GroupSymbols = struct {
     base: []const u8,
     shifted: []const u8,
     level3: ?[]const u8 = null,
-    group2_base: ?[]const u8 = null,
-    group2_shifted: ?[]const u8 = null,
+};
+
+const Levels = struct {
+    groups: [max_layout_groups]?GroupSymbols = @splat(null),
 };
 
 /// Which of the three bounded XKB levels to read.
@@ -104,28 +110,24 @@ pub const Keymap = struct {
         return self.keysymForGroupLevel(evdev_code, 0, level);
     }
 
-    /// Group 0 is the first keysym list; group 1 is the second list when the
-    /// keymap published two groups (`[ a, A ], [ Cyrillic_ef, ... ]`).
+    /// Group 0 is the first keysym list; later groups are extra `[ ... ]`
+    /// lists (`[ a, A ], [ Cyrillic_ef, ... ], [ Ukrainian_i, ... ]`).
+    /// Out-of-range groups wrap across the published lists.
     pub fn keysymForGroupLevel(self: *const Keymap, evdev_code: u32, group: u32, level: Level) ?[]const u8 {
         const name = self.code_to_name.get(xkbKeycodeFromEvdev(evdev_code)) orelse return null;
         const levels = self.name_to_levels.get(name) orelse return null;
-        if (group != 0) {
-            const base = levels.group2_base orelse return switch (level) {
-                .base => levels.base,
-                .shift => levels.shifted,
-                .level3 => levels.level3,
-            };
-            return switch (level) {
-                .base => base,
-                .shift => levels.group2_shifted orelse base,
-                .level3 => null,
-            };
-        }
+        const slot = groupSymbols(levels, group) orelse return null;
         return switch (level) {
-            .base => levels.base,
-            .shift => levels.shifted,
-            .level3 => levels.level3,
+            .base => slot.base,
+            .shift => slot.shifted,
+            .level3 => slot.level3,
         };
+    }
+
+    pub fn groupCountFor(self: *const Keymap, evdev_code: u32) u32 {
+        const name = self.code_to_name.get(xkbKeycodeFromEvdev(evdev_code)) orelse return 0;
+        const levels = self.name_to_levels.get(name) orelse return 0;
+        return groupCount(levels);
     }
 };
 
@@ -289,61 +291,58 @@ fn parseSymbols(
         const key_body = body[brace_open + 1 .. j - 1];
         i = j;
 
-        if (try firstKeysymList(key_body)) |syms| {
-            var it = std.mem.splitScalar(u8, syms, ',');
-            var base: ?[]const u8 = null;
-            var shifted: ?[]const u8 = null;
-            var level3: ?[]const u8 = null;
-            while (it.next()) |raw| {
-                const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-                if (trimmed.len == 0) continue;
-                if (base == null) {
-                    base = trimmed;
-                } else if (shifted == null) {
-                    shifted = trimmed;
-                } else if (level3 == null) {
-                    level3 = trimmed;
-                } else {
-                    break; // level 4+ ignored, see module doc.
-                }
-            }
-            var group2_base: ?[]const u8 = null;
-            var group2_shifted: ?[]const u8 = null;
-            if (try secondKeysymList(key_body)) |group2| {
-                var group_it = std.mem.splitScalar(u8, group2, ',');
-                while (group_it.next()) |raw| {
-                    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-                    if (trimmed.len == 0) continue;
-                    if (group2_base == null) {
-                        group2_base = trimmed;
-                    } else {
-                        group2_shifted = trimmed;
-                        break;
-                    }
-                }
-            }
-            if (base) |b| {
-                try out.put(gpa, try arena.dupe(u8, name), .{
-                    .base = try arena.dupe(u8, b),
-                    .shifted = try arena.dupe(u8, shifted orelse b),
-                    .level3 = if (level3) |third| try arena.dupe(u8, third) else null,
-                    .group2_base = if (group2_base) |g2| try arena.dupe(u8, g2) else null,
-                    .group2_shifted = if (group2_shifted) |g2s| try arena.dupe(u8, g2s) else null,
-                });
-            }
+        var levels = Levels{};
+        var gi: usize = 0;
+        while (gi < max_layout_groups) : (gi += 1) {
+            const list = (try keysymListAt(key_body, gi)) orelse break;
+            levels.groups[gi] = try parseGroupSymbols(arena, list);
+        }
+        if (levels.groups[0] != null) {
+            try out.put(gpa, try arena.dupe(u8, name), levels);
         }
         skipStatement(body, &i);
     }
 }
 
-/// Finds the contents of the first `[ ... ]` in a `key <NAME> { ... }` body
-/// (the keysym list; may be preceded by `symbols[Group1] =` or nothing).
-fn firstKeysymList(key_body: []const u8) ParseError!?[]const u8 {
-    return keysymListAt(key_body, 0);
+fn parseGroupSymbols(arena: std.mem.Allocator, csv: []const u8) ParseError!?GroupSymbols {
+    var it = std.mem.splitScalar(u8, csv, ',');
+    var base: ?[]const u8 = null;
+    var shifted: ?[]const u8 = null;
+    var level3: ?[]const u8 = null;
+    while (it.next()) |raw| {
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        if (base == null) {
+            base = trimmed;
+        } else if (shifted == null) {
+            shifted = trimmed;
+        } else if (level3 == null) {
+            level3 = trimmed;
+        } else {
+            break; // level 4+ ignored, see module doc.
+        }
+    }
+    const b = base orelse return null;
+    return .{
+        .base = try arena.dupe(u8, b),
+        .shifted = try arena.dupe(u8, shifted orelse b),
+        .level3 = if (level3) |third| try arena.dupe(u8, third) else null,
+    };
 }
 
-fn secondKeysymList(key_body: []const u8) ParseError!?[]const u8 {
-    return keysymListAt(key_body, 1);
+fn groupCount(levels: Levels) u32 {
+    var n: u32 = 0;
+    for (levels.groups) |slot| {
+        if (slot == null) break;
+        n += 1;
+    }
+    return n;
+}
+
+fn groupSymbols(levels: Levels, group: u32) ?GroupSymbols {
+    const count = groupCount(levels);
+    if (count == 0) return null;
+    return levels.groups[group % count];
 }
 
 fn keysymListAt(key_body: []const u8, want: usize) ParseError!?[]const u8 {
@@ -437,6 +436,15 @@ const named_keysyms = std.StaticStringMap(NamedKey).initComptime(.{
     .{ "Prior", .page_up },
     .{ "Next", .page_down },
     .{ "Delete", .delete },
+    .{ "KP_Left", .left },
+    .{ "KP_Right", .right },
+    .{ "KP_Up", .up },
+    .{ "KP_Down", .down },
+    .{ "KP_Home", .home },
+    .{ "KP_End", .end },
+    .{ "KP_Prior", .page_up },
+    .{ "KP_Next", .page_down },
+    .{ "KP_Delete", .delete },
 });
 
 /// keysym name -> the Latin-1/ASCII printable character it names, for the
@@ -463,6 +471,22 @@ const named_char_keysyms = std.StaticStringMap(u8).initComptime(.{
     .{ "minus", '-' },
     .{ "period", '.' },
     .{ "slash", '/' },
+    .{ "KP_0", '0' },
+    .{ "KP_1", '1' },
+    .{ "KP_2", '2' },
+    .{ "KP_3", '3' },
+    .{ "KP_4", '4' },
+    .{ "KP_5", '5' },
+    .{ "KP_6", '6' },
+    .{ "KP_7", '7' },
+    .{ "KP_8", '8' },
+    .{ "KP_9", '9' },
+    .{ "KP_Decimal", '.' },
+    .{ "KP_Separator", ',' },
+    .{ "KP_Add", '+' },
+    .{ "KP_Subtract", '-' },
+    .{ "KP_Multiply", '*' },
+    .{ "KP_Divide", '/' },
     .{ "colon", ':' },
     .{ "semicolon", ';' },
     .{ "less", '<' },
@@ -1221,6 +1245,23 @@ pub fn isClipboardPasteKeyName(name: []const u8, shift: bool, control: bool) boo
     return shift and (std.mem.eql(u8, name, "Insert") or std.mem.eql(u8, name, "KP_Insert"));
 }
 
+pub const x11_mod2_num_lock: u16 = 0x10;
+pub const x11_mod3_mode_switch: u16 = 0x20;
+
+/// X11 keypad function/digit keysyms (`XK_KP_*`, `0xff80`–`0xffbd`).
+pub fn isX11KeypadKeysym(sym: u32) bool {
+    return sym >= 0xff80 and sym <= 0xffbd;
+}
+
+pub fn isKeypadKeysymName(name: []const u8) bool {
+    return name.len >= 3 and std.mem.startsWith(u8, name, "KP_");
+}
+
+/// Keypad type: NumLock XOR Shift selects the numeric column.
+pub fn keypadUsesNumeric(num_lock: bool, shift: bool) bool {
+    return num_lock != shift;
+}
+
 /// Legacy X11 Latin-2 keysyms used by Central European layouts.
 pub fn charForX11Latin2(sym: u32) ?u21 {
     if (sym < 0x01a0 or sym > 0x01ff) return null;
@@ -1930,6 +1971,35 @@ test "parse keeps a second keysym list as keyboard group 2" {
     try std.testing.expectEqual(@as(u21, 0x0491), charForKeysym("Ukrainian_ghe_with_upturn").?);
     try std.testing.expectEqual(@as(u21, 0x045e), charForKeysym("Byelorussian_shortu").?);
     try std.testing.expectEqual(@as(u21, 0x0452), charForKeysym("Serbian_dje").?);
+    try std.testing.expectEqual(@as(u32, 2), keymap.groupCountFor(30));
+}
+
+test "parse keeps third and fourth keysym lists and wraps groups" {
+    const text =
+        \\xkb_keymap {
+        \\  xkb_keycodes "evdev" {
+        \\      <AC01> = 38;
+        \\  };
+        \\  xkb_symbols "pc+us+ru:2+ua:3+by:4" {
+        \\      key <AC01> {
+        \\          [ a, A, ae ],
+        \\          [ Cyrillic_ef, Cyrillic_EF ],
+        \\          [ Ukrainian_i, Ukrainian_I ],
+        \\          [ Byelorussian_shortu, Byelorussian_SHORTU ]
+        \\      };
+        \\  };
+        \\};
+    ;
+    var keymap = try parse(std.testing.allocator, 1, text);
+    defer keymap.deinit();
+    try std.testing.expectEqual(@as(u32, 4), keymap.groupCountFor(30));
+    try std.testing.expectEqualStrings("a", keymap.keysymForGroupLevel(30, 0, .base).?);
+    try std.testing.expectEqualStrings("ae", keymap.keysymForGroupLevel(30, 0, .level3).?);
+    try std.testing.expectEqualStrings("Cyrillic_ef", keymap.keysymForGroupLevel(30, 1, .base).?);
+    try std.testing.expectEqualStrings("Ukrainian_i", keymap.keysymForGroupLevel(30, 2, .base).?);
+    try std.testing.expectEqualStrings("Byelorussian_shortu", keymap.keysymForGroupLevel(30, 3, .base).?);
+    try std.testing.expectEqualStrings("a", keymap.keysymForGroupLevel(30, 4, .base).?);
+    try std.testing.expectEqualStrings("Ukrainian_i", keymap.keysymForGroupLevel(30, 6, .base).?);
     try std.testing.expectEqual(@as(u21, 0x0456), charForX11Cyrillic(0x06a6).?);
     try std.testing.expectEqual(@as(u21, 0x0406), charForX11Cyrillic(0x06b6).?);
     try std.testing.expectEqual(@as(u21, 0x0491), charForX11Cyrillic(0x06ad).?);
@@ -1951,6 +2021,22 @@ test "Shift+Insert and XF86Paste are clipboard paste keys" {
     try std.testing.expect(isClipboardPasteKeyName("XF86Paste", false, false));
     try std.testing.expect(!isClipboardPasteKeyName("Insert", false, false));
     try std.testing.expect(!isClipboardPasteKeyName("Insert", true, true));
+}
+
+test "keypad names and NumLock XOR Shift select the numeric column" {
+    try std.testing.expect(isKeypadKeysymName("KP_7"));
+    try std.testing.expect(isKeypadKeysymName("KP_Home"));
+    try std.testing.expect(!isKeypadKeysymName("Home"));
+    try std.testing.expect(isX11KeypadKeysym(0xff95));
+    try std.testing.expect(isX11KeypadKeysym(0xffb7));
+    try std.testing.expect(!isX11KeypadKeysym(0xff51));
+    try std.testing.expect(keypadUsesNumeric(true, false));
+    try std.testing.expect(!keypadUsesNumeric(true, true));
+    try std.testing.expect(!keypadUsesNumeric(false, false));
+    try std.testing.expectEqual(@as(u21, '7'), charForKeysym("KP_7").?);
+    try std.testing.expectEqual(@as(u21, '.'), charForKeysym("KP_Decimal").?);
+    try std.testing.expectEqual(NamedKey.home, namedKeyForKeysym("KP_Home").?);
+    try std.testing.expectEqual(NamedKey.delete, namedKeyForKeysym("KP_Delete").?);
 }
 
 test "parse rejects an unsupported keymap format" {

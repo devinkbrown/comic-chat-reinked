@@ -6,8 +6,8 @@
 //! / `xclip -selection primary` when PRIMARY is missing), plus notifications
 //! (`notify-send --urgency=normal --icon=applications-internet`), file selection, document opening, and
 //! printing. `xdg-open` can carry an outgoing activation / startup token.
-//! Incoming desktop file-list MIME and receive-only RTF are parsed
-//! here. Every call is
+//! Incoming desktop file-list MIME, receive-only RTF, and receive-only
+//! COMPOUND_TEXT are parsed here. Every call is
 //! bounded and failure is non-fatal, so minimal installations retain the
 //! internal application fallback.
 
@@ -186,7 +186,14 @@ pub fn isDesktopFileMime(mime: []const u8) bool {
         std.ascii.eqlIgnoreCase(mime, "x-special/nautilus-clipboard") or
         std.ascii.eqlIgnoreCase(mime, "text/x-moz-url") or
         std.ascii.eqlIgnoreCase(mime, "application/x-moz-file") or
-        std.ascii.eqlIgnoreCase(mime, "application/x-kde4-urilist");
+        std.ascii.eqlIgnoreCase(mime, "application/x-kde4-urilist") or
+        std.ascii.eqlIgnoreCase(mime, "application/x-kde5-urilist") or
+        std.ascii.eqlIgnoreCase(mime, "text/x-moz-url-priv");
+}
+
+/// Receive-only ICCCM `COMPOUND_TEXT` (xterm/Emacs). Not advertised on copy.
+pub fn isCompoundTextMime(mime: []const u8) bool {
+    return mimeTypeEquals(mime, "COMPOUND_TEXT");
 }
 
 /// Receive-only URI list MIME, including the `text/x-uri-list` alias.
@@ -492,6 +499,111 @@ pub fn clipboardBytesToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
         }
     }
     return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
+}
+
+/// Receive-only ICCCM COMPOUND_TEXT. Default charset is ISO-8859-1. `ESC % G`
+/// / `ESC %/G` switch to UTF-8; `ESC ( B` is ASCII; unknown 94^n sets are
+/// skipped until the next ESC. A body with no ESC that is already valid
+/// UTF-8 is kept as UTF-8.
+pub fn compoundTextToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, bytes, 0x1b) == null) {
+        if (std.unicode.utf8ValidateSlice(bytes)) {
+            return normalizeClipboardNewlinesOwned(gpa, try gpa.dupe(u8, bytes));
+        }
+        return latin1ToUtf8(gpa, bytes);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var cset: CompoundCharset = .latin1;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (bytes[i] == 0x1b) {
+            const esc = parseCompoundEscape(bytes[i..]);
+            i += esc.consumed;
+            if (esc.skip) {
+                while (i < bytes.len and bytes[i] != 0x1b) : (i += 1) {}
+            } else {
+                cset = esc.cset;
+            }
+            continue;
+        }
+        switch (cset) {
+            .ascii => {
+                if (bytes[i] < 0x80) try out.append(gpa, bytes[i]);
+                i += 1;
+            },
+            .latin1 => {
+                try appendLatin1(&out, gpa, bytes[i]);
+                i += 1;
+            },
+            .utf8 => {
+                const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
+                if (i + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[i .. i + n])) {
+                    try out.appendSlice(gpa, bytes[i .. i + n]);
+                    i += n;
+                } else {
+                    try out.append(gpa, '?');
+                    i += 1;
+                }
+            },
+        }
+    }
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+const CompoundCharset = enum { latin1, utf8, ascii };
+
+const CompoundEscape = struct {
+    consumed: usize,
+    cset: CompoundCharset,
+    skip: bool,
+};
+
+fn parseCompoundEscape(text: []const u8) CompoundEscape {
+    if (text.len < 2) return .{ .consumed = 1, .cset = .latin1, .skip = false };
+    if (text.len >= 3 and text[1] == '%' and text[2] == 'G') {
+        return .{ .consumed = 3, .cset = .utf8, .skip = false };
+    }
+    if (text.len >= 4 and text[1] == '%' and text[2] == '/' and text[3] == 'G') {
+        return .{ .consumed = 4, .cset = .utf8, .skip = false };
+    }
+    if (text[1] == '(' or text[1] == ')') {
+        if (text.len < 3) return .{ .consumed = 2, .cset = .ascii, .skip = false };
+        if (text[2] == 'B' or text[2] == 'J' or text[2] == '0') {
+            return .{ .consumed = 3, .cset = .ascii, .skip = false };
+        }
+        return .{ .consumed = 3, .cset = .latin1, .skip = false };
+    }
+    if (text[1] == '-' and text.len >= 3) {
+        return .{ .consumed = 3, .cset = .latin1, .skip = false };
+    }
+    if (text[1] == '$') {
+        var n: usize = 2;
+        if (n < text.len and (text[n] == '(' or text[n] == ')' or text[n] == '-' or text[n] == '.')) n += 1;
+        if (n < text.len) n += 1;
+        return .{ .consumed = n, .cset = .latin1, .skip = true };
+    }
+    return .{ .consumed = 2, .cset = .latin1, .skip = false };
+}
+
+fn latin1ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (bytes) |c| try appendLatin1(&out, gpa, c);
+    return normalizeClipboardNewlinesOwned(gpa, try out.toOwnedSlice(gpa));
+}
+
+fn appendLatin1(out: *std.ArrayList(u8), gpa: std.mem.Allocator, c: u8) !void {
+    if (c < 0x80) {
+        try out.append(gpa, c);
+        return;
+    }
+    var buf: [2]u8 = undefined;
+    const n = std.unicode.utf8Encode(c, &buf) catch {
+        try out.append(gpa, '?');
+        return;
+    };
+    try out.appendSlice(gpa, buf[0..n]);
 }
 
 /// Decode `UTF16_STRING` / UTF-16 clipboard bytes. Honors a BOM when present,
@@ -1223,6 +1335,10 @@ test "desktop file-list MIME yields a local path and skips copy/cut headers" {
     try std.testing.expect(isDesktopFileMime("text/x-moz-url"));
     try std.testing.expect(isDesktopFileMime("application/x-moz-file"));
     try std.testing.expect(isDesktopFileMime("application/x-kde4-urilist"));
+    try std.testing.expect(isDesktopFileMime("application/x-kde5-urilist"));
+    try std.testing.expect(isDesktopFileMime("text/x-moz-url-priv"));
+    try std.testing.expect(isCompoundTextMime("COMPOUND_TEXT"));
+    try std.testing.expect(isCompoundTextMime("compound_text"));
     try std.testing.expect(!isDesktopFileMime("text/uri-list"));
     try std.testing.expect(isUriListMime("text/uri-list"));
     try std.testing.expect(isUriListMime("text/x-uri-list"));
@@ -1328,6 +1444,22 @@ test "clipboard bytes strip a UTF-8 BOM and decode UTF-16" {
     const crlf = try clipboardBytesToUtf8(gpa, "a\r\nb\rc");
     defer gpa.free(crlf);
     try std.testing.expectEqualStrings("a\nb\nc", crlf);
+}
+
+test "COMPOUND_TEXT decodes Latin-1, UTF-8 designator, and skips unknown 94-n sets" {
+    const gpa = std.testing.allocator;
+    const latin = try compoundTextToUtf8(gpa, "caf\xe9");
+    defer gpa.free(latin);
+    try std.testing.expectEqualStrings("café", latin);
+    const utf8 = try compoundTextToUtf8(gpa, "\x1b%Gкафе");
+    defer gpa.free(utf8);
+    try std.testing.expectEqualStrings("кафе", utf8);
+    const already = try compoundTextToUtf8(gpa, "hello");
+    defer gpa.free(already);
+    try std.testing.expectEqualStrings("hello", already);
+    const skipped = try compoundTextToUtf8(gpa, "a\x1b$(Bignored\x1b(B" ++ "b");
+    defer gpa.free(skipped);
+    try std.testing.expectEqualStrings("ab", skipped);
 }
 
 test "notify-send uses a normal urgency hint" {

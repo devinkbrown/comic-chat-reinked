@@ -271,7 +271,7 @@ composes bounded dead-key / Multi_key accents and optional XCompose locale
 tables, accepts committed IME text through text-input-v3 (multiline hint,
 composer-strip cursor rectangle, confirming-key de-dupe), restores held
 modifiers from the keyboard-enter keys array and Caps Lock from the
-conventional Lock modifier bit, consumes `XDG_ACTIVATION_TOKEN` via
+conventional Lock modifier bit, honors XKB groups 3–4 with wrap, consumes `XDG_ACTIVATION_TOKEN` via
 `xdg_activation_v1` so a launcher-started window can take focus and requests a
 fresh token for `xdg-open`, maps native touch contacts to
 the shared interaction contract, tracks entered `wl_output` integer scale
@@ -285,14 +285,16 @@ commits behind `wl_surface.frame`, copies through
 `wl_data_device` and `zwp_primary_selection_v1` (including
 `text/plain;charset=utf8` and `text/uri-list`, with UTF-8 BOM strip / UTF-16
 decode including receive-only `text/plain;charset=utf-16`, `text/html`,
-`text/rtf`, `text/x-uri-list`, and
-desktop file-list MIME, and CR/LF
-normalized to LF), skips `present()` while suspended, pastes PRIMARY on
+`text/rtf`, `text/x-uri-list`, receive-only `COMPOUND_TEXT`, and
+desktop file-list MIME including KDE5 / Mozilla-priv, and CR/LF
+normalized to LF), skips `present()` while suspended and exposes when leaving
+that state or gaining activated, disables text-input when not activated, pastes PRIMARY on
 middle-click as typed keys (`wl-paste --primary` fallback), pastes CLIPBOARD on
-Shift+Insert / XF86Paste as typed keys, injects
+Shift+Insert / XF86Paste as typed keys (CLIPBOARD does not read PRIMARY), injects
 text/`file:` drops as typed keys with `data_offer.set_actions(copy)`, shows
 a `wp_cursor_shape_v1` or scaled shm pointer, and sets
-`xdg_toplevel_icon_v1` when advertised. Armenian, Georgian, Thai, extra
+`xdg_toplevel_icon_v1` when advertised. NumLock XOR Shift selects keypad digits.
+Armenian, Georgian, Thai, extra
 Cyrillic (Ukrainian/Belarusian/Serbian/Macedonian), Latin-3, and
 Latin-4 keysyms type
 without an IME.
@@ -306,12 +308,12 @@ per-output millimeters when the window moves, VisibilityNotify, and screen
 millimeter size, and reinstalling the scaled cursor plus physical WM size
 hints), owns ICCCM
 CLIPBOARD+PRIMARY including INCR with STRING/TEXT/GTK text MIME,
-`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf`, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
+`text/uri-list`, receive-only `text/x-uri-list` / `text/rtf` / `COMPOUND_TEXT`, receive-only desktop file-list MIME (GNOME/Nautilus/KDE/KDE5/Mozilla), `UTF16_STRING`, `TIMESTAMP`, and `MULTIPLE` (preferring the owner's
 TARGETS list and sending a user ConvertSelection timestamp), accepts XDND text/`file:`
 drops as typed keys (TARGETS-first, drop timestamp), pastes PRIMARY on
-middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
+middle-click as typed keys (`xclip`/`xsel` PRIMARY fallback; CLIPBOARD paste does not read PRIMARY), pastes CLIPBOARD on Shift+Insert / XF86Paste as typed keys, accepts receive-only `text/html` and `text/rtf`, tracks `_NET_WM_STATE` maximize/fullscreen/hidden and
 ICCCM `WM_STATE` / `WM_CHANGE_STATE` (skipping `present()` while hidden or
-fully obscured; MapNotify exposes), honors keyboard group bits and
+fully obscured; MapNotify, FocusIn, and leaving hidden expose), honors keyboard group bits, Mod3 Mode_switch, and
 MappingNotify without dropping queued events, resets compose on FocusOut,
 installs a scaled core pointer and `_NET_WM_ICON`, raises urgency on
 `notify` until FocusIn (`notify-send --urgency=normal --icon=applications-internet`), hands CLIPBOARD to `CLIPBOARD_MANAGER` on exit when

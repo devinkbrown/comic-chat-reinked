@@ -21,19 +21,21 @@
 //!     not already pointer-emulating,
 //!     with the
 //!     core cursor and physical WM size hints reinstalled), ICCCM
+//!     Mod2 NumLock keypad columns, Mod3 Mode_switch as group 2,
 //!     CLIPBOARD+PRIMARY (INCR, UTF8_STRING then STRING/TEXT/GTK text MIME
 //!     including `text/plain;charset=utf8`, `text/uri-list`,
 //!     receive-only `text/x-uri-list`, receive-only `text/rtf`,
-//!     receive-only desktop file-list MIME, and
+//!     receive-only `COMPOUND_TEXT`, receive-only desktop file-list MIME, and
 //!     `UTF16_STRING`, TIMESTAMP, MULTIPLE atom-pair requests, Armenian/Georgian
 //!     keysyms, extra Ukrainian/Belarusian/Serbian/Macedonian Cyrillic,
 //!     Shift+Insert / XF86Paste CLIPBOARD paste as typed keys, receive-only
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
-//!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback), TARGETS-first XDND,
+//!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
+//!     paste does not read PRIMARY), TARGETS-first XDND,
 //!     clipboard-manager handoff, UTF-8 BOM
 //!     strip / UTF-16 decode), XDND text/`file:` drops injected as typed
 //!     keys, `_NET_WM_STATE` maximize/fullscreen/hidden plus ICCCM
-//!     `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
+//!     FocusIn/leaving-hidden expose, `WM_STATE` / `WM_CHANGE_STATE` iconic tracking (`present()` skips
 //!     while hidden or fully obscured; MapNotify exposes), a scaled
 //!     core pointer cursor, `_NET_WM_ICON`, urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
@@ -178,6 +180,9 @@ const XConn = struct {
     mime_uri_list_alt: u32 = 0,
     mime_rtf: u32 = 0,
     mime_rtf_app: u32 = 0,
+    compound_text: u32 = 0,
+    mime_kde5_urilist: u32 = 0,
+    mime_moz_url_priv: u32 = 0,
     xsettings_s0: u32 = 0,
     xsettings_settings: u32 = 0,
     xsettings_window: u32 = 0,
@@ -267,8 +272,10 @@ pub const Keymap = struct {
 
         const shift = (state & 0x1) != 0;
         const lock = (state & 0x2) != 0;
+        const num_lock = (state & xkb.x11_mod2_num_lock) != 0;
         const level3 = (state & 0x80) != 0; // Mod5 / ISO_Level3_Shift
-        const group = (state >> 13) & 0x3;
+        var group = (state >> 13) & 0x3;
+        if (group == 0 and (state & xkb.x11_mod3_mode_switch) != 0) group = 1;
 
         if (group != 0) {
             const g0_idx = idx + @as(usize, group) * 2;
@@ -276,6 +283,10 @@ pub const Keymap = struct {
             if (g0_idx < key_end and g0_idx < self.syms.len) {
                 const g0 = self.syms[g0_idx];
                 const g1 = if (g0_idx + 1 < key_end and g0_idx + 1 < self.syms.len) self.syms[g0_idx + 1] else 0;
+                if (xkb.isX11KeypadKeysym(g0) or xkb.isX11KeypadKeysym(g1)) {
+                    const grouped = if (xkb.keypadUsesNumeric(num_lock, shift) and g1 != 0) g1 else g0;
+                    if (grouped != 0) return grouped;
+                }
                 var grouped = g0;
                 if (shift and g1 != 0) grouped = g1;
                 if ((shift and g1 == 0) or (lock and !shift)) {
@@ -288,6 +299,11 @@ pub const Keymap = struct {
         if (level3 and (s2 != 0 or s3 != 0)) {
             if (shift and s3 != 0) return s3;
             if (s2 != 0) return s2;
+        }
+
+        if (xkb.isX11KeypadKeysym(s0) or xkb.isX11KeypadKeysym(s1)) {
+            if (xkb.keypadUsesNumeric(num_lock, shift) and s1 != 0) return s1;
+            return s0;
         }
 
         var sym = s0;
@@ -324,15 +340,21 @@ pub fn keysymToKey(sym: u32) Key {
         0xff09 => .tab,
         0xff0d, 0xff8d => .enter, // Return, KP_Enter
         0xff1b => .escape,
-        0xff51 => .left,
-        0xff52 => .up,
-        0xff53 => .right,
-        0xff54 => .down,
         0xff50, 0xff95 => .home,
+        0xff51, 0xff96 => .left,
+        0xff52, 0xff97 => .up,
+        0xff53, 0xff98 => .right,
+        0xff54, 0xff99 => .down,
         0xff57, 0xff9c => .end,
         0xff55, 0xff9a => .page_up,
         0xff56, 0xff9b => .page_down,
         0xffff, 0xff9f => .delete,
+        0xffaa => .{ .char = '*' },
+        0xffab => .{ .char = '+' },
+        0xffac => .{ .char = ',' },
+        0xffad => .{ .char = '-' },
+        0xffae => .{ .char = '.' },
+        0xffaf => .{ .char = '/' },
         0xffb0...0xffb9 => .{ .char = '0' + @as(u21, @intCast(sym - 0xffb0)) },
         else => .other,
     };
@@ -702,7 +724,7 @@ pub const Window = struct {
             9 => { // FocusIn
                 self.clearAttention();
                 self.claimFocus(self.last_user_time);
-                return .other;
+                return .expose;
             },
             10 => { // FocusOut
                 self.compose.reset();
@@ -782,10 +804,14 @@ pub const Window = struct {
                     if (self.refreshScale()) |ev| return ev;
                 }
                 if (window == self.window and atom == self.conn.net_wm_state) {
+                    const was_hidden = self.wm_hidden;
                     self.readNetWmState();
+                    if (was_hidden and !self.wm_hidden) return .expose;
                 }
                 if (window == self.window and atom == self.conn.wm_state) {
+                    const was_hidden = self.wm_hidden;
                     self.readWmState();
+                    if (was_hidden and !self.wm_hidden) return .expose;
                 }
                 self.continueIncr(event);
                 return .other;
@@ -819,9 +845,13 @@ pub const Window = struct {
                 } else if (typ == self.conn.xdnd_drop) {
                     if (self.takeXdndDrop(event)) |ev| return ev;
                 } else if (typ == self.conn.net_wm_state) {
+                    const was_hidden = self.wm_hidden;
                     self.applyNetWmStateMessage(event);
+                    if (was_hidden and !self.wm_hidden) return .expose;
                 } else if (typ == self.conn.wm_change_state) {
+                    const was_hidden = self.wm_hidden;
                     self.applyWmChangeState(event);
+                    if (was_hidden and !self.wm_hidden) return .expose;
                 }
                 return .other;
             },
@@ -851,7 +881,7 @@ pub const Window = struct {
         if (self.convertAndRead(gpa, self.conn.clipboard)) |text| {
             if (text != null) return text;
         } else |_| {}
-        return self.convertAndRead(gpa, atom_primary);
+        return null;
     }
 
     fn decodeClipboardBytes(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ![]u8 {
@@ -938,10 +968,13 @@ pub const Window = struct {
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_url)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_file)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_kde_urilist)) |path| return path;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_kde5_urilist)) |path| return path;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_nautilus)) |path| return path;
+        if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_moz_url_priv)) |path| return path;
+        if (self.readCompoundTextTarget(gpa, selection, self.conn.compound_text)) |text| return text;
         if (self.conn.text == 0) return null;
         if (self.convertTarget(gpa, selection, self.conn.text, self.conn.text)) |text| {
-            if (text) |bytes| return try self.decodeClipboardBytes(gpa, bytes);
+            if (text) |bytes| return try self.decodeTextBytes(gpa, bytes);
         } else |_| {}
         if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html)) |text| return text;
         if (self.readHtmlTarget(gpa, selection, self.conn.mime_text_html_utf8)) |text| return text;
@@ -1017,7 +1050,22 @@ pub const Window = struct {
         if (isRtfAtom(&self.conn, target)) {
             return try self.decodeRtfBytes(gpa, bytes);
         }
+        if (target == self.conn.compound_text or target == self.conn.text) {
+            return try self.decodeTextBytes(gpa, bytes);
+        }
         return try self.decodeClipboardBytes(gpa, bytes);
+    }
+
+    fn readCompoundTextTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
+        if (target == 0) return null;
+        const text = (self.convertTarget(gpa, selection, target, target) catch return null) orelse return null;
+        return self.decodeTextBytes(gpa, text) catch null;
+    }
+
+    fn decodeTextBytes(_: *Window, gpa: std.mem.Allocator, bytes: []u8) ![]u8 {
+        const decoded = services.compoundTextToUtf8(gpa, bytes) catch return bytes;
+        gpa.free(bytes);
+        return decoded;
     }
 
     fn readDesktopFileTarget(self: *Window, gpa: std.mem.Allocator, selection: u32, target: u32) ?[]u8 {
@@ -2399,6 +2447,9 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_uri_list_alt = try internAtom(conn, "text/x-uri-list");
     conn.mime_rtf = try internAtom(conn, "text/rtf");
     conn.mime_rtf_app = try internAtom(conn, "application/rtf");
+    conn.compound_text = try internAtom(conn, "COMPOUND_TEXT");
+    conn.mime_kde5_urilist = try internAtom(conn, "application/x-kde5-urilist");
+    conn.mime_moz_url_priv = try internAtom(conn, "text/x-moz-url-priv");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
     conn.xsettings_settings = try internAtom(conn, "_XSETTINGS_SETTINGS");
     conn.wm_state = try internAtom(conn, "WM_STATE");
@@ -3081,7 +3132,7 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
-    if (atom == conn.text) return 2;
+    if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom)) return 1;
     return 0;
@@ -3101,7 +3152,8 @@ fn isRtfAtom(conn: *const XConn, atom: u32) bool {
 
 fn isDesktopFileAtom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_gnome_copied or atom == conn.mime_moz_url or atom == conn.mime_moz_file or
-        atom == conn.mime_kde_urilist or atom == conn.mime_nautilus);
+        atom == conn.mime_kde_urilist or atom == conn.mime_kde5_urilist or atom == conn.mime_nautilus or
+        atom == conn.mime_moz_url_priv);
 }
 
 fn preferredTextAtom(conn: *const XConn, atoms: []const u8) ?u32 {
@@ -3125,7 +3177,7 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         target == conn.mime_text_plain or target == conn.mime_text_utf8 or
         target == conn.mime_text_utf8_alt or isUriListAtom(conn, target) or
         target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
-        isDesktopFileAtom(conn, target);
+        isDesktopFileAtom(conn, target) or target == conn.compound_text;
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3411,6 +3463,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_uri_list_alt = 116,
         .mime_rtf = 117,
         .mime_rtf_app = 118,
+        .compound_text = 119,
+        .mime_kde5_urilist = 120,
+        .mime_moz_url_priv = 121,
     };
     try std.testing.expect(isClipboardTextTarget(&conn, 100));
     try std.testing.expect(isClipboardTextTarget(&conn, atom_string));
@@ -3429,6 +3484,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isClipboardTextTarget(&conn, 116));
     try std.testing.expect(isClipboardTextTarget(&conn, 117));
     try std.testing.expect(isClipboardTextTarget(&conn, 118));
+    try std.testing.expect(isClipboardTextTarget(&conn, 119));
+    try std.testing.expect(isClipboardTextTarget(&conn, 120));
+    try std.testing.expect(isClipboardTextTarget(&conn, 121));
     try std.testing.expect(!isClipboardTextTarget(&conn, 104));
 
     var atoms: [12]u8 = undefined;
@@ -3445,6 +3503,9 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 116));
     try std.testing.expectEqual(@as(u8, 1), textAtomRank(&conn, 117));
     try std.testing.expectEqual(@as(u8, 1), textAtomRank(&conn, 118));
+    try std.testing.expectEqual(@as(u8, 2), textAtomRank(&conn, 119));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 120));
+    try std.testing.expect(isDesktopFileAtom(&conn, 121));
     try std.testing.expect(isUriListAtom(&conn, 106));
     try std.testing.expect(isUriListAtom(&conn, 116));
     try std.testing.expect(isRtfAtom(&conn, 117));
@@ -3468,6 +3529,8 @@ test "keysymToKey maps printable ASCII and editing keys" {
     try std.testing.expectEqual(Key.escape, keysymToKey(0xff1b));
     try std.testing.expectEqual(Key.page_up, keysymToKey(0xff55));
     try std.testing.expectEqual(Key{ .char = '5' }, keysymToKey(0xffb5));
+    try std.testing.expectEqual(Key{ .char = '*' }, keysymToKey(0xffaa));
+    try std.testing.expectEqual(Key.left, keysymToKey(0xff96));
     try std.testing.expectEqual(Key.other, keysymToKey(0xffe1)); // Shift_L
     try std.testing.expectEqual(Key{ .char = 0x0456 }, keysymToKey(0x06a6));
     try std.testing.expectEqual(Key{ .char = 0x0406 }, keysymToKey(0x06b6));
@@ -3487,6 +3550,23 @@ test "Keymap.translate: shift columns and alpha case rules" {
     try std.testing.expectEqual(Key{ .char = '!' }, km.translate(9, 1));
     try std.testing.expectEqual(Key{ .char = '1' }, km.translate(9, 2)); // lock ≠ shift for digits
     try std.testing.expectEqual(Key.other, km.translate(7, 0)); // below min
+}
+
+test "Keymap.translate uses NumLock XOR Shift for keypad columns" {
+    var syms = [_]u32{ 0xff95, 0xffb7 };
+    const km = Keymap{ .syms = &syms, .per = 2, .min = 79 };
+    try std.testing.expectEqual(Key.home, km.translate(79, 0));
+    try std.testing.expectEqual(Key{ .char = '7' }, km.translate(79, xkb.x11_mod2_num_lock));
+    try std.testing.expectEqual(Key.home, km.translate(79, xkb.x11_mod2_num_lock | 1));
+    try std.testing.expectEqual(Key{ .char = '7' }, km.translate(79, 1));
+}
+
+test "Keymap.translate uses Mod3 Mode_switch as group 2" {
+    var syms = [_]u32{ 'a', 'A', 0x06c6, 0x06e6 };
+    const km = Keymap{ .syms = &syms, .per = 4, .min = 38 };
+    try std.testing.expectEqual(Key{ .char = 'a' }, km.translate(38, 0));
+    try std.testing.expectEqual(Key{ .char = 0x0444 }, km.translate(38, xkb.x11_mod3_mode_switch));
+    try std.testing.expectEqual(Key{ .char = 0x0424 }, km.translate(38, xkb.x11_mod3_mode_switch | 1));
 }
 
 test "Keymap.translate uses Mod5 for ISO Level3 when a third keysym exists" {
