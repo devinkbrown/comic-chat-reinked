@@ -32,7 +32,7 @@
 //!     `text/html`, ConvertSelection user timestamps, middle-click PRIMARY
 //!     paste as typed keys (with `xclip`/`xsel` PRIMARY fallback; CLIPBOARD
 //!     paste does not read PRIMARY and local text is used only while we
-//!     still own CLIPBOARD), receive-only ISO-8859-1/2/15 and Markdown MIME,
+//!     still own CLIPBOARD), receive-only ISO-8859-1/2/9/15 and Markdown MIME,
 //!     invalid UTF-8 paste decoded as Latin-1, TARGETS-first XDND with
 //!     position hover via TranslateCoordinates and LeaveNotify / XdndLeave
 //!     hover clear,
@@ -44,7 +44,8 @@
 //!     core pointer cursor, `_NET_WM_ICON` at 16/32/64/128 (reinstalled on scale change), urgency on `notify` (cleared on
 //!     FocusIn), EWMH ping/type/icon name/user time/startup id plus
 //!     `_NET_STARTUP_INFO` remove after MapWindow, outgoing `DESKTOP_STARTUP_ID`
-//!     for `xdg-open`, EnterNotify cursor restore and pointer move,
+//!     for `xdg-open`, EnterNotify cursor restore and pointer move
+//!     (grab/ungrab and pointer-focus details ignored), wheel releases ignored,
 //!     XSETTINGS owner re-watch after DestroyNotify (that owner does not close
 //!     the chat),
 //!     allowed actions,
@@ -68,6 +69,10 @@ const event_button_press: u32 = 1 << 2;
 const event_button_release: u32 = 1 << 3;
 const event_enter_window: u32 = 1 << 4;
 const event_leave_window: u32 = 1 << 5;
+const notify_mode_grab: u8 = 1;
+const notify_mode_ungrab: u8 = 2;
+const notify_detail_pointer: u8 = 7;
+const notify_detail_pointer_root: u8 = 8;
 const event_pointer_motion: u32 = 1 << 6;
 const event_exposure: u32 = 1 << 15;
 const event_visibility_change: u32 = 1 << 16;
@@ -194,6 +199,8 @@ const XConn = struct {
     mime_text_latin9_alt: u32 = 0,
     mime_text_latin2: u32 = 0,
     mime_text_latin2_alt: u32 = 0,
+    mime_text_latin5: u32 = 0,
+    mime_text_latin5_alt: u32 = 0,
     mime_text_markdown: u32 = 0,
     mime_text_markdown_alt: u32 = 0,
     xsettings_s0: u32 = 0,
@@ -689,12 +696,15 @@ pub const Window = struct {
                 const y = physicalPointToLogical(raw_y, self.scale);
                 if (kind == 6) return .{ .pointer = .{ .kind = .move, .x = x, .y = y } };
                 const detail = event[1];
-                if (kind == 4 and (detail == 4 or detail == 5)) return .{ .pointer = .{
-                    .kind = .wheel,
-                    .x = x,
-                    .y = y,
-                    .wheel_y = if (detail == 4) 1 else -1,
-                } };
+                if (detail == 4 or detail == 5) {
+                    if (kind != 4) return .other;
+                    return .{ .pointer = .{
+                        .kind = .wheel,
+                        .x = x,
+                        .y = y,
+                        .wheel_y = if (detail == 4) 1 else -1,
+                    } };
+                }
                 if (detail >= 6) return .other;
                 const button: shared_event.PointerButton = switch (detail) {
                     1 => .primary,
@@ -731,6 +741,7 @@ pub const Window = struct {
                 } };
             },
             7 => { // EnterNotify
+                if (x11NotifyModeIsGrab(event[30])) return .other;
                 self.noteUserTime(get32(event[4..8]));
                 if (self.cursor_id != 0) defineCursor(&self.conn, self.window, self.cursor_id) catch {};
                 const raw_x: i32 = @as(i16, @bitCast(get16(event[24..26])));
@@ -742,14 +753,17 @@ pub const Window = struct {
                 } };
             },
             8 => { // LeaveNotify
+                if (x11NotifyModeIsGrab(event[30])) return .other;
                 return .{ .pointer = .{ .kind = .move, .x = -1, .y = -1 } };
             },
             9 => { // FocusIn
+                if (x11NotifyModeIsGrab(event[8]) or x11FocusDetailIsPointer(event[1])) return .other;
                 self.clearAttention();
                 self.claimFocus(self.last_user_time);
                 return .expose;
             },
             10 => { // FocusOut
+                if (x11NotifyModeIsGrab(event[8]) or x11FocusDetailIsPointer(event[1])) return .other;
                 self.compose.reset();
                 return .other;
             },
@@ -1011,6 +1025,8 @@ pub const Window = struct {
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin9_alt, "ISO-8859-15")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2, "ISO-8859-2")) |text| return text;
         if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin2_alt, "ISO-8859-2")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin5, "ISO-8859-9")) |text| return text;
+        if (self.readCharsetTarget(gpa, selection, self.conn.mime_text_latin5_alt, "ISO-8859-9")) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown)) |text| return text;
         if (self.readPlainTarget(gpa, selection, self.conn.mime_text_markdown_alt)) |text| return text;
         if (self.readDesktopFileTarget(gpa, selection, self.conn.mime_uri_list_alt)) |path| return path;
@@ -1097,6 +1113,11 @@ pub const Window = struct {
         }
         if (isLatin2Atom(&self.conn, target)) {
             const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-2") catch return bytes;
+            gpa.free(bytes);
+            return decoded;
+        }
+        if (isLatin5Atom(&self.conn, target)) {
+            const decoded = services.decodePlainByCharset(gpa, bytes, "ISO-8859-9") catch return bytes;
             gpa.free(bytes);
             return decoded;
         }
@@ -2548,6 +2569,8 @@ fn internSessionAtoms(conn: *XConn) !void {
     conn.mime_text_latin9_alt = try internAtom(conn, "text/plain;charset=iso-8859-15");
     conn.mime_text_latin2 = try internAtom(conn, "text/plain;charset=ISO-8859-2");
     conn.mime_text_latin2_alt = try internAtom(conn, "text/plain;charset=iso-8859-2");
+    conn.mime_text_latin5 = try internAtom(conn, "text/plain;charset=ISO-8859-9");
+    conn.mime_text_latin5_alt = try internAtom(conn, "text/plain;charset=iso-8859-9");
     conn.mime_text_markdown = try internAtom(conn, "text/markdown");
     conn.mime_text_markdown_alt = try internAtom(conn, "text/x-markdown");
     conn.xsettings_s0 = try internAtom(conn, "_XSETTINGS_S0");
@@ -3245,7 +3268,7 @@ fn textAtomRank(conn: *const XConn, atom: u32) u8 {
     if (atom == conn.mime_text_utf8_alt) return 5;
     if (atom == conn.mime_text_plain) return 4;
     if (atom == conn.utf16_string or isUriListAtom(conn, atom) or isDesktopFileAtom(conn, atom)) return 3;
-    if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom)) return 3;
+    if (isLatin1Atom(conn, atom) or isLatin9Atom(conn, atom) or isLatin2Atom(conn, atom) or isLatin5Atom(conn, atom)) return 3;
     if (atom == conn.text or atom == conn.compound_text) return 2;
     if (atom == atom_string) return 1;
     if (isHtmlAtom(conn, atom) or isRtfAtom(conn, atom) or isMarkdownAtom(conn, atom)) return 1;
@@ -3274,6 +3297,18 @@ fn isLatin9Atom(conn: *const XConn, atom: u32) bool {
 
 fn isLatin2Atom(conn: *const XConn, atom: u32) bool {
     return atom != 0 and (atom == conn.mime_text_latin2 or atom == conn.mime_text_latin2_alt);
+}
+
+fn isLatin5Atom(conn: *const XConn, atom: u32) bool {
+    return atom != 0 and (atom == conn.mime_text_latin5 or atom == conn.mime_text_latin5_alt);
+}
+
+fn x11NotifyModeIsGrab(mode: u8) bool {
+    return mode == notify_mode_grab or mode == notify_mode_ungrab;
+}
+
+fn x11FocusDetailIsPointer(detail: u8) bool {
+    return detail == notify_detail_pointer or detail == notify_detail_pointer_root;
 }
 
 fn isMarkdownAtom(conn: *const XConn, atom: u32) bool {
@@ -3309,7 +3344,7 @@ fn isClipboardTextTarget(conn: *const XConn, target: u32) bool {
         target == conn.utf16_string or isHtmlAtom(conn, target) or isRtfAtom(conn, target) or
         isDesktopFileAtom(conn, target) or target == conn.compound_text or
         isLatin1Atom(conn, target) or isLatin9Atom(conn, target) or
-        isLatin2Atom(conn, target) or isMarkdownAtom(conn, target);
+        isLatin2Atom(conn, target) or isLatin5Atom(conn, target) or isMarkdownAtom(conn, target);
 }
 
 fn setSelectionOwner(conn: *XConn, window: u32, selection: u32, time: u32) !void {
@@ -3604,6 +3639,8 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
         .mime_text_latin9_alt = 128,
         .mime_text_latin2 = 127,
         .mime_text_latin2_alt = 129,
+        .mime_text_latin5 = 130,
+        .mime_text_latin5_alt = 131,
         .mime_text_markdown = 125,
         .mime_text_markdown_alt = 126,
     };
@@ -3666,7 +3703,16 @@ test "clipboard text targets include ICCCM and GTK MIME atoms" {
     try std.testing.expect(isLatin9Atom(&conn, 128));
     try std.testing.expect(isLatin2Atom(&conn, 127));
     try std.testing.expect(isLatin2Atom(&conn, 129));
+    try std.testing.expect(isLatin5Atom(&conn, 130));
+    try std.testing.expect(isLatin5Atom(&conn, 131));
+    try std.testing.expect(isClipboardTextTarget(&conn, 130));
+    try std.testing.expectEqual(@as(u8, 3), textAtomRank(&conn, 130));
     try std.testing.expect(isMarkdownAtom(&conn, 125));
+    try std.testing.expect(x11NotifyModeIsGrab(notify_mode_grab));
+    try std.testing.expect(x11NotifyModeIsGrab(notify_mode_ungrab));
+    try std.testing.expect(!x11NotifyModeIsGrab(0));
+    try std.testing.expect(x11FocusDetailIsPointer(notify_detail_pointer));
+    try std.testing.expect(!x11FocusDetailIsPointer(0));
     try std.testing.expectEqual(@as(u32, 1 << 5), event_leave_window);
     const xdnd = xdndRootPoint((@as(u32, 120) << 16) | 80);
     try std.testing.expectEqual(@as(i32, 120), xdnd.x);

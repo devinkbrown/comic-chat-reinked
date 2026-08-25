@@ -245,6 +245,9 @@ const latin_mime_types = [_][]const u8{
     "text/plain;charset=latin9",
     "text/plain;charset=ISO-8859-2",
     "text/plain;charset=iso-8859-2",
+    "text/plain;charset=ISO-8859-9",
+    "text/plain;charset=iso-8859-9",
+    "text/plain;charset=latin5",
 };
 
 /// Accepted on paste/drop only. Not advertised by `offerTextMimes`.
@@ -3669,6 +3672,7 @@ test "plain-text MIME set covers UTF-8 and ICCCM names" {
     try std.testing.expect(isPlainTextMime("COMPOUND_TEXT"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-1"));
     try std.testing.expect(isPlainTextMime("text/plain;charset=iso-8859-15"));
+    try std.testing.expect(isPlainTextMime("text/plain;charset=ISO-8859-9"));
     try std.testing.expect(isPlainTextMime("text/markdown"));
     try std.testing.expect(isPlainTextMime("text/x-markdown"));
     try std.testing.expect(!isPlainTextMime("image/png"));

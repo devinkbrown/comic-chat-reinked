@@ -113,12 +113,14 @@ hash.
   Wayland copy before the first seat serial is advertised once a serial
   arrives. Pointer leave and incoming DnD motion emit pointer moves so
   hover tracks the seat; LeaveNotify / `wl_pointer.leave` / XdndLeave
-  move to `(-1,-1)` to clear hover. NumLock XOR Shift selects keypad
+  move to `(-1,-1)` to clear hover. X11 Enter/Leave ignore grab/ungrab
+  modes, and FocusIn/Out ignore grab/ungrab plus pointer-focus details.
+  X11 wheel button releases do not emit pointer up. NumLock XOR Shift selects keypad
   digits on both backends. X11 Mod3 Mode_switch selects group 2.
   Receive-only `COMPOUND_TEXT` decodes to UTF-8, including `ESC - B`
-  ISO-8859-2 and `ESC - b` ISO-8859-15. Invalid UTF-8 clipboard bytes
+  ISO-8859-2, `ESC - b` ISO-8859-15, and `ESC - M` ISO-8859-9. Invalid UTF-8 clipboard bytes
   decode as Latin-1, including incoming DnD and Shift+Insert / middle-click
-  paste-as-keys. Receive-only ISO-8859-1/2/15 `text/plain` charset MIME
+  paste-as-keys. Receive-only ISO-8859-1/2/9/15 `text/plain` charset MIME
   (both common casings on X11) and Markdown decode to UTF-8. X11 extra
   mouse buttons 6–9 do not synthesize pointer clicks. Extra KDE5 / Mozilla-priv file MIME yields a local
   path. Receive-only `text/html` strips tags to plain text.
