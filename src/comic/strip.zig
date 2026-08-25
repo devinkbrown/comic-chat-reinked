@@ -3266,3 +3266,110 @@ test "leftover dest wrap continuation fills the bezel without paper bleed" {
         }
     }
 }
+
+test "remaining leftover dest dests stay below the balloon on unused rooms" {
+    // dests/rooms not in the park/hd-cafe dest-below-balloon lock.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{
+        "bolo color", "lance color", "susan color", "dan color", "mike color",
+        "lynnea color", "scotty color", "kwensa color", "tongtyed color",
+        "maynard color", "cro color", "margaret color",
+        "bolo hd", "lance hd", "susan hd", "dan hd", "mike hd", "lynnea hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorBelowBalloon(image, empty);
+        }
+    }
+}
+
+test "remaining leftover dest wrap continuation fills the bezel without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{
+        "bolo color", "lance color", "susan color", "mike color", "cro color", "maynard color",
+        "bolo hd", "lance hd", "susan hd",
+    };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            const stride = panel_width + device_interstice;
+            const row_stride = panel_height + device_interstice;
+            const cols = if (stride == 0) 1 else (image.width + stride - 1) / stride;
+            const rows = if (row_stride == 0) 1 else (image.height + row_stride - 1) / row_stride;
+            var checked: usize = 0;
+            var row: u32 = 0;
+            while (row < rows) : (row += 1) {
+                var col: u32 = 0;
+                while (col < cols) : (col += 1) {
+                    if (row == 0 and col == 0) continue;
+                    const x0 = col * stride;
+                    const y0 = row * row_stride;
+                    if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+                    var interior: usize = 0;
+                    var interior_paper: usize = 0;
+                    var y_scan: u32 = 8;
+                    while (y_scan + 8 < panel_height) : (y_scan += 1) {
+                        var x_scan: u32 = 8;
+                        while (x_scan + 8 < panel_width) : (x_scan += 1) {
+                            const pixel = image.pixels[(y0 + y_scan) * image.width + x0 + x_scan];
+                            const red: u8 = @truncate(pixel >> 16);
+                            const green: u8 = @truncate(pixel >> 8);
+                            const blue: u8 = @truncate(pixel);
+                            interior += 1;
+                            if (red >= 248 and green >= 248 and blue >= 248) interior_paper += 1;
+                        }
+                    }
+                    if (interior_paper * 10 >= interior * 9) continue;
+                    var paper: usize = 0;
+                    var inset: u32 = 1;
+                    while (inset <= 3) : (inset += 1) {
+                        var x: u32 = 8;
+                        while (x + 8 < panel_width) : (x += 1) {
+                            const bottom = image.pixels[(y0 + panel_height - 1 - inset) * image.width + x0 + x];
+                            const red: u8 = @truncate(bottom >> 16);
+                            const green: u8 = @truncate(bottom >> 8);
+                            const blue: u8 = @truncate(bottom);
+                            if (red >= 248 and green >= 248 and blue >= 248) paper += 1;
+                        }
+                    }
+                    try std.testing.expectEqual(@as(usize, 0), paper);
+                    checked += 1;
+                }
+            }
+            try std.testing.expect(checked >= 2);
+        }
+    }
+}
