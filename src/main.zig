@@ -3174,17 +3174,32 @@ fn applyDialogAction(
             if (ban_mask.len != 0) try client.setBan(room.name, ban_mask);
             try client.kick(room.name, value, view.dialogValueAt(1));
         },
-        .ban => if (maybe_client) |client| switch (classifyBanMask(value)) {
-            .list => try client.listBans(room.name),
-            .delete => {
-                const mask = banMaskArgument(value);
-                if (mask.len == 0) {
-                    view.setDialogNotice("Enter the mask to unban, for example -nick!*@*.");
-                    return;
-                }
-                try client.clearBan(room.name, mask);
-            },
-            .add => try client.setBan(room.name, value),
+        .ban => if (maybe_client) |client| {
+            const list = classifyChannelListMask(value);
+            const mask = channelListMaskArgument(value, list.kind);
+            switch (list.action) {
+                .list => switch (list.kind) {
+                    .ban => try client.listBans(room.name),
+                    .except => try client.listExceptions(room.name),
+                    .invite => try client.listInviteMasks(room.name),
+                },
+                .delete => {
+                    if (mask.len == 0) {
+                        view.setDialogNotice("Enter the mask to remove, for example -nick!*@* or -e:nick!*@*.");
+                        return;
+                    }
+                    switch (list.kind) {
+                        .ban => try client.clearBan(room.name, mask),
+                        .except => try client.clearException(room.name, mask),
+                        .invite => try client.clearInviteMask(room.name, mask),
+                    }
+                },
+                .add => switch (list.kind) {
+                    .ban => try client.setBan(room.name, value),
+                    .except => try client.setException(room.name, mask),
+                    .invite => try client.setInviteMask(room.name, mask),
+                },
+            }
         },
         .channel_password => {
             const client = maybe_client orelse {
@@ -3874,7 +3889,11 @@ fn processWorkspaceMessages(
                 try network.adoptNick(assigned);
             }
             if (client.hasRestorationTargets()) {
-                for (workspace.rooms.items) |*room| room.joined = false;
+                for (workspace.rooms.items) |*room| {
+                    room.joined = false;
+                    if (!client.restoresChannel(room.name))
+                        try client.joinWithKey(room.name, room.join_key orelse "");
+                }
             } else if (workspace.rooms.items.len == 0) {
                 // Open the startup room before MOTD/LUSERS so those numerics
                 // have a transcript. JOIN confirmation still marks it joined.
@@ -4017,7 +4036,7 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
     return switch (code) {
         2, 3, 4, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266 => true,
         307, 311, 312, 313, 314, 317, 318, 319, 330, 338, 378 => true,
-        322, 323, 341, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
+        322, 323, 329, 341, 346, 347, 348, 349, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
         710, 711, 712, 713, 714, 715, 732, 733, 734 => true,
         801...819, 900...908, 913...925 => true,
         else => false,
@@ -4187,6 +4206,7 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "412") or
         std.mem.eql(u8, command, "417") or
         std.mem.eql(u8, command, "421") or
+        std.mem.eql(u8, command, "486") or
         std.mem.eql(u8, command, "441") or
         std.mem.eql(u8, command, "442") or
         std.mem.eql(u8, command, "467") or
@@ -4391,16 +4411,60 @@ fn appendKnockLine(
 }
 
 const BanAction = enum { add, delete, list };
+const ChannelListKind = enum { ban, except, invite };
+const ChannelListAction = struct { action: BanAction, kind: ChannelListKind };
 
 fn classifyBanMask(mask: []const u8) BanAction {
+    return classifyChannelListMask(mask).action;
+}
+
+fn classifyChannelListMask(mask: []const u8) ChannelListAction {
     const trimmed = std.mem.trim(u8, mask, " \t");
-    if (trimmed.len == 0) return .list;
-    if (trimmed[0] == '-') return .delete;
-    return .add;
+    if (channelListToken(trimmed, &.{ "+e", "e", "except", "exception" })) return .{ .action = .list, .kind = .except };
+    if (channelListToken(trimmed, &.{ "+I", "I", "invex" })) return .{ .action = .list, .kind = .invite };
+    if (channelListPrefixed(trimmed, "-e")) |_| return .{ .action = .delete, .kind = .except };
+    if (channelListPrefixed(trimmed, "+e")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .except };
+    if (channelListPrefixed(trimmed, "e:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .except };
+    if (channelListPrefixed(trimmed, "-I")) |_| return .{ .action = .delete, .kind = .invite };
+    if (channelListPrefixed(trimmed, "+I")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .invite };
+    if (channelListPrefixed(trimmed, "I:")) |rest|
+        return .{ .action = if (rest.len == 0) .list else .add, .kind = .invite };
+    if (trimmed.len == 0) return .{ .action = .list, .kind = .ban };
+    if (trimmed[0] == '-') return .{ .action = .delete, .kind = .ban };
+    return .{ .action = .add, .kind = .ban };
+}
+
+fn channelListToken(value: []const u8, tokens: []const []const u8) bool {
+    for (tokens) |token| if (std.ascii.eqlIgnoreCase(value, token)) return true;
+    return false;
+}
+
+fn channelListPrefixed(value: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, value, prefix)) return null;
+    const rest = value[prefix.len..];
+    if (rest.len == 0) return "";
+    if (prefix[prefix.len - 1] == ':') return std.mem.trim(u8, rest, " \t");
+    if (rest[0] == ':' or rest[0] == ' ') return std.mem.trim(u8, rest[1..], " \t");
+    return null;
 }
 
 fn banMaskArgument(mask: []const u8) []const u8 {
+    return channelListMaskArgument(mask, .ban);
+}
+
+fn channelListMaskArgument(mask: []const u8, kind: ChannelListKind) []const u8 {
     const trimmed = std.mem.trim(u8, mask, " \t");
+    const prefixes: []const []const u8 = switch (kind) {
+        .except => &.{ "-e", "+e", "e:" },
+        .invite => &.{ "-I", "+I", "I:" },
+        .ban => &.{},
+    };
+    for (prefixes) |prefix| {
+        if (channelListPrefixed(trimmed, prefix)) |rest| return rest;
+    }
     if (trimmed.len > 0 and trimmed[0] == '-') return std.mem.trim(u8, trimmed[1..], " \t");
     return trimmed;
 }
@@ -5489,8 +5553,13 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("338"));
     try std.testing.expect(isVisibleServerWorkflowReply("378"));
     try std.testing.expect(isVisibleServerWorkflowReply("422"));
+    try std.testing.expect(isVisibleServerWorkflowReply("329"));
+    try std.testing.expect(isVisibleServerWorkflowReply("346"));
+    try std.testing.expect(isVisibleServerWorkflowReply("348"));
+    try std.testing.expect(isVisibleServerWorkflowReply("349"));
     try std.testing.expect(isCommandFailureNumeric("412"));
     try std.testing.expect(isCommandFailureNumeric("417"));
+    try std.testing.expect(isCommandFailureNumeric("486"));
     try std.testing.expect(isVisibleServerWorkflowReply("732"));
     try std.testing.expect(isVisibleServerWorkflowReply("734"));
     try std.testing.expect(isVisibleServerWorkflowReply("904"));
@@ -5589,12 +5658,29 @@ test "MOTD, invite, knock, key, and ban helpers stay live" {
     try std.testing.expectEqual(BanAction.list, classifyBanMask(""));
     try std.testing.expectEqual(BanAction.delete, classifyBanMask("-alice!*@*"));
     try std.testing.expectEqual(BanAction.add, classifyBanMask("alice!*@*"));
+    try std.testing.expectEqual(BanAction.delete, classifyBanMask("-evil!*@*"));
     try std.testing.expectEqualStrings("alice!*@*", banMaskArgument("-alice!*@*"));
+    try std.testing.expectEqual(ChannelListKind.except, classifyChannelListMask("+e").kind);
+    try std.testing.expectEqual(BanAction.list, classifyChannelListMask("except").action);
+    try std.testing.expectEqual(ChannelListKind.except, classifyChannelListMask("+e:alice!*@*").kind);
+    try std.testing.expectEqual(BanAction.add, classifyChannelListMask("+e:alice!*@*").action);
+    try std.testing.expectEqualStrings("alice!*@*", channelListMaskArgument("+e:alice!*@*", .except));
+    try std.testing.expectEqual(ChannelListKind.invite, classifyChannelListMask("invex").kind);
+    try std.testing.expectEqual(BanAction.delete, classifyChannelListMask("-I:alice!*@*").action);
+    try std.testing.expectEqual(ChannelListKind.ban, classifyChannelListMask("-evil!*@*").kind);
 
     try client.listBans("#root");
     try client.clearBan("#root", "alice!*@*");
+    try client.listExceptions("#root");
+    try client.setException("#root", "alice!*@*");
+    try client.listInviteMasks("#root");
+    try client.clearInviteMask("#root", "alice!*@*");
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MODE #root +b") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MODE #root -b alice!*@*") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[2].bytes, "MODE #root +e") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[3].bytes, "MODE #root +e alice!*@*") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[4].bytes, "MODE #root +I") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[5].bytes, "MODE #root -I alice!*@*") != null);
 }
 
 test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
@@ -5677,6 +5763,9 @@ test "SASL file auth, MONITOR presence, and reconnect leftovers stay live" {
     try client.monitor(.status, null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[0].bytes, "MONITOR + alice,bob\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[1].bytes, "MONITOR S\r\n") != null);
+    try client.join("#root");
+    try std.testing.expect(client.restoresChannel("#root"));
+    try std.testing.expect(!client.restoresChannel("#late"));
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

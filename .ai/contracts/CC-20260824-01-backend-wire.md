@@ -56,13 +56,12 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - [x] PR lists what was fixed and honest leftovers
 - [x] No desktop UI redesign
 
-## Wave 8 leftovers in scope
+## Wave 9 leftovers in scope
 
-- Persist SASL username and password-file path only (never the password, never the Password dialog)
-- Reload that file on a later process and keep session-store account aligned with the SASL user
-- Subscribe exact notify nicks with MONITOR when ISUPPORT advertises it; keep WHO for wildcards
-- Apply 730/731 online/offline immediately; resubscribe after reconnect
-- Show remaining dropped connect/session numerics: 002-004, 250, 265, 266, 330, 422, 732-734
+- Delay NICK/USER until CAP END when SASL credentials are present
+- Exception/invite list MODE +e/+I on the existing ban-dialog / channel-mode path; show 346-349
+- Rejoin workspace rooms that restoration does not already cover
+- Show remaining live numerics 329 and send failure 486
 
 ## Verification
 

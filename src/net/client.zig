@@ -83,6 +83,10 @@ const Registration = struct {
     done: bool = false,
     authenticated: bool = false,
     session_commands_sent: bool = false,
+    nick_sent: bool = false,
+    nick_storage: ?[]u8 = null,
+    user_storage: ?[]u8 = null,
+    realname_storage: ?[]u8 = null,
     nonce: [24]u8 = undefined,
 
     fn init(
@@ -113,6 +117,9 @@ const Registration = struct {
 
     fn deinit(self: *Registration) void {
         if (self.sasl_session) |*session| session.deinit();
+        if (self.nick_storage) |storage| self.cap.gpa.free(storage);
+        if (self.user_storage) |storage| self.cap.gpa.free(storage);
+        if (self.realname_storage) |storage| self.cap.gpa.free(storage);
         self.cap.deinit();
         if (self.credentials) |credentials| {
             if (!credentials.zeroized) credentials.zeroize();
@@ -233,6 +240,7 @@ const Registration = struct {
             try irc.writeIrcxProbe(out, self.cap.gpa);
             self.ircx_probe_sent = true;
         }
+        try emitRegisterIdentity(self, out, self.cap.gpa);
         if (self.credentials) |credentials| {
             if (self.sasl_session == null and !credentials.zeroized) credentials.zeroize();
         }
@@ -288,6 +296,37 @@ const Registration = struct {
     }
 };
 
+fn rememberRegisterIdentity(
+    registration: *Registration,
+    gpa: std.mem.Allocator,
+    nick: []const u8,
+    user: []const u8,
+    realname: []const u8,
+) !void {
+    const owned_nick = try gpa.dupe(u8, nick);
+    errdefer gpa.free(owned_nick);
+    const owned_user = try gpa.dupe(u8, user);
+    errdefer gpa.free(owned_user);
+    const owned_realname = try gpa.dupe(u8, realname);
+    errdefer gpa.free(owned_realname);
+    if (registration.nick_storage) |old| gpa.free(old);
+    if (registration.user_storage) |old| gpa.free(old);
+    if (registration.realname_storage) |old| gpa.free(old);
+    registration.nick_storage = owned_nick;
+    registration.user_storage = owned_user;
+    registration.realname_storage = owned_realname;
+}
+
+fn emitRegisterIdentity(registration: *Registration, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
+    if (registration.nick_sent) return;
+    const nick = registration.nick_storage orelse return;
+    const user = registration.user_storage orelse return;
+    const realname = registration.realname_storage orelse return;
+    try irc.writeNick(out, gpa, nick);
+    try irc.writeUser(out, gpa, user, realname);
+    registration.nick_sent = true;
+}
+
 fn appendRegistrationStart(
     registration: *Registration,
     out: *std.ArrayList(u8),
@@ -304,8 +343,10 @@ fn appendRegistrationStart(
         registration.ircx_probe_sent = true;
     }
     try registration.cap.begin(out);
-    try irc.writeNick(out, gpa, nick);
-    try irc.writeUser(out, gpa, user, realname);
+    try rememberRegisterIdentity(registration, gpa, nick, user, realname);
+    // When SASL credentials are present, wait for CAP END so the reserved
+    // account nick is claimed after AUTHENTICATE rather than racing 433.
+    if (registration.credentials == null) try emitRegisterIdentity(registration, out, gpa);
 }
 
 fn isSaslNumeric(command: []const u8) bool {
@@ -555,6 +596,36 @@ pub const Client = struct {
 
     pub fn listBans(self: *Client, channel: []const u8) !void {
         try self.appendCommand("MODE", &.{ channel, "+b" });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    pub fn setException(self: *Client, channel: []const u8, mask: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "+e", mask });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    pub fn clearException(self: *Client, channel: []const u8, mask: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "-e", mask });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    pub fn listExceptions(self: *Client, channel: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "+e" });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    pub fn setInviteMask(self: *Client, channel: []const u8, mask: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "+I", mask });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    pub fn clearInviteMask(self: *Client, channel: []const u8, mask: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "-I", mask });
+        try self.queueOut(.interactive, true, false);
+    }
+
+    pub fn listInviteMasks(self: *Client, channel: []const u8) !void {
+        try self.appendCommand("MODE", &.{ channel, "+I" });
         try self.queueOut(.interactive, true, false);
     }
 
@@ -1349,6 +1420,14 @@ pub const Client = struct {
 
     pub fn hasRestorationTargets(self: *const Client) bool {
         return if (self.restoration) |restoration| restoration.targetCount() != 0 else false;
+    }
+
+    pub fn restoresChannel(self: *const Client, channel: []const u8) bool {
+        const restoration = self.restoration orelse return false;
+        for (restoration.targets.items) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.channel, channel)) return true;
+        }
+        return false;
     }
 
     pub fn takeRestoration(self: *Client, dest: *policy.Restoration) void {
@@ -2448,6 +2527,57 @@ test "live registration probes IRCX before CAP NICK and USER" {
         out.items,
     );
     try std.testing.expect(registration.ircx_probe_sent);
+    try std.testing.expect(registration.nick_sent);
+}
+
+test "SASL registration delays NICK until CAP END" {
+    const gpa = std.testing.allocator;
+    var authzid = [_]u8{};
+    var authcid = [_]u8{ 'a', 'l', 'i', 'c', 'e' };
+    var password = [_]u8{ 's', 'e', 'c', 'r', 'e', 't' };
+    var credentials = sasl.Credentials{
+        .authorization_identity = &authzid,
+        .authentication_identity = &authcid,
+        .password = &password,
+    };
+    const preference = [_]sasl.Mechanism{.plain};
+    var registration = Registration.init(gpa, "irc.example", .tls, .{
+        .credentials = &credentials,
+        .sasl_preference = &preference,
+        .io = std.testing.io,
+        .want_ircx = true,
+    });
+    defer registration.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    defer sasl.secureClear(&out);
+    var upgrade: ?u16 = null;
+
+    try appendRegistrationStart(&registration, &out, gpa, "alice", "alice", "Alice Example");
+    try std.testing.expectEqualStrings("MODE ISIRCX\r\nCAP LS 302\r\n", out.items);
+    try std.testing.expect(!registration.nick_sent);
+
+    sasl.secureClear(&out);
+    var ls = message.parse(":irc CAP * LS :sasl=PLAIN");
+    _ = try registration.consume(&out, &ls, &upgrade);
+    sasl.secureClear(&out);
+    var ack = message.parse(":irc CAP * ACK :sasl");
+    _ = try registration.consume(&out, &ack, &upgrade);
+    try std.testing.expectEqualStrings("AUTHENTICATE PLAIN\r\n", out.items);
+
+    sasl.secureClear(&out);
+    var challenge = message.parse("AUTHENTICATE +");
+    _ = try registration.consume(&out, &challenge, &upgrade);
+    try std.testing.expect(std.mem.startsWith(u8, out.items, "AUTHENTICATE "));
+
+    sasl.secureClear(&out);
+    var success = message.parse(":irc 903 alice :SASL authentication successful");
+    _ = try registration.consume(&out, &success, &upgrade);
+    try std.testing.expect(std.mem.startsWith(u8, out.items, "CAP END\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "NICK alice\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "USER alice 0 * :Alice Example\r\n") != null);
+    try std.testing.expect(registration.nick_sent);
+    try std.testing.expect(registration.done);
 }
 
 test "Microsoft comment controls retain the source PRIVMSG form on IRCX" {

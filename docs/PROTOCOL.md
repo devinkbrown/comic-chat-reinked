@@ -19,7 +19,9 @@ means the server supports IRCX but it is not enabled, so the client sends
 `IRCX`; only the following numeric 800 state `1` enables `DATA ... CCUDI1`.
 An ISUPPORT advertisement does not substitute for that state transition. The
 portable client preserves this ordering, with modern CAP/SASL negotiation
-between the probe and NICK/USER registration commands.
+between the probe and NICK/USER. When SASL credentials are present, NICK/USER
+wait for a terminal SASL result and `CAP END` so the reserved account nick is
+not raced before `AUTHENTICATE`.
 
 The portable client secures that stream with the pinned Onyx TLS implementation
 at commit `06bb3500b4fd62e2f307cb4004340c58062c0f59`. TLS is the default and
