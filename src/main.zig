@@ -1654,7 +1654,7 @@ fn tickBackgroundFeatures(
     const preferences = &network.runtime.preferences;
     if (state.notification_poll_pending == 0 and
         preferences.notifications.items.len != 0 and
-        !std.ascii.eqlIgnoreCase(preferences.notificationDelivery(), "Disabled") and
+        !cc.client.dialogs.matchesAny(preferences.notificationDelivery(), &.{ "Off", "Disabled" }) and
         (state.last_notification_poll_ms == 0 or now_ms -| state.last_notification_poll_ms >= 60_000))
     {
         for (state.notification_current.items) |entry| workspace.gpa.free(entry);
@@ -2169,7 +2169,7 @@ fn prefillOpenedDialog(
                 .violet => "Violet",
                 .forest => "Forest",
             });
-            try view.setDialogValueAt(2, if (view.appearance.high_contrast) "High contrast" else "Standard");
+            try view.setDialogValueAt(2, if (view.appearance.high_contrast) "High contrast" else "Usual");
             try view.setDialogValueAt(3, if (view.shell.content_mode == .comic) "Comic" else "Text");
             var panels: [16]u8 = undefined;
             try view.setDialogValueAt(4, try std.fmt.bufPrint(&panels, "{d} panels", .{view.shell.comic_columns}));
@@ -2204,7 +2204,7 @@ fn prefillOpenedDialog(
         },
         .background => try view.setDialogValueAt(0, transcript.resolvedBackdrop()),
         .automation => {
-            try view.setDialogValueAt(0, preferences.greetingMode());
+            try view.setDialogValueAt(0, if (cc.client.dialogs.matchesAny(preferences.greetingMode(), &.{ "Off", "None" })) "Off" else preferences.greetingMode());
             try view.setDialogValueAt(1, preferences.greeting.items);
             var number: [16]u8 = undefined;
             try view.setDialogValueAt(2, try std.fmt.bufPrint(&number, "{d}", .{preferences.auto_ignore_count}));
@@ -2213,7 +2213,7 @@ fn prefillOpenedDialog(
         .notifications => {
             try view.setDialogValueAt(1, "*");
             try view.setDialogValueAt(2, "*");
-            try view.setDialogValueAt(4, preferences.notificationDelivery());
+            try view.setDialogValueAt(4, if (cc.client.dialogs.matchesAny(preferences.notificationDelivery(), &.{ "Off", "Disabled" })) "Off" else preferences.notificationDelivery());
         },
         .notification_users => {
             var online: std.ArrayList(u8) = .empty;
@@ -2620,7 +2620,7 @@ fn applyDialogAction(
         },
         .background => {
             const selected = cc.comic.session.bundledBackdropByName(value) orelse {
-                view.setDialogNotice("Choose one of the bundled Comic Chat backdrops.");
+                view.setDialogNotice("Choose a bundled backdrop.");
                 return;
             };
             try room.transcript.setBackdrop(selected);
@@ -2727,7 +2727,7 @@ fn applyDialogAction(
                 }
                 const timeout = std.mem.trim(u8, view.dialogValueAt(3), " \t");
                 for (timeout) |byte| if (!std.ascii.isDigit(byte)) {
-                    view.setDialogNotice("The access timeout must be a number of minutes.");
+                    view.setDialogNotice("Timeout must be a number of minutes.");
                     return;
                 };
                 if (std.mem.indexOfAny(u8, mask, " \r\n\x00") != null or hasWireControl(view.dialogValueAt(4))) {
@@ -2895,7 +2895,7 @@ fn applyDialogAction(
                 .user_mask = if (view.dialogValueAt(1).len == 0) "*" else view.dialogValueAt(1),
                 .host_mask = if (view.dialogValueAt(2).len == 0) "*" else view.dialogValueAt(2),
                 .network = view.dialogValueAt(3),
-                .enabled = !std.ascii.eqlIgnoreCase(delivery, "Disabled"),
+                .enabled = !cc.client.dialogs.matchesAny(delivery, &.{ "Off", "Disabled" }),
             });
             try preferences.saveFile(io, network.runtime.preferences_path);
             state.last_notification_poll_ms = 0;
@@ -3818,7 +3818,7 @@ fn observeFlood(state: *ChatState, gpa: std.mem.Allocator, nick: []const u8, now
 }
 
 fn sendAutomaticGreeting(client: *cc.net.client.Client, preferences: *const cc.client.preferences.Store, channel: []const u8, nick: []const u8) !void {
-    if (preferences.greeting.items.len == 0 or hasWireControl(preferences.greeting.items) or std.ascii.eqlIgnoreCase(preferences.greetingMode(), "None")) return;
+    if (preferences.greeting.items.len == 0 or hasWireControl(preferences.greeting.items) or cc.client.dialogs.matchesAny(preferences.greetingMode(), &.{ "Off", "None" })) return;
     const text = try replaceNickToken(client.gpa, preferences.greeting.items, nick);
     defer client.gpa.free(text);
     try client.privmsg(if (std.ascii.eqlIgnoreCase(preferences.greetingMode(), "Whisper")) nick else channel, text);
@@ -3950,7 +3950,7 @@ fn receiveDccOffer(
     const save_path = std.fmt.bufPrint(&destination, "received-{s}", .{filename}) catch "received-file.bin";
     try view.setDialogValueAt(2, save_path);
     var size_text: [64]u8 = undefined;
-    try view.setDialogValueAt(3, std.fmt.bufPrint(&size_text, "{d} bytes", .{offer.size.?}) catch "size unavailable");
+    try view.setDialogValueAt(3, std.fmt.bufPrint(&size_text, "{d} bytes", .{offer.size.?}) catch "size unknown");
     try view.setDialogValueAt(4, "Waiting for approval");
     view.setDialogNotice("Verify sender and save path before accepting.");
     return true;
@@ -3984,8 +3984,8 @@ fn receiveCallControl(client: *cc.net.client.Client, view: *cc.client.view.View,
     view.openDialog(.call_link);
     try view.setDialogValueAt(0, who);
     try view.setDialogValueAt(1, link);
-    try view.setDialogValueAt(2, "Incoming portable call invitation");
-    view.setDialogNotice("Copy the verified HTTPS link to your browser when you are ready.");
+    try view.setDialogValueAt(2, "Incoming safe-link invitation");
+    view.setDialogNotice("Copy the verified HTTPS link when you are ready.");
     _ = client;
     return true;
 }
@@ -4442,7 +4442,7 @@ fn runUiPreview(gpa: std.mem.Allocator, io: std.Io, surface: []const u8) !void {
             .call_link => {
                 try view.setDialogValueAt(0, "alex");
                 try view.setDialogValueAt(1, "https://meet.example/room");
-                try view.setDialogValueAt(2, "Portable secure-link invitation");
+                try view.setDialogValueAt(2, "Portable safe-link invitation");
             },
             else => {},
         }

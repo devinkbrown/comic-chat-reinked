@@ -89,7 +89,7 @@ pub const specs = [_]Spec{
     .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Sign-in name", .group = .connection, .source_w = 188, .source_h = 71 },
     .{ .id = .channel, .resource = "IDD_CHANNEL", .title = "Join room", .group = .rooms, .source_w = 144, .source_h = 110 },
     .{ .id = .channel_properties, .resource = "IDD_CHANNELPROP", .title = "Room details", .group = .rooms, .source_w = 186, .source_h = 196 },
-    .{ .id = .ban, .resource = "IDD_BAN", .title = "Ban or release", .group = .rooms, .source_w = 186, .source_h = 170 },
+    .{ .id = .ban, .resource = "IDD_BAN", .title = "Ban or free", .group = .rooms, .source_w = 186, .source_h = 170 },
     .{ .id = .invite, .resource = "IDD_INVITE", .title = "Invite CAST", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .sound, .resource = "IDD_SOUND_DLG", .title = "Send sound", .group = .rooms, .source_w = 188, .source_h = 228 },
     .{ .id = .set_text_font, .resource = "IDD_SETTEXTFONT", .title = "Text font", .group = .connection, .source_w = 264, .source_h = 261 },
@@ -231,7 +231,7 @@ pub fn fields(id: Id) []const Field {
         .open_locator => &.{.{ .label = "Locator file", .hint = "Path to a .ccr file" }},
         .recent_files => &.{ .{ .label = "Recent conversation", .hint = "Most recent path; edit to choose another" }, .{ .label = "Open or remove", .kind = .choice } },
         .favorite_rooms => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Join or save", .kind = .choice } },
-        .print_preview => &.{ .{ .label = "PDF file", .hint = "Save printable preview as .pdf" }, .{ .label = "Save how", .kind = .choice } },
+        .print_preview => &.{ .{ .label = "PDF file", .hint = "Save printable preview as .pdf" }, .{ .label = "After save", .kind = .choice } },
         .connection_features => &.{ .{ .label = "Wire", .kind = .readonly }, .{ .label = "Sign-in", .kind = .readonly }, .{ .label = "Room extras", .kind = .readonly }, .{ .label = "On this wire", .kind = .readonly } },
         .motd => &.{.{ .label = "Bulletin", .hint = "From the wire", .kind = .readonly }},
         .invitation => &.{ .{ .label = "Room", .hint = "#room" }, .{ .label = "Note", .hint = "Optional" } },
@@ -239,7 +239,7 @@ pub fn fields(id: Id) []const Field {
         .ircx_properties => &.{ .{ .label = "Room", .hint = "Current room by default" }, .{ .label = "Property list", .hint = "Topic, greeting, or other room properties" }, .{ .label = "Value", .hint = "Leave empty to remove" }, .{ .label = "Property action", .kind = .choice } },
         .room_access => &.{ .{ .label = "Access action", .kind = .choice }, .{ .label = "Access", .kind = .choice }, .{ .label = "Name pattern", .hint = "Name or address pattern, such as *!*@*" }, .{ .label = "Timeout", .hint = "Minutes; 0 means unlimited" }, .{ .label = "Reason", .hint = "Optional" } },
         .ircx_events => &.{ .{ .label = "Event action", .kind = .choice }, .{ .label = "Event", .hint = "Room, CAST, server, connection, or link", .kind = .choice }, .{ .label = "Event filter", .hint = "Optional; one word" } },
-        .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Secure link", .hint = "Portable secure-link invitation", .kind = .readonly } },
+        .call_link => &.{ .{ .label = "CAST member", .hint = "Visible sign-in name" }, .{ .label = "Meeting link", .hint = "https://..." }, .{ .label = "Safe link", .hint = "Portable safe-link invitation", .kind = .readonly } },
         .member_profile => &.{ .{ .label = "CAST member", .hint = "Visible CAST member" }, .{ .label = "Profile", .hint = "Profile is shown in the conversation", .kind = .readonly } },
     };
 }
@@ -262,7 +262,7 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         .settings => switch (index) {
             0 => &.{ "Light studio", "Dark studio" },
             1 => &.{ "Vermillion", "Violet", "Forest" },
-            2 => &.{ "Standard", "High contrast" },
+            2 => &.{ "Usual", "High contrast" },
             3 => &.{ "Comic", "Text" },
             4 => &.{ "4 panels", "3 panels", "2 panels", "1 panel", "5 panels", "6 panels" },
             5 => &.{ "Shown", "Hidden" },
@@ -295,14 +295,14 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         .sound => if (index == 0) &.{ "Chime.wav", "Knock.wav", "Laugh.wav", "Applause.wav" } else &.{},
         .set_text_font, .text_font => if (index == 0) &.{ "Comic Neue 14", "Comic Neue 16", "Comic Neue 18" } else &.{ "Regular", "Bold", "Italic" },
         .comics_view => if (index == 0) &.{ "Comic", "Text" } else &.{ "4 panels", "3 panels", "2 panels", "1 panel", "5 panels", "6 panels" },
-        .automation => if (index == 0) &.{ "None", "Whisper", "Say" } else &.{},
+        .automation => if (index == 0) &.{ "Off", "Whisper", "Say" } else &.{},
         .rules, .edit_rule => if (index == 1)
             &.{ "Message", "Whisper", "Join", "Leave", "Kick", "Invitation" }
         else if (index == 3)
             &.{ "Notify", "Reply", "Action", "Sound", "Join room", "Ignore" }
         else
             &.{},
-        .notifications => if (index == 4) &.{ "In-app banner", "Sound and banner", "Disabled" } else &.{},
+        .notifications => if (index == 4) &.{ "In-app banner", "Sound and banner", "Off" } else &.{},
         .file_transfer => if (index == 0) &.{ "Send file", "Receive offer" } else &.{},
         .notification_users => if (index == 2) &.{ "Refresh", "Whisper", "Invite CAST", "Join room", "Clear list" } else &.{},
         .ircx_properties => if (index == 3) &.{ "Read", "Read common properties", "Write", "Remove" } else &.{},
@@ -482,7 +482,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Remove", choiceOptions(.recent_files, 1)[1]);
     try std.testing.expectEqualStrings("Open or remove", fields(.recent_files)[1].label);
     try std.testing.expectEqualStrings("Join or save", fields(.favorite_rooms)[1].label);
-    try std.testing.expectEqualStrings("Save how", fields(.print_preview)[1].label);
+    try std.testing.expectEqualStrings("After save", fields(.print_preview)[1].label);
     try std.testing.expectEqualStrings("CAST action", fields(.notification_users)[2].label);
     try std.testing.expectEqualStrings("Current ink", fields(.choose_color)[1].hint);
     try std.testing.expectEqualStrings("Wire account name", fields(.password)[0].hint);
@@ -541,7 +541,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Account pattern", fields(.notifications)[1].label);
     try std.testing.expectEqualStrings("Address pattern", fields(.notifications)[2].label);
     try std.testing.expectEqualStrings("Browse rooms", get(.room_list).title);
-    try std.testing.expectEqualStrings("Ban or release", get(.ban).title);
+    try std.testing.expectEqualStrings("Ban or free", get(.ban).title);
     try std.testing.expectEqualStrings("Send call link", get(.call_link).title);
     try std.testing.expectEqualStrings("Voice", choiceOptions(.room_access, 1)[0]);
     try std.testing.expectEqualStrings("Read common properties", choiceOptions(.ircx_properties, 3)[1]);
@@ -561,7 +561,7 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("List cap", fields(.room_list)[2].label);
     try std.testing.expectEqualStrings("Wire", fields(.notifications)[3].label);
     try std.testing.expectEqualStrings("Watch how", fields(.notifications)[4].label);
-    try std.testing.expectEqualStrings("Secure link", fields(.call_link)[2].label);
+    try std.testing.expectEqualStrings("Safe link", fields(.call_link)[2].label);
     try std.testing.expectEqualStrings("Rule caps", choiceOptions(.rule_sets, 0)[3]);
     try std.testing.expectEqualStrings("Rule matching", choiceOptions(.rule_sets, 0)[4]);
     try std.testing.expectEqualStrings("Add this room", choiceOptions(.favorite_rooms, 1)[1]);
@@ -714,6 +714,12 @@ test "dialog operations accept Sunday labels and leftover verbs" {
     try std.testing.expect(matchesAny("With balloon", &.{ "With ink", "With balloon" }));
     try std.testing.expect(matchesAny("Give the rule a name.", &.{ "Name the rule.", "Give the rule a name." }));
     try std.testing.expect(matchesAny("The saved notification rules will be queried now.", &.{ "Watch CAST will query the wire now.", "The saved notification rules will be queried now." }));
+    try std.testing.expect(matchesAny("Ban or release", &.{ "Ban or free", "Ban or release" }));
+    try std.testing.expect(matchesAny("Standard", &.{ "Usual", "Standard" }));
+    try std.testing.expect(matchesAny("Secure link", &.{ "Safe link", "Secure link" }));
+    try std.testing.expect(matchesAny("Save how", &.{ "After save", "Save how" }));
+    try std.testing.expect(matchesAny("None", &.{ "Off", "None" }));
+    try std.testing.expect(matchesAny("Disabled", &.{ "Off", "Disabled" }));
     try std.testing.expect(!matchesAny("Add", &.{ "List", "Show" }));
 }
 

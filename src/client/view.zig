@@ -563,7 +563,7 @@ pub const View = struct {
             .violet => "Violet",
             .forest => "Forest",
         };
-        const contrast = if (self.appearance.high_contrast) "High contrast" else "Standard";
+        const contrast = if (self.appearance.high_contrast) "High contrast" else "Usual";
         const page = if (self.shell.content_mode == .text) "Text" else "Comic";
         const panels = switch (self.shell.comic_columns) {
             1 => "1 panel",
@@ -1059,7 +1059,12 @@ pub const View = struct {
                     if (modifiers.shift) editor.extendEnd() else editor.end();
                 }
             },
-            .up => if (self.dialog_action_focus == null and !self.dialog_browse_focus) {
+            .up => {
+                if (self.dialog_action_focus != null) {
+                    self.focusDialogLastField(id);
+                    return .none;
+                }
+                if (self.dialog_browse_focus) return .none;
                 if (dialogs.fields(id)[self.dialog_field].kind == .choice)
                     self.cycleDialogChoiceDirection(id, self.dialog_field, false);
             },
@@ -1096,6 +1101,20 @@ pub const View = struct {
         }
         for (dialogs.fields(id), 0..) |field, index| {
             if (!dialogFieldFocusable(field)) continue;
+            self.dialog_field = index;
+            self.dialog_action_focus = null;
+            self.ensureDialogFieldVisible(id);
+            return;
+        }
+        self.dialog_action_focus = .primary;
+    }
+
+    fn focusDialogLastField(self: *View, id: dialogs.Id) void {
+        self.dialog_browse_focus = false;
+        var index = dialogs.fields(id).len;
+        while (index > 0) {
+            index -= 1;
+            if (!dialogFieldFocusable(dialogs.fields(id)[index])) continue;
             self.dialog_field = index;
             self.dialog_action_focus = null;
             self.ensureDialogFieldVisible(id);
@@ -2220,7 +2239,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Whisper",
             3 => "Invite CAST",
             4 => "Kick CAST",
-            5 => "Ban or release",
+            5 => "Ban or free",
             6 => "File transfer",
             else => "Send call link",
         },
@@ -2442,7 +2461,7 @@ fn contextItemLabel(kind: ContextKind, item: u8, frozen: bool) []const u8 {
             1 => "CAST profile",
             2 => "Invite CAST",
             3 => "Kick CAST",
-            else => "Ban or release",
+            else => "Ban or free",
         },
         .body_camera => switch (item) {
             0 => if (frozen) "Release expression" else "Hold expression",
@@ -3662,7 +3681,7 @@ fn dialogGroupText(id: dialogs.Id) []const u8 {
         .setup => "Host, port, and verified TLS",
         .servers => "Live Onyx wires on implicit TLS 6697",
         .connection_features => "What this wire is offering",
-        .password => "Secure account sign-in",
+        .password => "Wire account sign-in",
         .nickname => "Used on the wire and the Sunday page",
         .personal => "Shown on your CAST card",
         .sound => "Choose a sound and message",
@@ -4245,7 +4264,7 @@ test "settings menu opens application preferences instead of connection setup" {
         try std.testing.expectEqual(dialogs.Id.settings, view.active_dialog.?);
         try std.testing.expectEqualStrings("Light studio", view.dialogValueAt(0));
         try std.testing.expectEqualStrings("Vermillion", view.dialogValueAt(1));
-        try std.testing.expectEqualStrings("Standard", view.dialogValueAt(2));
+        try std.testing.expectEqualStrings("Usual", view.dialogValueAt(2));
         try std.testing.expectEqualStrings("Comic", view.dialogValueAt(3));
         try std.testing.expectEqualStrings("4 panels", view.dialogValueAt(4));
         _ = view.closeDialog();
@@ -4859,10 +4878,10 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Sunday page", toolbarLabel(5));
     try std.testing.expectEqualStrings("Conversation", toolbarLabel(6));
     try std.testing.expectEqualStrings("Browse rooms", menuItemLabel(4, 0));
-    try std.testing.expectEqualStrings("Ban or release", menuItemLabel(5, 5));
+    try std.testing.expectEqualStrings("Ban or free", menuItemLabel(5, 5));
     try std.testing.expectEqualStrings("Invite CAST", contextItemLabel(.member, 2, false));
     try std.testing.expectEqualStrings("Kick CAST", contextItemLabel(.member, 3, false));
-    try std.testing.expectEqualStrings("Ban or release", contextItemLabel(.member, 4, false));
+    try std.testing.expectEqualStrings("Ban or free", contextItemLabel(.member, 4, false));
     try std.testing.expectEqualStrings("Send a quiet balloon to one CAST member", dialogHelper(.whisper, ""));
     try std.testing.expectEqualStrings("Keep a name pattern off this room", dialogHelper(.ban, ""));
     try std.testing.expectEqualStrings("Send a meeting link to CAST", dialogHelper(.call_link, ""));
@@ -5278,6 +5297,20 @@ test "dialog Home and End jump first field and last button from leftover chrome"
     try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
     _ = try view.handleDialogKey(.home, .{});
     try std.testing.expectEqual(ui.DialogButton.primary, view.dialog_action_focus.?);
+}
+
+test "dialog Up from leftover buttons jumps to the last field" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openDialog(.settings);
+    view.dialog_action_focus = .primary;
+    _ = try view.handleDialogKey(.up, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 7), view.dialog_field);
+    view.dialog_action_focus = .cancel;
+    _ = try view.handleDialogKey(.up, .{});
+    try std.testing.expect(view.dialog_action_focus == null);
+    try std.testing.expectEqual(@as(usize, 7), view.dialog_field);
 }
 
 test "Ignore CAST toolbar opens the CAST list" {
