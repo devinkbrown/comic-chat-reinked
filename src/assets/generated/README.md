@@ -27,6 +27,9 @@ with `sha256sum -c assets/generated/AVB_SHA256SUMS.txt`.
 The 22 `*-color-hd-v1.avb` packages (and the deliberately newer
 `tiki-color-hd-v2.avb`) are selectable Color variants. Each is rebuilt from
 its matching six-pose sheet in `assets/generated/avatar-pose-sheets-v1/`.
+The packager keeps the tallest ink y-band in the widest column-run so a
+wrap sliver under the heels is not packaged; runtime crop uses the same
+rule. Testdata `anna` is not rebuilt here.
 Those sheets already carry independent local color (Anna: peach skin, red
 tube top, black skirt). The packager keeps that paint; it only transfers
 color from `avatar-color-hd-v1/` when a pose is still grayscale. A single

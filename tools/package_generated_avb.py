@@ -94,7 +94,36 @@ def largest_ink_bbox(image: Image.Image) -> tuple[int, int, int, int]:
                 bottom = max(bottom, y + 1)
     if top >= bottom:
         raise ValueError("image contains no visible pose")
-    return (x0, top, x1, bottom)
+
+    # A wrap sliver can sit in the same columns as the figure, far below the
+    # heels. Keep the tallest y-band and allow a 2-row hole so a shoe strap
+    # is not split off. Runtime `largestPaperInkRun` uses the same rule.
+    best_y0, best_y1 = top, top
+    band_start: int | None = None
+    last_ink = top
+    for y in range(top, bottom + 1):
+        row_ink = False
+        if y < bottom:
+            for col in range(x0, x1):
+                red, green, blue = pixels[col, y]
+                if red < 245 or green < 245 or blue < 245:
+                    row_ink = True
+                    break
+        if row_ink:
+            if band_start is None:
+                band_start = y
+            last_ink = y
+            continue
+        if band_start is not None:
+            if y < bottom and y <= last_ink + 2:
+                continue
+            end = last_ink + 1
+            if end > band_start and end - band_start > best_y1 - best_y0:
+                best_y0, best_y1 = band_start, end
+            band_start = None
+    if best_y1 <= best_y0:
+        return (x0, top, x1, bottom)
+    return (x0, best_y0, x1, best_y1)
 
 
 def normalize_pose(path: Path) -> Image.Image:
