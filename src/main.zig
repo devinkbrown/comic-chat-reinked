@@ -2731,7 +2731,10 @@ fn applyDialogAction(
                     return;
                 };
             }
-            try client.listRooms(value, limit, state.ircx_data);
+            client.listRooms(value, limit, state.ircx_data) catch |err| {
+                try rejectDialogIrc(view, err, "That room list query is not allowed.");
+                return;
+            };
             const room_to_join = std.mem.trim(u8, view.dialogValueAt(1), " \t");
             if (room_to_join.len != 0) {
                 const index = workspace.ensure(room_to_join) catch |err| {
@@ -2881,13 +2884,19 @@ fn applyDialogAction(
                     view.setDialogNotice("Enter one or more comma-separated property names.");
                     return;
                 }
-                try client.queryProperty(entity, property);
+                client.queryProperty(entity, property) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a comma-separated list of property names.");
+                    return;
+                };
             } else {
                 if (property.len == 0) {
                     view.setDialogNotice("Enter the property to change.");
                     return;
                 }
-                try client.setProperty(entity, property, if (std.ascii.eqlIgnoreCase(operation, "Delete")) "" else property_value);
+                client.setProperty(entity, property, if (std.ascii.eqlIgnoreCase(operation, "Delete")) "" else property_value) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a comma-separated list of property names.");
+                    return;
+                };
             }
         },
         .room_access => {
@@ -2914,9 +2923,15 @@ fn applyDialogAction(
                     return;
                 }
                 if (std.ascii.eqlIgnoreCase(operation, "Clear"))
-                    try client.accessClear(room.name, level)
+                    client.accessClear(room.name, level) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                        return;
+                    }
                 else
-                    try client.accessDelete(room.name, level, mask);
+                    client.accessDelete(room.name, level, mask) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                        return;
+                    };
             } else {
                 if (mask.len == 0) {
                     view.setDialogNotice("Enter a nickname mask such as nick!*@*.");
@@ -2931,7 +2946,10 @@ fn applyDialogAction(
                     view.setDialogNotice("Use a single nickname mask and a one-line reason.");
                     return;
                 }
-                try client.accessAdd(room.name, level, mask, view.dialogValueAt(3), view.dialogValueAt(4));
+                client.accessAdd(room.name, level, mask, view.dialogValueAt(3), view.dialogValueAt(4)) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid ACCESS level such as HOST or OWNER.");
+                    return;
+                };
             }
         },
         .ircx_events => {
@@ -3102,8 +3120,12 @@ fn applyDialogAction(
                     state.monitor_subscribed = false;
                 };
             } else if (maybe_client) |client| {
-                if (state.monitor_subscribed and notificationUsesMonitorValues(value, view.dialogValueAt(1), view.dialogValueAt(2)))
-                    client.monitor(.add, value) catch {};
+                if (state.monitor_subscribed and notificationUsesMonitorValues(value, view.dialogValueAt(1), view.dialogValueAt(2))) {
+                    client.monitor(.add, value) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter one nickname without commas or spaces.");
+                        return;
+                    };
+                }
             }
         },
         .notification_users => {
@@ -3235,6 +3257,10 @@ fn applyDialogAction(
             }
         },
         .away => if (maybe_client) |client| {
+            if (std.mem.indexOfAny(u8, value, "\r\n\x00\x01") != null) {
+                view.setDialogNotice("The away message must stay on one line.");
+                return;
+            }
             try client.setAway(value);
             if (value.len == 0) {
                 if (state.away_message) |old| {
@@ -4779,6 +4805,11 @@ fn appendSessionNotice(workspace: *cc.client.workspace.Workspace, line: []const 
     if (workspace.activeRoom()) |active| {
         try active.transcript.addWithOptions("Server", line, .{ .modes = cc.proto.udi.bm_action });
     }
+}
+
+fn rejectDialogIrc(view: *cc.client.view.View, err: anyerror, notice: []const u8) !void {
+    if (err != error.InvalidIrcParameter) return err;
+    view.setDialogNotice(notice);
 }
 
 fn retargetSessionHint(
