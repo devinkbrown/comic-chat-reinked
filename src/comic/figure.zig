@@ -1452,9 +1452,9 @@ test "Color default-cast cards are standing silhouettes with local color" {
 }
 
 test "leftover Color pose cards keep one paper-ink column-run" {
-    // Frozen Anna/Kevin/Denise Color and Tiki Color v2 stay on their accepted
-    // hashes. Every other Color pack is scanned so a packaged wrap sliver
-    // cannot return.
+    // Frozen Anna/Kevin/Denise Color+HD and Tiki Color v2 stay on their
+    // accepted hashes. Every other Color and leftover HD pack is scanned
+    // so a packaged wrap sliver cannot return.
     const gpa = std.testing.allocator;
     const blobs = [_][]const u8{
         @embedFile("../assets/generated/armando-color-hd-v1.avb"),
@@ -1475,6 +1475,25 @@ test "leftover Color pose cards keep one paper-ink column-run" {
         @embedFile("../assets/generated/susan-color-hd-v1.avb"),
         @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
         @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tiki-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
     };
     const emotions = [_]u16{ 9, 8, 7, 2, 4, 10 };
     for (blobs) |avb_data| {
@@ -1510,6 +1529,54 @@ test "Maynard Color keeps pose-authored cool paint without a tan wash" {
     }
     try std.testing.expect(cool > 400);
     try std.testing.expect(cool > tan * 4);
+}
+
+test "Cro Color keeps pose-authored yellow tunic and peach skin" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var peach: usize = 0;
+    var yellow: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+        if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+    }
+    try std.testing.expect(peach > 400);
+    try std.testing.expect(yellow > 200);
+}
+
+test "Sage Color keeps pose-authored yellow without a blue wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var yellow: usize = 0;
+    var blue: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue_ch: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue_ch >= 245) continue;
+        if (red > 180 and green > 160 and blue_ch < 90 and red > blue_ch + 40) yellow += 1;
+        if (blue_ch > red + 15 and blue_ch + 10 > green) blue += 1;
+    }
+    try std.testing.expect(yellow > 400);
+    try std.testing.expect(yellow > blue * 4);
 }
 
 test "simple SetIndices uses gesture ordinal while OTHERMAPPED uses expression" {
