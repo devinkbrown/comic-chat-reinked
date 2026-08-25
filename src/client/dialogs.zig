@@ -130,7 +130,7 @@ pub const specs = [_]Spec{
     .{ .id = .open_locator, .resource = "PORTABLE_OPEN_LOCATOR", .title = "Open locator", .group = .files, .source_w = 300, .source_h = 108 },
     .{ .id = .recent_files, .resource = "PORTABLE_RECENT_FILES", .title = "Recent conversations", .group = .files, .source_w = 340, .source_h = 150 },
     .{ .id = .favorite_rooms, .resource = "PORTABLE_FAVORITE_ROOMS", .title = "Favorite rooms", .group = .rooms, .source_w = 320, .source_h = 184 },
-    .{ .id = .print_preview, .resource = "PORTABLE_PRINT_PREVIEW", .title = "Print and PDF preview", .group = .files, .source_w = 320, .source_h = 150 },
+    .{ .id = .print_preview, .resource = "PORTABLE_PRINT_PREVIEW", .title = "Sunday PDF", .group = .files, .source_w = 320, .source_h = 150 },
     .{ .id = .connection_features, .resource = "PORTABLE_CONNECTION_FEATURES", .title = "Wire features", .group = .connection, .source_w = 360, .source_h = 210 },
 };
 
@@ -175,7 +175,7 @@ pub fn fields(id: Id) []const Field {
         .setup, .servers => &.{ .{ .label = "Server", .hint = "Host name or address" }, .{ .label = "Port", .hint = "6697" }, .{ .label = "Security", .hint = "Verified TLS", .kind = .choice } },
         .settings => &.{
             .{ .label = "Color theme", .hint = "Light or dark studio", .kind = .choice },
-            .{ .label = "Accent color", .hint = "Vermillion, violet, or forest", .kind = .choice },
+            .{ .label = "Accent", .hint = "Vermillion, violet, or forest", .kind = .choice },
             .{ .label = "Contrast", .hint = "Ink weight on chrome", .kind = .choice },
             .{ .label = "Conversation view", .hint = "Sunday page or conversation", .kind = .choice },
             .{ .label = "Panels across", .hint = "One to six across the page", .kind = .choice },
@@ -335,7 +335,7 @@ pub fn primaryLabel(id: Id) []const u8 {
     return switch (id) {
         .setup => "Open wire",
         .settings => "Save settings",
-        .servers => "Save changes",
+        .servers => "Save wire",
         .personal => "Save card",
         .character => "Choose character",
         .background => "Choose backdrop",
@@ -343,7 +343,7 @@ pub fn primaryLabel(id: Id) []const u8 {
         .choose_color => "Save ink",
         .comics_view => "Save layout",
         .room_list => "Join room",
-        .user_list => "Select CAST",
+        .user_list => "Choose CAST",
         .channel => "Join room",
         .channel_create => "Create room",
         .kick => "Kick CAST",
@@ -355,9 +355,9 @@ pub fn primaryLabel(id: Id) []const u8 {
         .save_conversation => "Save",
         .export_image => "Export",
         .open_locator => "Open locator",
-        .recent_files => "Open recent",
-        .favorite_rooms => "Update favorites",
-        .print_preview => "Create PDF",
+        .recent_files => "Open conversation",
+        .favorite_rooms => "Save favorites",
+        .print_preview => "Save PDF",
         .away => "Save away",
         .automation, .rules, .edit_rule, .rule_sets, .add_to_sets, .rename_loaded_set, .rename_set, .create_set, .advanced_event_params, .advanced_rule_settings => "Save rule",
         .notifications, .notification_users => "Save notifications",
@@ -367,10 +367,10 @@ pub fn primaryLabel(id: Id) []const u8 {
         .call_link => "Send call link",
         .member_profile => "Request CAST",
         .about, .motd, .connection_features => "Close",
-        .nickname => "Set sign-in name",
+        .nickname => "Save sign-in name",
         .password => "Sign in",
         .channel_password => "Unlock room",
-        .invitation => "Accept",
+        .invitation => "Accept invitation",
         .channel_properties => "Save room",
         .sound => "Send",
     };
@@ -457,10 +457,10 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Backdrop", get(.background).title);
     try std.testing.expectEqualStrings("Export Sunday page", get(.export_image).title);
     try std.testing.expectEqualStrings("Locator file", prompt(.open_locator).?);
-    try std.testing.expectEqualStrings("Set sign-in name", primaryLabel(.nickname));
+    try std.testing.expectEqualStrings("Save sign-in name", primaryLabel(.nickname));
     try std.testing.expectEqualStrings("Sign-in name", get(.nickname).title);
     try std.testing.expectEqualStrings("Sign-in name", fields(.nickname)[0].label);
-    try std.testing.expectEqualStrings("Select CAST", primaryLabel(.user_list));
+    try std.testing.expectEqualStrings("Choose CAST", primaryLabel(.user_list));
     try std.testing.expectEqualStrings("Send", primaryLabel(.sound));
     try std.testing.expectEqualStrings("Join room", primaryLabel(.channel));
     try std.testing.expectEqualStrings("Save card", primaryLabel(.personal));
@@ -476,6 +476,14 @@ test "application settings are distinct from connection setup" {
     try std.testing.expectEqualStrings("Invite CAST", primaryLabel(.invite));
     try std.testing.expectEqualStrings("Request CAST", primaryLabel(.member_profile));
     try std.testing.expectEqualStrings("Wire list", get(.servers).title);
+    try std.testing.expectEqualStrings("Save wire", primaryLabel(.servers));
+    try std.testing.expectEqualStrings("Accept invitation", primaryLabel(.invitation));
+    try std.testing.expectEqualStrings("Open conversation", primaryLabel(.recent_files));
+    try std.testing.expectEqualStrings("Save favorites", primaryLabel(.favorite_rooms));
+    try std.testing.expectEqualStrings("Save PDF", primaryLabel(.print_preview));
+    try std.testing.expectEqualStrings("Sunday PDF", get(.print_preview).title);
+    try std.testing.expectEqualStrings("Accent", fields(.settings)[1].label);
+    try std.testing.expectEqualStrings("Color theme", fields(.settings)[0].label);
     try std.testing.expectEqualStrings("Ink value", fields(.choose_color)[0].label);
     try std.testing.expectEqualStrings("Edit rule", get(.edit_rule).title);
     try std.testing.expectEqualStrings("Named properties", get(.ircx_properties).title);

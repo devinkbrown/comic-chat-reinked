@@ -348,8 +348,8 @@ pub const View = struct {
             .home, .page_up => self.focused_context_item = firstEnabledContextItem(kind, self.can_moderate, self.wire_live),
             .end, .page_down => self.focused_context_item = lastEnabledContextItem(kind, self.can_moderate, self.wire_live),
             .enter => return self.activateFocusedContextItem(),
-            .char => |code| if (code == ' ') return self.activateFocusedContextItem() else return null,
-            else => return null,
+            .char => |code| if (code == ' ') return self.activateFocusedContextItem() else return .none,
+            else => return .none,
         }
         return .none;
     }
@@ -390,7 +390,7 @@ pub const View = struct {
     /// Alt+letter opens File/Edit/View/Look/Room/CAST/Tools. Alt+Down
     /// opens the hovered menu, or File. Alt+O still opens Look.
     pub fn handleMenuAccelerator(self: *View, key: platform_event.Key, alt: bool) ?Action {
-        if (!alt or self.active_dialog != null) return null;
+        if (!alt or self.active_dialog != null or self.context_menu != null) return null;
         const menu: u8 = switch (key) {
             .down => self.hovered_menu orelse 0,
             .char => |code| label: {
@@ -2109,7 +2109,7 @@ fn menuItemLabel(menu: u8, item: u8) []const u8 {
             2 => "Recent conversations",
             3 => "Save conversation",
             4 => "Export Sunday page",
-            5 => "Print and PDF preview",
+            5 => "Sunday PDF",
             else => "Exit",
         },
         1 => switch (item) {
@@ -2233,7 +2233,7 @@ fn contextItemHint(kind: ContextKind, item: u8, connected: bool) []const u8 {
         },
         .body_camera => switch (item) {
             0 => "Hold",
-            1 => "Cast",
+            1 => "CAST",
             2 => "Reset",
             else => "Send",
         },
@@ -3477,14 +3477,14 @@ fn dialogHelper(id: dialogs.Id, first_value: []const u8) []const u8 {
         .advanced_event_params => "How often this rule may fire",
         .advanced_rule_settings => "Enable matching and case",
         .recent_files => "Open a recent conversation",
-        .favorite_rooms => "Join or update a favorite room",
+        .favorite_rooms => "Join or save a favorite room",
         .open_conversation => "Open a saved conversation",
         .save_conversation => "Save this conversation",
         .export_image => "Export the Sunday page as an image",
         .open_locator => "Open a saved locator",
         .print_preview => "Save a printable Sunday page",
         .channel_password => "Needed if the room is locked",
-        .choose_color => "Ink color for typed text",
+        .choose_color => "Ink for typed text",
         .text_font, .set_text_font => "Type on the Sunday page",
         .about => "Portable Ink Sunday client",
         else => "",
@@ -3519,9 +3519,9 @@ fn drawDialog(c: *Canvas, spec: dialogs.Spec, editors: *const [8]input_mod.Edito
         .member_profile => "Request a CAST profile",
         .channel_properties => "Topic, options, and CAST limit for this room",
         .file_transfer => "Offer or accept a file with CAST",
-        .favorite_rooms => "Join or update a favorite room",
+        .favorite_rooms => "Join or save a favorite room",
         .away => "Posted while you are away",
-        .choose_color => "Ink color for typed text",
+        .choose_color => "Ink for typed text",
         else => switch (spec.group) {
             .application => "Ink Sunday preferences",
             .connection => "Wire, identity, and appearance",
@@ -3870,6 +3870,18 @@ test "context menu keyboard skips disabled moderation controls" {
     try std.testing.expectEqual(@as(?u8, 2), view.focused_context_item);
     _ = view.handleContextMenuKey(.escape);
     try std.testing.expect(view.context_menu == null);
+}
+
+test "open context menu consumes leftover keys and blocks Alt accelerators" {
+    var view = try View.init(std.testing.allocator, 960, 720);
+    defer view.deinit();
+    view.openContextMenu(.member, 200, 200);
+    try std.testing.expectEqual(Action.none, view.handleContextMenuKey(.{ .char = 'f' }).?);
+    try std.testing.expectEqual(ContextKind.member, view.context_menu.?);
+    try std.testing.expectEqual(Action.none, view.handleContextMenuKey(.tab).?);
+    try std.testing.expect(view.handleMenuAccelerator(.{ .char = 'f' }, true) == null);
+    try std.testing.expectEqual(ContextKind.member, view.context_menu.?);
+    try std.testing.expect(view.active_menu == null);
 }
 
 test "menu clicks select navigation without opening a modal dialog" {
@@ -4597,6 +4609,8 @@ test "empty page, CAST, composer, and status copy follow the wire" {
     try std.testing.expectEqualStrings("Leave the wire", toolbarLabel(1));
     try std.testing.expectEqualStrings("Send call link", toolbarLabel(16));
     try std.testing.expectEqualStrings("Export Sunday page", menuItemLabel(0, 4));
+    try std.testing.expectEqualStrings("Sunday PDF", menuItemLabel(0, 5));
+    try std.testing.expectEqualStrings("CAST", contextItemHint(.body_camera, 1, true));
     try std.testing.expectEqualStrings("Page layout", menuItemLabel(2, 5));
     try std.testing.expectEqualStrings("Backdrop", menuItemLabel(3, 2));
     try std.testing.expectEqualStrings("Open a saved locator", dialogHelper(.open_locator, ""));
