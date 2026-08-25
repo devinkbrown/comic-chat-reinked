@@ -175,6 +175,17 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 41 leftovers in scope
+
+- Leftover `/` slashes notice even when the room is not yet joined; `/avatar`
+  and `/view comic|text` stay local
+- `/pins` uses the live client method (`PINS #channel LIST|ADD|DEL|CLEAR`);
+  `/successor` stays on the wire
+- Room-specific workflow replies (`PINS`, `FAIL`, `EVENT`, 367, …) land on an
+  already-open matching room instead of only the active tab
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 40 leftovers in scope
 
 - `/say` `/think` `/describe` `/action` stay comic-mode speech; leftover `/`
