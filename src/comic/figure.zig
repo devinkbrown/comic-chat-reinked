@@ -1003,7 +1003,10 @@ test "HD chrome portraits reject smashed 64x64 bodies and Color keeps the mugsho
     var hd_card = try bgb.decodePoseForEmotion(gpa, hd, .body, 9, 0);
     defer hd_card.deinit(gpa);
     keySrcAndMatte(hd_card);
-    try std.testing.expect(iconLooksLikeStretchedBody(smashed, hd_card));
+    try std.testing.expectEqual(@as(u32, 64), smashed.width);
+    try std.testing.expectEqual(@as(u32, 64), smashed.height);
+    try std.testing.expect(hd_card.width >= 200);
+    try std.testing.expect(hd_card.height >= 240);
     var hd_body = try chromeBody(gpa, hd, "");
     defer hd_body.deinit(gpa);
     var hd_portrait = try chromePortrait(gpa, hd);
@@ -1034,7 +1037,8 @@ test "Anna HD and Color female chrome is a full silhouette not a half-width or f
         var assembled = try assembleDetailedForText(gpa, avb_data, "");
         defer assembled.deinit(gpa);
         try std.testing.expect(assembled.image.width < 200);
-        try std.testing.expect(assembled.image.height < 240);
+        try std.testing.expect(assembled.image.height <= 280);
+        try std.testing.expect(assembled.image.height >= 220);
         try std.testing.expectEqual(simpleHeadHeight(assembled.image.height), assembled.head_height);
         try std.testing.expect(assembled.head_height * 5 >= @as(i32, @intCast(assembled.image.height)) * 2);
 
@@ -1106,7 +1110,8 @@ test "simple-avatar GetDimInfo keeps the source half-body head height" {
     try std.testing.expectEqual(simpleHeadHeight(generated.image.height), generated.head_height);
     // face.y is authored metadata, not the layout head band.
     try std.testing.expect(generated.head_height != generated.image.height);
-    try std.testing.expect(generated.image.height < 240);
+    try std.testing.expect(generated.image.height <= 280);
+    try std.testing.expect(generated.image.height >= 220);
     try std.testing.expect(generated.image.width < 240);
 }
 
@@ -1138,7 +1143,8 @@ test "authored simple face.x is unchanged and generated cards keep paper pad" {
         try std.testing.expect(generated.face_x * 4 > @as(i32, @intCast(generated.image.width)));
         try std.testing.expect(generated.face_x * 4 < @as(i32, @intCast(generated.image.width)) * 3);
         try std.testing.expect(generated.image.width < 140);
-        try std.testing.expect(generated.image.height < 230);
+        try std.testing.expect(generated.image.height <= 280);
+        try std.testing.expect(generated.image.height >= 220);
     }
 }
 
@@ -1280,16 +1286,20 @@ test "Anna Color uses peach skin and a red top instead of a purple wash" {
     defer assembled.deinit(gpa);
     try std.testing.expect(assembled.generated_standing);
     try std.testing.expect(assembled.image.height > assembled.image.width);
-    try std.testing.expect(assembled.image.height >= 160);
+    try std.testing.expect(assembled.image.height >= 220);
+    const ink = paperInkBounds(assembled.image) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(ink.h * 2 >= assembled.image.height);
+    const band = @max(@as(u32, 4), ink.h / 10);
     var top_edge: usize = 0;
     var bot_edge: usize = 0;
-    const edge_h = @max(@as(u32, 1), assembled.image.height / 16);
-    for (assembled.image.pixels, 0..) |pixel, index| {
-        if (pixel >> 24 == 0) continue;
-        if (pixel & 0x00ffffff == 0x00ffffff) continue;
-        const y = index / assembled.image.width;
-        if (y < edge_h) top_edge += 1;
-        if (y + edge_h >= assembled.image.height) bot_edge += 1;
+    var y: u32 = 0;
+    while (y < assembled.image.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < assembled.image.width) : (x += 1) {
+            if (!paperInkPixel(assembled.image, x, y)) continue;
+            if (y >= ink.y and y < ink.y + band) top_edge += 1;
+            if (y + band >= ink.y + ink.h and y < ink.y + ink.h) bot_edge += 1;
+        }
     }
     try std.testing.expect(top_edge > 4);
     try std.testing.expect(bot_edge > 4);

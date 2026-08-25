@@ -1,4 +1,4 @@
-5a0235bd2d9db1c6dbdc846d7604a47971ab74fbed3701e13730efeaa67c0f4a  src/assets/generated/anna-reimagined-hd-v1.avb
+6990522177e16145160b7f72b8235aff83e2dd238a710463f0ed4c13b107c2ae  src/assets/generated/anna-reimagined-hd-v1.avb
 82462825ba182b9b824a2a99f247ba46ff827e61d854a77c9d89c827995b3508  src/assets/generated/armando-reimagined-hd-v1.avb
 72b28ae19680f20c8707ff41b3243a711d3e3274af250c62ea25139e76b95794  src/assets/generated/bolo-reimagined-hd-v1.avb
 83cd144d5eeb28b0be06646f0b65213b69625e92498120c25ac17493804a8f86  src/assets/generated/cro-reimagined-hd-v1.avb

@@ -1571,9 +1571,9 @@ pub const View = struct {
             rendered.width,
             rendered.height,
             rect.x + 12,
-            rect.y + 30,
+            rect.y + 24,
             @max(0, rect.w - 24),
-            @max(0, body_h - 30),
+            @max(0, body_h - 48),
         );
         if (wheel_side > 0) ui.drawMoodDial(&self.canvas, emotionWheelRectFromPane(rect), emotionLabel(self.shell.emotion_x, self.shell.emotion_y), self.shell.emotion_x, self.shell.emotion_y, self.shell.emotion_radius);
         // Avatar pixels can be opaque even around the figure. Draw the card
@@ -2827,7 +2827,7 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
 
 fn characterGalleryRect(layout: ui.DialogLayout, first_field: usize) Rect {
     var rect = layout.fieldRectScrolled(2, first_field);
-    // Standing Color/HD cards are ~93×189. A 96px strip contain-fits them into
+    // Standing Color/HD cards are ~100×260. A 96px strip contain-fits them into
     // a sliver. Use the room down to the dialog buttons so the full silhouette
     // stays readable.
     rect.h = @min(280, @max(30, layout.primary.y - rect.y - 28));
@@ -3466,7 +3466,7 @@ test "Anna Color chrome portrait is a full standing silhouette with local color"
     var portrait = try figure.chromePortrait(std.testing.allocator, data);
     defer portrait.deinit(std.testing.allocator);
     try std.testing.expect(portrait.height > portrait.width);
-    try std.testing.expect(portrait.height >= 160);
+    try std.testing.expect(portrait.height >= 220);
     var peach: usize = 0;
     var red: usize = 0;
     var top_ink: usize = 0;

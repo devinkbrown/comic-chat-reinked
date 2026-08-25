@@ -238,7 +238,7 @@ fn anyKeepRecognizable(bodies: []const Body) bool {
 /// Paper between heels and the panel bezel. Source dests sit on the 2300-unit
 /// ground line; a generated standing card then reads as mid-thigh / feet-kiss.
 fn recognizableGroundInset(unit_height: i32) i32 {
-    return @max(90, @divTrunc(unit_height, 22));
+    return @max(120, @divTrunc(unit_height, 16));
 }
 
 /// Keep `speaker_box.top + 200` balloon tails inside the panel.
@@ -246,7 +246,7 @@ fn recognizableHeadroom(unit_height: i32) i32 {
     return @max(360, @divTrunc(unit_height, 6));
 }
 
-/// Taller than `unit_height/1.9` so a 93×189 Color card fills most of the
+/// Taller than `unit_height/1.9` so a standing Color card fills most of the
 /// 315px panel instead of a waist-cut sliver on the ground line.
 fn recognizableStandingHeight(unit_height: i32) i32 {
     const standing = unit_height - recognizableGroundInset(unit_height) - recognizableHeadroom(unit_height);
