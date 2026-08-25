@@ -2910,7 +2910,10 @@ fn applyDialogAction(
                     view.setDialogNotice("Enter modes as one token, for example +nt.");
                     return;
                 }
-                try client.setMode(room.name, modes, "");
+                client.setMode(room.name, modes, "") catch |err| {
+                    try rejectDialogIrc(view, err, "That mode change is not allowed.");
+                    return;
+                };
             }
             const limit = std.mem.trim(u8, view.dialogValueAt(2), " \t");
             if (limit.len != 0) {
@@ -2918,10 +2921,16 @@ fn applyDialogAction(
                     view.setDialogNotice("Maximum users must be a positive number.");
                     return;
                 }
-                try client.setMode(room.name, "+l", limit);
+                client.setMode(room.name, "+l", limit) catch |err| {
+                    try rejectDialogIrc(view, err, "That mode change is not allowed.");
+                    return;
+                };
             }
             if (key.len != 0) {
-                try client.setMode(room.name, "+k", key);
+                client.setMode(room.name, "+k", key) catch |err| {
+                    try rejectDialogIrc(view, err, "That mode change is not allowed.");
+                    return;
+                };
                 try room.setJoinKey(gpa, key);
                 client.setRestorationKey(room.name, key);
                 try state.replaceOwned(gpa, &state.last_key_channel, room.name);
@@ -3246,7 +3255,10 @@ fn applyDialogAction(
                         view.setDialogNotice("Enter one nickname without spaces.");
                         return;
                     }
-                    try client.invite(member, room.name);
+                    client.invite(member, room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Enter one nickname without spaces.");
+                        return;
+                    };
                 }
             }
         },
@@ -3336,12 +3348,9 @@ fn applyDialogAction(
                 view.setDialogNotice("The away message must stay on one line.");
                 return;
             }
-            client.setAway(value) catch |err| switch (err) {
-                error.InvalidUtf8 => {
-                    view.setDialogNotice("That text is not valid UTF-8.");
-                    return;
-                },
-                else => return err,
+            client.setAway(value) catch |err| {
+                try rejectDialogIrc(view, err, "The away message must stay on one line.");
+                return;
             };
             if (value.len == 0) {
                 if (state.away_message) |old| {
@@ -3350,7 +3359,7 @@ fn applyDialogAction(
                 }
             } else try state.replaceOwned(gpa, &state.away_message, value);
             for (workspace.rooms.items) |*joined_room| {
-                if (joined_room.joined) try client.sendAwayControl(joined_room.name, value);
+                if (joined_room.joined) client.sendAwayControl(joined_room.name, value) catch {};
             }
         },
         .kick => if (maybe_client) |client| {
@@ -3369,7 +3378,10 @@ fn applyDialogAction(
                     view.setDialogNotice("Use one nickname mask without spaces.");
                     return;
                 }
-                try client.setBan(room.name, ban_mask);
+                client.setBan(room.name, ban_mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                    return;
+                };
             }
             client.kick(room.name, value, reason) catch |err| {
                 try rejectDialogIrc(view, err, "Enter one nickname without spaces.");
@@ -3384,20 +3396,26 @@ fn applyDialogAction(
                     view.setDialogNotice("Enter the mask to silence or unsilence, for example s:nick!*@* or -s:nick!*@*.");
                     return;
                 }
-                applySilenceOperation(client, state, gpa, list.action, mask) catch |err| switch (err) {
-                    error.InvalidIrcParameter => {
-                        view.setDialogNotice("Enter a valid silence mask without spaces.");
-                        return;
-                    },
-                    else => return err,
+                applySilenceOperation(client, state, gpa, list.action, mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid silence mask without spaces.");
+                    return;
                 };
                 return;
             }
             switch (list.action) {
                 .list => switch (list.kind) {
-                    .ban => try client.listBans(room.name),
-                    .except => try client.listExceptions(room.name),
-                    .invite => try client.listInviteMasks(room.name),
+                    .ban => client.listBans(room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                        return;
+                    },
+                    .except => client.listExceptions(room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                        return;
+                    },
+                    .invite => client.listInviteMasks(room.name) catch |err| {
+                        try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                        return;
+                    },
                     .silence => unreachable,
                 },
                 .delete => {
@@ -3414,9 +3432,18 @@ fn applyDialogAction(
                         return;
                     }
                     switch (list.kind) {
-                        .ban => try client.clearBan(room.name, mask),
-                        .except => try client.clearException(room.name, mask),
-                        .invite => try client.clearInviteMask(room.name, mask),
+                        .ban => client.clearBan(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .except => client.clearException(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .invite => client.clearInviteMask(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
                         .silence => unreachable,
                     }
                 },
@@ -3430,9 +3457,18 @@ fn applyDialogAction(
                         return;
                     }
                     switch (list.kind) {
-                        .ban => try client.setBan(room.name, mask),
-                        .except => try client.setException(room.name, mask),
-                        .invite => try client.setInviteMask(room.name, mask),
+                        .ban => client.setBan(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .except => client.setException(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
+                        .invite => client.setInviteMask(room.name, mask) catch |err| {
+                            try rejectDialogIrc(view, err, "Use one nickname mask without spaces.");
+                            return;
+                        },
                         .silence => unreachable,
                     }
                 },
@@ -3479,7 +3515,10 @@ fn applyDialogAction(
                 view.setDialogNotice("Enter one nickname without spaces.");
                 return;
             }
-            try client.invite(value, room.name);
+            client.invite(value, room.name) catch |err| {
+                try rejectDialogIrc(view, err, "Enter one nickname without spaces.");
+                return;
+            };
         },
         .user_list, .whisper => {
             if (id == .user_list and silenceFilterToken(std.mem.trim(u8, view.dialogValueAt(1), " \t"))) {
@@ -3492,12 +3531,9 @@ fn applyDialogAction(
                     view.setDialogNotice("Enter the nickname or mask to silence or unsilence.");
                     return;
                 }
-                applySilenceOperation(client, state, gpa, silence.action, silence.mask) catch |err| switch (err) {
-                    error.InvalidIrcParameter => {
-                        view.setDialogNotice("Enter a valid silence mask without spaces.");
-                        return;
-                    },
-                    else => return err,
+                applySilenceOperation(client, state, gpa, silence.action, silence.mask) catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid silence mask without spaces.");
+                    return;
                 };
                 return;
             }
@@ -3672,12 +3708,9 @@ fn applyDialogAction(
             network.runtime.auth.user = network.runtime.preferences.sasl_user.items;
             network.runtime.auth.password_file = network.runtime.preferences.sasl_password_file.items;
             if (maybe_client) |client| {
-                client.identify(account, password, "") catch |err| switch (err) {
-                    error.InvalidIrcParameter => {
-                        view.setDialogNotice("Enter a valid account name and password.");
-                        return;
-                    },
-                    else => return err,
+                client.identify(account, password, "") catch |err| {
+                    try rejectDialogIrc(view, err, "Enter a valid account name and password.");
+                    return;
                 };
             }
             state.status = "signing in";
@@ -4062,6 +4095,43 @@ fn parseJoinSlash(text: []const u8) ?JoinSlash {
     return .{ .channel = rest[0..split], .key = std.mem.trim(u8, rest[split..], " \t") };
 }
 
+fn sendJoinSlash(
+    maybe_client: ?*cc.net.client.Client,
+    workspace: *cc.client.workspace.Workspace,
+    gpa: std.mem.Allocator,
+    text: []const u8,
+) !bool {
+    const parsed = parseJoinSlash(text) orelse return false;
+    if (parsed.channel.len == 0) {
+        try appendSessionNotice(workspace, "Usage: /join <#channel> [key]");
+        return true;
+    }
+    const index = workspace.ensure(parsed.channel) catch |err| {
+        try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
+        return true;
+    };
+    _ = workspace.activate(index);
+    workspace.rooms.items[index].setWantRejoin(true);
+    const join_key = if (parsed.key.len != 0) parsed.key else workspace.rooms.items[index].join_key orelse "";
+    if (maybe_client) |client| {
+        if (!workspace.rooms.items[index].joined) {
+            if (try requestJoinWithKey(client, workspace, parsed.channel, join_key)) |notice| {
+                workspace.rooms.items[index].setWantRejoin(false);
+                try appendSessionNotice(workspace, notice);
+            } else if (parsed.key.len != 0) {
+                try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
+                client.setRestorationKey(parsed.channel, parsed.key);
+            }
+        } else if (parsed.key.len != 0) {
+            try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
+            client.setRestorationKey(parsed.channel, parsed.key);
+        }
+    } else if (parsed.key.len != 0) {
+        try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
+    }
+    return true;
+}
+
 fn sendCreateSlash(
     maybe_client: ?*cc.net.client.Client,
     workspace: *cc.client.workspace.Workspace,
@@ -4216,36 +4286,11 @@ fn handleWorkspaceInputKey(
             return true;
         }
         if (composerSlashIs(text, "join")) {
-            const parsed = parseJoinSlash(text).?;
-            if (parsed.channel.len == 0) {
-                try appendSessionNotice(workspace, "Usage: /join <#channel> [key]");
+            if (try sendJoinSlash(maybe_client, workspace, gpa, text)) {
                 const consumed = try editor.take();
                 gpa.free(consumed);
                 return true;
             }
-            const index = workspace.ensure(parsed.channel) catch |err| {
-                try appendSessionNotice(workspace, roomEnsureFailureNotice(err));
-                const consumed = try editor.take();
-                gpa.free(consumed);
-                return true;
-            };
-            _ = workspace.activate(index);
-            workspace.rooms.items[index].setWantRejoin(true);
-            const join_key = if (parsed.key.len != 0) parsed.key else workspace.rooms.items[index].join_key orelse "";
-            if (maybe_client) |client| {
-                if (try requestJoinWithKey(client, workspace, parsed.channel, join_key)) |notice| {
-                    workspace.rooms.items[index].setWantRejoin(false);
-                    try appendSessionNotice(workspace, notice);
-                } else if (parsed.key.len != 0) {
-                    try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
-                    client.setRestorationKey(parsed.channel, parsed.key);
-                }
-            } else if (parsed.key.len != 0) {
-                try workspace.rooms.items[index].setJoinKey(gpa, parsed.key);
-            }
-            const consumed = try editor.take();
-            gpa.free(consumed);
-            return true;
         }
         if (composerSlashIs(text, "create")) {
             if (try sendCreateSlash(maybe_client, workspace, gpa, text)) {
@@ -4515,7 +4560,7 @@ fn processWorkspaceMessages(
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
                 sendAutomaticGreeting(client, preferences, joined_channel, who) catch |err| switch (err) {
-                    error.InvalidUtf8 => {},
+                    error.InvalidUtf8, error.TxBackpressure => {},
                     else => return err,
                 };
                 _ = try runPersistentRules(workspace.gpa, client, workspace, &workspace.rooms.items[room_index].transcript, preferences, "Join", who, joined_channel, "");
@@ -5166,10 +5211,6 @@ fn sendOnyxServiceSlash(
         try appendSessionNotice(workspace, "Connect before using that command.");
         return true;
     };
-    if (overflow and isOnyxServiceSlash(verb)) {
-        try appendSessionNotice(workspace, "That command has too many arguments.");
-        return true;
-    }
     if (std.ascii.eqlIgnoreCase(verb, "identify")) {
         if (count < 2) {
             try appendSessionNotice(workspace, "Usage: /identify <account> <password> [code]");
@@ -5864,6 +5905,91 @@ fn sendOnyxServiceSlash(
         try appendSessionNotice(workspace, "Usage: /tempmode add|cancel|sweep ...");
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "welcome")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "SHOW")) {
+            client.welcome() catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "CLEAR")) {
+            client.welcomeClear() catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "ADD")) {
+            const line = if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else "";
+            if (line.len == 0) {
+                try appendSessionNotice(workspace, "Usage: /welcome ADD <line>");
+                return true;
+            }
+            client.welcomeAdd(line) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /welcome [SHOW|CLEAR|ADD <line>]");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "tegami") or std.ascii.eqlIgnoreCase(verb, "memo")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "LIST")) {
+            client.sendService("MEMO", &.{"LIST"}) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "CLEAR")) {
+            client.sendService("MEMO", &.{"CLEAR"}) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "FORWARD")) {
+            client.sendService("MEMO", words[0..count]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "IGNORE")) {
+            client.sendService("MEMO", words[0..count]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "SEND")) {
+            if (count < 2) {
+                try appendSessionNotice(workspace, "Usage: /memo|/tegami SEND <account> <message>");
+                return true;
+            }
+            const message = if (rest.len > words[0].len + 1 + words[1].len)
+                std.mem.trim(u8, rest[words[0].len + 1 + words[1].len ..], " \t")
+            else
+                "";
+            if (message.len == 0) {
+                try appendSessionNotice(workspace, "Usage: /memo|/tegami SEND <account> <message>");
+                return true;
+            }
+            client.memoSend(words[1], message) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /memo|/tegami LIST|CLEAR|SEND|FORWARD|IGNORE ...");
+        return true;
+    }
+    if (overflow and isOnyxServiceSlash(verb)) {
+        try appendSessionNotice(workspace, "That command has too many arguments.");
+        return true;
+    }
     if (!isOnyxServiceSlash(verb)) return false;
     var command_buf: [16]u8 = undefined;
     if (verb.len > command_buf.len) return false;
@@ -6013,6 +6139,14 @@ fn applyPendingTopic(
             "That topic is not valid UTF-8.",
             .{ .modes = cc.proto.udi.bm_action },
         ),
+        error.TxBackpressure => {
+            try room.transcript.addWithOptions(
+                "Server",
+                "The connection is busy. Try again in a moment.",
+                .{ .modes = cc.proto.udi.bm_action },
+            );
+            return;
+        },
         else => return err,
     };
     try room.setPendingTopic(gpa, "");
@@ -6034,6 +6168,11 @@ fn requestReconnectJoin(
                 .{ .modes = cc.proto.udi.bm_action },
             );
         },
+        error.TxBackpressure => try room.transcript.addWithOptions(
+            "Server",
+            "The connection is busy. Try again in a moment.",
+            .{ .modes = cc.proto.udi.bm_action },
+        ),
         else => return err,
     };
 }
@@ -6721,7 +6860,7 @@ fn runPersistentRules(
             try transcript.addWithOptions("Automation", if (value.len == 0) rule.name else value, .{ .modes = cc.proto.udi.bm_action });
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Reply")) {
             if (value.len != 0) client.privmsg(if (std.ascii.eqlIgnoreCase(event, "Whisper")) who else channel, value) catch |err| switch (err) {
-                error.InvalidUtf8 => {},
+                error.InvalidUtf8, error.TxBackpressure => {},
                 else => return err,
             };
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Action")) {
@@ -6729,12 +6868,15 @@ fn runPersistentRules(
                 const wire = try std.fmt.allocPrint(gpa, "\x01ACTION {s}\x01", .{value});
                 defer gpa.free(wire);
                 client.privmsg(channel, wire) catch |err| switch (err) {
-                    error.InvalidUtf8 => {},
+                    error.InvalidUtf8, error.TxBackpressure => {},
                     else => return err,
                 };
             }
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Sound")) {
-            if (value.len != 0) try client.sendSound(channel, value, "");
+            if (value.len != 0) client.sendSound(channel, value, "") catch |err| switch (err) {
+                error.InvalidUtf8, error.TxBackpressure => {},
+                else => return err,
+            };
         } else if (std.ascii.eqlIgnoreCase(rule.action, "Join room")) {
             if (value.len != 0) {
                 const index = workspace.ensure(value) catch |err| {
@@ -7860,6 +8002,8 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("accept"));
     try std.testing.expect(isOnyxServiceSlash("listx"));
     try std.testing.expect(isOnyxServiceSlash("tempmode"));
+    try std.testing.expect(isOnyxServiceSlash("welcome"));
+    try std.testing.expect(isOnyxServiceSlash("memo"));
     try std.testing.expect(isOnyxServiceReply("SUCCESSOR"));
     try std.testing.expect(isVisibleServerWorkflowReply("SUCCESSOR"));
     try std.testing.expect(isOnyxQuerySlash("umode"));
@@ -8583,6 +8727,35 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEMPMODE ADD #root +m 60") != null);
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tempmode sweep"));
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEMPMODE SWEEP") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome ADD Hello world"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME ADD :Hello world") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(
+        &client,
+        &workspace,
+        "/welcome ADD one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen",
+    ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client.tx.items.items[client.tx.items.items.len - 1].bytes,
+        "WELCOME ADD :one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen",
+    ) != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME\r\n") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome SHOW"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME\r\n") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/welcome CLEAR"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "WELCOME CLEAR") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/tegami send alice Hello world"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MEMO SEND alice :Hello world") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TEGAMI") == null);
+    workspace.rooms.items[workspace.find("#root").?].joined = true;
+    const already_joined_before = client.tx.items.items.len;
+    try std.testing.expect(try sendJoinSlash(&client, &workspace, gpa, "/join #root"));
+    try std.testing.expectEqual(already_joined_before, client.tx.items.items.len);
+    try std.testing.expect(try sendJoinSlash(&client, &workspace, gpa, "/join #root newkey"));
+    try std.testing.expectEqual(already_joined_before, client.tx.items.items.len);
+    try std.testing.expectEqualStrings("newkey", workspace.rooms.items[workspace.find("#root").?].join_key.?);
+    workspace.rooms.items[workspace.find("#root").?].joined = false;
     try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/ison a b c d e f g h i j k l m n o p q"));
     try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[workspace.find("#root").?].transcript.lines.items[workspace.rooms.items[workspace.find("#root").?].transcript.lines.items.len - 1].text, "too many arguments") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
@@ -8614,6 +8787,19 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try applyPendingTopic(&client, &workspace.rooms.items[first], gpa, workspace.rooms.items[first].pending_topic.?);
     try std.testing.expect(workspace.rooms.items[first].pending_topic == null);
     try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[first].transcript.lines.items[workspace.rooms.items[first].transcript.lines.items.len - 1].text, "UTF-8") != null);
+
+    client.tx.deinit();
+    client.tx = cc.net.connection_policy.TxQueue.init(gpa, .{ .tx_messages = 1 }, 0, 1, 0);
+    try client.join("#hold");
+    const busy = try workspace.ensure("#busy");
+    workspace.rooms.items[busy].setWantRejoin(true);
+    try requestReconnectJoin(&workspace, &client, &workspace.rooms.items[busy]);
+    try std.testing.expect(workspace.rooms.items[busy].want_rejoin);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[busy].transcript.lines.items[workspace.rooms.items[busy].transcript.lines.items.len - 1].text, "busy") != null);
+    try workspace.rooms.items[first].setPendingTopic(gpa, "retry later");
+    try applyPendingTopic(&client, &workspace.rooms.items[first], gpa, workspace.rooms.items[first].pending_topic.?);
+    try std.testing.expectEqualStrings("retry later", workspace.rooms.items[first].pending_topic.?);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[first].transcript.lines.items[workspace.rooms.items[first].transcript.lines.items.len - 1].text, "busy") != null);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

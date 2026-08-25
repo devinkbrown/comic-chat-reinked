@@ -175,6 +175,20 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 44 leftovers in scope
+
+- 001 reconnect JOIN, CREATE pending TOPIC, automatic greetings, and
+  persistent-rule Reply/Action/Sound map `TxBackpressure` to a notice (or
+  skip) instead of tearing the receive loop
+- Away/ban/invite/silence/identify dialogs use `rejectDialogIrc` so a busy
+  connection stays English; `/join` of an already-joined room updates the
+  stored key without a second JOIN
+- `/welcome ADD Hello world` keeps the line as one trailing argument;
+  `/tegami send` / `/memo SEND` keep the memo text as one trailing argument;
+  the 16-word overflow notice applies only to tokenized generic slashes
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 43 leftovers in scope
 
 - `/listx` uses `listRooms` (LISTX query/limit validation); `/tempmode` uses

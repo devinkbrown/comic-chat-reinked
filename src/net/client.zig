@@ -1010,6 +1010,22 @@ pub const Client = struct {
     pub fn welcome(self: *Client) !void {
         try self.sendNoArgs("WELCOME", .interactive);
     }
+    pub fn welcomeClear(self: *Client) !void {
+        try self.appendCommand("WELCOME", &.{"CLEAR"});
+        try self.queueOut(.interactive, true, false);
+    }
+    pub fn welcomeAdd(self: *Client, line: []const u8) !void {
+        if (line.len == 0) return error.InvalidIrcParameter;
+        try self.validateOutgoingText(line);
+        try self.appendCommandTrailing("WELCOME", &.{ "ADD", line });
+        try self.queueOut(.interactive, true, false);
+    }
+    pub fn memoSend(self: *Client, account: []const u8, text: []const u8) !void {
+        if (account.len == 0 or text.len == 0) return error.InvalidIrcParameter;
+        try self.validateOutgoingText(text);
+        try self.appendCommandTrailing("MEMO", &.{ "SEND", account, text });
+        try self.queueOut(.interactive, true, false);
+    }
     pub fn accountInfo(self: *Client, account: ?[]const u8) !void {
         try self.sendOptionalAtom("ACCOUNTINFO", account, .bulk);
     }
