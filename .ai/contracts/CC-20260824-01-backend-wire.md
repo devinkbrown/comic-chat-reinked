@@ -78,6 +78,13 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Show leftover live numerics 010, 020, 276, 308, 310, 320, 351, 391 and send failures 431, 443, 451, 461, 462, 479, 484, 485
 - Reset ISUPPORT maps on disconnect so the next 005 can replace them
 
+## Wave 12 leftovers in scope
+
+- Apply advertised `CHANMODES` / `STATUSMSG` / length limits (`NICKLEN`, `CHANNELLEN`, `KEYLEN`, `TOPICLEN`, `AWAYLEN`, `KICKLEN`, `CHANLIMIT`)
+- Republish stored IRCX `CLIENT` keystrings after reconnect (own JOIN or numeric 800)
+- Show leftover live numerics 256-259, 302, 303, 321, 369, 371, 374 and send failures 406, 468, 524
+- Reset the new maps and limits on disconnect with the rest of ISUPPORT
+
 ## Verification
 
 - Focused gate: new/updated inline tests in owned modules

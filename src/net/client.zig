@@ -520,6 +520,7 @@ pub const Client = struct {
     /// Source `ChatJoinAux` emits `JOIN <room> <password>` when the Enter Room
     /// dialog supplies its optional password.
     pub fn joinWithKey(self: *Client, channel: []const u8, key: []const u8) !void {
+        try self.rejectSessionLimits(channel, key);
         if (key.len == 0)
             try self.appendCommand("JOIN", &.{channel})
         else
@@ -533,6 +534,7 @@ pub const Client = struct {
     /// Microsoft IRCX `ChatCreateAux` wire order is
     /// `CREATE <room> [creation-modes] [limit] [password]`.
     pub fn create(self: *Client, channel: []const u8, creation_modes: []const u8, limit: []const u8, key: []const u8) !void {
+        try self.rejectSessionLimits(channel, key);
         var params: [4][]const u8 = undefined;
         var count: usize = 0;
         params[count] = channel;
@@ -564,19 +566,23 @@ pub const Client = struct {
     }
 
     pub fn changeNick(self: *Client, nick: []const u8) !void {
+        const limits = self.advertisedLimits();
+        if (irc_map.SessionLimits.exceeds(limits.nicklen, nick)) return error.InvalidIrcParameter;
         try self.appendCommand("NICK", &.{nick});
         try self.queueOut(.interactive, true, false);
     }
 
     pub fn setAway(self: *Client, message_text: []const u8) !void {
-        if (message_text.len == 0) try self.appendCommand("AWAY", &.{}) else try self.appendCommandTrailing("AWAY", &.{message_text});
+        const clipped = irc_map.SessionLimits.clip(self.advertisedLimits().awaylen, message_text);
+        if (clipped.len == 0) try self.appendCommand("AWAY", &.{}) else try self.appendCommandTrailing("AWAY", &.{clipped});
         try self.queueOut(.interactive, true, false);
     }
 
     pub fn kick(self: *Client, channel: []const u8, nick: []const u8, reason: []const u8) !void {
         // The source always includes the trailing reason, including an empty
         // one: `KICK <room> <nick> :<reason>`.
-        try self.appendCommandTrailing("KICK", &.{ channel, nick, reason });
+        const clipped = irc_map.SessionLimits.clip(self.advertisedLimits().kicklen, reason);
+        try self.appendCommandTrailing("KICK", &.{ channel, nick, clipped });
         try self.queueOut(.interactive, true, false);
     }
 
@@ -631,7 +637,8 @@ pub const Client = struct {
     }
 
     pub fn setTopic(self: *Client, channel: []const u8, topic: []const u8) !void {
-        try self.appendCommandTrailing("TOPIC", &.{ channel, topic });
+        const clipped = irc_map.SessionLimits.clip(self.advertisedLimits().topiclen, topic);
+        try self.appendCommandTrailing("TOPIC", &.{ channel, clipped });
         try self.queueOut(.interactive, true, false);
     }
 
@@ -1550,6 +1557,20 @@ pub const Client = struct {
     pub fn featureState(self: *const Client) ?*const features_mod.State {
         if (self.features) |*state| return state;
         return null;
+    }
+
+    fn advertisedLimits(self: *const Client) irc_map.SessionLimits {
+        return if (self.featureState()) |state| state.session_limits else .{};
+    }
+
+    fn rejectSessionLimits(self: *const Client, channel: []const u8, key: []const u8) !void {
+        const limits = self.advertisedLimits();
+        if (irc_map.SessionLimits.exceeds(limits.channellen, channel)) return error.InvalidIrcParameter;
+        if (irc_map.SessionLimits.exceeds(limits.keylen, key)) return error.InvalidIrcParameter;
+        if (limits.chanlimit != 0 and !self.restoresChannel(channel)) {
+            const current = if (self.restoration) |restoration| restoration.targetCount() else 0;
+            if (current >= limits.chanlimit) return error.InvalidIrcParameter;
+        }
     }
 
     pub fn takeStsUpgradePort(self: *Client) ?u16 {

@@ -375,6 +375,7 @@ pub const Transcript = struct {
     names_sync_active: bool = false,
     casemapping: irc_map.CaseMapping = .rfc1459,
     prefixes: irc_map.PrefixMap = .default,
+    chanmodes: irc_map.ChanModes = .default,
 
     pub fn init(gpa: std.mem.Allocator) Transcript {
         return .{ .gpa = gpa };
@@ -564,14 +565,8 @@ pub const Transcript = struct {
                     }
                     continue;
                 }
-                switch (mode) {
-                    'b', 'e', 'I', 'k' => {
-                        if (parameter_index < msg.param_count) parameter_index += 1;
-                    },
-                    'l' => {
-                        if (adding and parameter_index < msg.param_count) parameter_index += 1;
-                    },
-                    else => {},
+                if (self.chanmodes.takesParam(mode, adding)) {
+                    if (parameter_index < msg.param_count) parameter_index += 1;
                 }
             }
             return changed;
@@ -865,9 +860,10 @@ pub const Transcript = struct {
         return true;
     }
 
-    pub fn applyIsupport(self: *Transcript, casemapping: irc_map.CaseMapping, prefixes: irc_map.PrefixMap) void {
-        self.casemapping = casemapping;
-        self.prefixes = prefixes;
+    pub fn applyIsupport(self: *Transcript, maps: irc_map.Advertised) void {
+        self.casemapping = maps.casemapping;
+        self.prefixes = maps.prefixes;
+        self.chanmodes = maps.chanmodes;
     }
 
     fn highestRoleForModes(self: *const Transcript, modes: u8) MemberRole {
@@ -1269,7 +1265,7 @@ test "live roster applies advertised Onyx PREFIX symbols" {
     const gpa = std.testing.allocator;
     var transcript = Transcript.init(gpa);
     defer transcript.deinit();
-    transcript.applyIsupport(.ascii, irc_map.PrefixMap.parse("(YQqov)*!.@+").?);
+    transcript.applyIsupport(.{ .casemapping = .ascii, .prefixes = irc_map.PrefixMap.parse("(YQqov)*!.@+").? });
     try transcript.setSelf("Me");
     var names = irc_message.parse(":server 353 Me = #room :*Me !Alice .Bob @Carol +Dave Eve %Keep");
     try std.testing.expect(try transcript.observeIrc(&names, "#room", "Me"));
@@ -1284,6 +1280,14 @@ test "live roster applies advertised Onyx PREFIX symbols" {
     var promote = irc_message.parse(":server MODE #room +Q Eve");
     try std.testing.expect(try transcript.observeIrc(&promote, "#room", "Me"));
     try std.testing.expectEqual(MemberRole.owner, transcript.roster.items[transcript.findRosterIndex("Eve").?].role);
+    transcript.applyIsupport(.{
+        .casemapping = .ascii,
+        .prefixes = irc_map.PrefixMap.parse("(YQqov)*!.@+").?,
+        .chanmodes = irc_map.ChanModes.parse("beIZ,k,lfj,imnstCTNMSgWOAVUFD"),
+    });
+    var flood_then_op = irc_message.parse(":op!u@h MODE #room +Zfo secretfilter 10 Dave");
+    try std.testing.expect(try transcript.observeIrc(&flood_then_op, "#room", "Me"));
+    try std.testing.expectEqual(MemberRole.operator, transcript.roster.items[transcript.findRosterIndex("Dave").?].role);
 }
 
 test "page break insertion and selected line removal preserve ownership and tallies" {

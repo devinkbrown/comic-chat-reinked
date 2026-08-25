@@ -1,9 +1,11 @@
 //! Advertised ISUPPORT identity rules used on the live path.
 //!
 //! `005` tokens are stored in feature state; this module turns `PREFIX`,
-//! `CASEMAPPING`, and `CHANTYPES` into the comparisons and NAMES/MODE
-//! decorations the session actually applies. Defaults match traditional IRC
-//! (`rfc1459`, `(qaohv)~&@%+`, `#&`) until a server advertisement replaces them.
+//! `CASEMAPPING`, `CHANTYPES`, `CHANMODES`, `STATUSMSG`, and the length
+//! limits into the comparisons, MODE parameter rules, and send/join checks
+//! the session actually applies. Defaults match traditional IRC (`rfc1459`,
+//! `(qaohv)~&@%+`, `#&`, `beI,k,l,imnpst`) until a server advertisement
+//! replaces them.
 
 const std = @import("std");
 
@@ -129,6 +131,129 @@ pub fn isChannelName(types: ChanTypes, name: []const u8) bool {
     return name.len >= 2 and types.contains(name[0]) and std.mem.indexOfAny(u8, name, " ,\r\n\x00") == null;
 }
 
+/// RFC 1459/2811 channel-mode classes. Type A/B always take a parameter;
+/// type C takes one only when adding; type D never does. Prefix modes are
+/// handled separately by `PrefixMap`.
+pub const ChanModes = struct {
+    bytes: [96]u8 = undefined,
+    len: u8 = 0,
+    custom: bool = false,
+
+    pub const default: ChanModes = .{};
+    pub const traditional = "beI,k,l,imnpst";
+
+    pub fn parse(value: []const u8) ChanModes {
+        var modes = ChanModes{ .bytes = @splat(0), .len = 0, .custom = true };
+        const n = @min(value.len, modes.bytes.len);
+        @memcpy(modes.bytes[0..n], value[0..n]);
+        modes.len = @intCast(n);
+        return modes;
+    }
+
+    pub fn raw(self: ChanModes) []const u8 {
+        return if (self.custom) self.bytes[0..self.len] else traditional;
+    }
+
+    pub fn classOf(self: ChanModes, mode: u8) ?u8 {
+        var class: u8 = 'A';
+        for (self.raw()) |ch| {
+            if (ch == ',') {
+                class += 1;
+                continue;
+            }
+            if (ch == mode) return class;
+        }
+        return null;
+    }
+
+    pub fn takesParam(self: ChanModes, mode: u8, adding: bool) bool {
+        return switch (self.classOf(mode) orelse return false) {
+            'A', 'B' => true,
+            'C' => adding,
+            else => false,
+        };
+    }
+};
+
+/// STATUSMSG delivery prefixes. When the token is absent, callers fall back
+/// to the advertised PREFIX symbols. Onyx advertises `!.@+` — `*` is the
+/// local-oper PREFIX symbol and must not strip a channel target.
+pub const StatusMsg = struct {
+    bytes: [16]u8 = .{ '~', '&', '@', '%', '+', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    len: u8 = 5,
+
+    pub const default: StatusMsg = .{};
+
+    pub fn parse(value: []const u8) StatusMsg {
+        var symbols = StatusMsg{ .bytes = @splat(0), .len = 0 };
+        for (value) |ch| {
+            if (symbols.len == symbols.bytes.len) break;
+            if (ch <= ' ' or std.mem.indexOfScalar(u8, symbols.bytes[0..symbols.len], ch) != null) continue;
+            symbols.bytes[symbols.len] = ch;
+            symbols.len += 1;
+        }
+        return if (symbols.len == 0) .default else symbols;
+    }
+
+    pub fn fromPrefix(prefixes: PrefixMap) StatusMsg {
+        return parse(prefixes.symbolSlice());
+    }
+
+    pub fn contains(self: StatusMsg, ch: u8) bool {
+        return std.mem.indexOfScalar(u8, self.bytes[0..self.len], ch) != null;
+    }
+
+    pub fn slice(self: *const StatusMsg) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// `0` means the server did not advertise a bound; the live path must not
+/// invent a tighter default before `005`.
+pub const SessionLimits = struct {
+    nicklen: usize = 0,
+    channellen: usize = 0,
+    topiclen: usize = 0,
+    awaylen: usize = 0,
+    kicklen: usize = 0,
+    keylen: usize = 0,
+    chanlimit: usize = 0,
+
+    pub fn parseCount(value: []const u8) usize {
+        return std.fmt.parseUnsigned(usize, value, 10) catch 0;
+    }
+
+    /// `CHANLIMIT=#&:50` / `#:20,&:10` — take the largest per-prefix cap.
+    pub fn parseChanlimit(value: []const u8) usize {
+        var max: usize = 0;
+        var it = std.mem.splitScalar(u8, value, ',');
+        while (it.next()) |part| {
+            const colon = std.mem.lastIndexOfScalar(u8, part, ':') orelse continue;
+            const n = parseCount(part[colon + 1 ..]);
+            if (n > max) max = n;
+        }
+        return max;
+    }
+
+    pub fn clip(limit: usize, text: []const u8) []const u8 {
+        if (limit == 0 or text.len <= limit) return text;
+        return text[0..limit];
+    }
+
+    pub fn exceeds(limit: usize, value: []const u8) bool {
+        return limit != 0 and value.len > limit;
+    }
+};
+
+pub const Advertised = struct {
+    casemapping: CaseMapping = .rfc1459,
+    prefixes: PrefixMap = .default,
+    chantypes: ChanTypes = .default,
+    chanmodes: ChanModes = .default,
+    statusmsg: StatusMsg = .default,
+    session_limits: SessionLimits = .{},
+};
+
 test "casemapping distinguishes ascii from rfc1459 punctuation" {
     try std.testing.expect(eql(.rfc1459, "#[Room]\\^x", "#{ROOM}|~X"));
     try std.testing.expect(!eql(.ascii, "#[Room]\\^x", "#{ROOM}|~X"));
@@ -169,4 +294,49 @@ test "CHANTYPES parse keeps a usable default" {
     try std.testing.expect(!only_hash.contains('&'));
     try std.testing.expect(isChannelName(.default, "#root"));
     try std.testing.expect(!isChannelName(only_hash, "&local"));
+}
+
+test "CHANMODES classes consume list, key, and add-only parameters" {
+    const traditional = ChanModes.default;
+    try std.testing.expect(traditional.takesParam('b', true));
+    try std.testing.expect(traditional.takesParam('k', false));
+    try std.testing.expect(traditional.takesParam('l', true));
+    try std.testing.expect(!traditional.takesParam('l', false));
+    try std.testing.expect(!traditional.takesParam('n', true));
+    try std.testing.expect(!traditional.takesParam('Z', true));
+    try std.testing.expect(!traditional.takesParam('f', true));
+
+    const onyx = ChanModes.parse("beIZ,k,lfj,imnstCTNMSgWOAVUFD");
+    try std.testing.expect(onyx.takesParam('Z', false));
+    try std.testing.expect(onyx.takesParam('f', true));
+    try std.testing.expect(!onyx.takesParam('f', false));
+    try std.testing.expect(onyx.takesParam('j', true));
+    try std.testing.expect(!onyx.takesParam('m', true));
+}
+
+test "STATUSMSG parse keeps PREFIX fallback distinct from Onyx" {
+    const traditional = StatusMsg.default;
+    try std.testing.expect(traditional.contains('@'));
+    try std.testing.expect(traditional.contains('~'));
+    const onyx = StatusMsg.parse("!.@+");
+    try std.testing.expect(onyx.contains('!'));
+    try std.testing.expect(onyx.contains('.'));
+    try std.testing.expect(onyx.contains('@'));
+    try std.testing.expect(onyx.contains('+'));
+    try std.testing.expect(!onyx.contains('*'));
+    try std.testing.expect(!onyx.contains('~'));
+    const from_onyx_prefix = StatusMsg.fromPrefix(PrefixMap.parse("(YQqov)*!.@+").?);
+    try std.testing.expect(from_onyx_prefix.contains('*'));
+}
+
+test "session limits parse CHANLIMIT and clip outgoing text" {
+    try std.testing.expectEqual(@as(usize, 50), SessionLimits.parseChanlimit("#&:50"));
+    try std.testing.expectEqual(@as(usize, 20), SessionLimits.parseChanlimit("#:20,&:10"));
+    try std.testing.expectEqual(@as(usize, 0), SessionLimits.parseChanlimit("#&"));
+    try std.testing.expectEqual(@as(usize, 64), SessionLimits.parseCount("64"));
+    try std.testing.expectEqualStrings("hello", SessionLimits.clip(10, "hello"));
+    try std.testing.expectEqualStrings("hel", SessionLimits.clip(3, "hello"));
+    try std.testing.expectEqualStrings("hello", SessionLimits.clip(0, "hello"));
+    try std.testing.expect(SessionLimits.exceeds(4, "alice"));
+    try std.testing.expect(!SessionLimits.exceeds(0, "alice"));
 }

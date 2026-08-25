@@ -1755,9 +1755,9 @@ fn resetChatConnectionState(state: *ChatState, workspace: ?*cc.client.workspace.
         rooms.markDisconnected();
         rooms.resetIsupport();
     }
-    // Silence masks and away text survive reconnect so they can be resent
-    // after 001 without a dedicated dialog or disk file. PREFIX/CASEMAPPING
-    // come back on the next 005.
+    // Silence masks, away text, and IRCX CLIENT keystrings survive reconnect
+    // so they can be resent after 001/800. Advertised ISUPPORT maps come
+    // back on the next 005.
 }
 
 fn sendQuitBestEffort(client: ?*cc.net.client.Client) void {
@@ -3952,6 +3952,7 @@ fn processWorkspaceMessages(
         }
         if (ircxNumericEnabled(&msg)) {
             state.ircx_data = true;
+            republishJoinedClientData(client, workspace);
         } else if (!state.join_requested and std.mem.eql(u8, msg.command, "001")) {
             if (msg.param(0)) |assigned| {
                 try workspace.setSelfNick(assigned);
@@ -3999,6 +4000,7 @@ fn processWorkspaceMessages(
                 }
                 try announceRoomAvatar(client, room.name, room.transcript.resolvedAvatar(nick), state.ircx_data);
                 if (state.away_message) |message| client.sendAwayControl(room.name, message) catch {};
+                republishRoomClientData(client, room, state.ircx_data);
                 redraw = true;
             } else if (workspace.find(joined_channel)) |room_index| {
                 try sendAutomaticGreeting(client, preferences, joined_channel, who);
@@ -4053,7 +4055,7 @@ fn processWorkspaceMessages(
             redraw = true;
         } else if (std.ascii.eqlIgnoreCase(msg.command, "PRIVMSG") or std.ascii.eqlIgnoreCase(msg.command, "NOTICE")) {
             const target = msg.param(0) orelse continue;
-            const resolved = stripStatusmsgTargetWith(target, workspace.prefixes, workspace.chantypes);
+            const resolved = stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes);
             const is_private = cc.net.irc_map.eql(workspace.casemapping, resolved, nick);
             const is_notice = std.ascii.eqlIgnoreCase(msg.command, "NOTICE");
             const room_index = workspaceRoomForIncoming(workspace, target, nick) orelse continue;
@@ -4106,8 +4108,8 @@ fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch
         return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE");
     return switch (code) {
-        2, 3, 4, 10, 20, 42, 221, 250, 251, 252, 253, 254, 255, 263, 265, 266, 271, 272, 276 => true,
-        307, 308, 310, 311, 312, 313, 314, 317, 318, 319, 320, 330, 335, 338, 351, 378, 379, 391 => true,
+        2, 3, 4, 10, 20, 42, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 271, 272, 276 => true,
+        302, 303, 307, 308, 310, 311, 312, 313, 314, 317, 318, 319, 320, 321, 330, 335, 338, 351, 369, 371, 374, 378, 379, 391 => true,
         322, 323, 329, 341, 346, 347, 348, 349, 367, 368, 372, 375, 376, 381, 396, 422, 671 => true,
         710, 711, 712, 713, 714, 715, 732, 733, 734 => true,
         801...819, 900...908, 913...925 => true,
@@ -4121,19 +4123,37 @@ fn stripStatusmsgTarget(target: []const u8) []const u8 {
 
 fn stripStatusmsgTargetWith(
     target: []const u8,
-    prefixes: cc.net.irc_map.PrefixMap,
+    statusmsg: cc.net.irc_map.StatusMsg,
     chantypes: cc.net.irc_map.ChanTypes,
 ) []const u8 {
-    if (target.len < 2) return target;
-    if (!prefixes.isSymbol(target[0])) return target;
-    const rest = target[1..];
-    if (chantypes.contains(rest[0])) return rest;
-    return target;
+    var index: usize = 0;
+    while (index < target.len and statusmsg.contains(target[index])) : (index += 1) {}
+    if (index == 0 or index >= target.len) return target;
+    if (!cc.net.irc_map.isChannelName(chantypes, target[index..])) return target;
+    return target[index..];
 }
 
 fn applyClientIsupport(workspace: *cc.client.workspace.Workspace, client: *cc.net.client.Client) void {
     const features = client.featureState() orelse return;
-    workspace.applyIsupport(features.casemapping, features.prefixes, features.chantypes);
+    workspace.applyIsupport(features.advertised());
+}
+
+fn republishRoomClientData(
+    client: *cc.net.client.Client,
+    room: *cc.client.workspace.Room,
+    ircx_data: bool,
+) void {
+    if (!ircx_data) return;
+    const data = room.client_data orelse return;
+    if (data.len == 0) return;
+    client.setProperty(room.name, "CLIENT", data) catch {};
+}
+
+fn republishJoinedClientData(client: *cc.net.client.Client, workspace: *cc.client.workspace.Workspace) void {
+    for (workspace.rooms.items) |*room| {
+        if (!room.joined) continue;
+        republishRoomClientData(client, room, true);
+    }
 }
 
 fn workspaceRoomForIncoming(
@@ -4141,7 +4161,7 @@ fn workspaceRoomForIncoming(
     target: []const u8,
     self_nick: []const u8,
 ) ?usize {
-    const resolved = stripStatusmsgTargetWith(target, workspace.prefixes, workspace.chantypes);
+    const resolved = stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes);
     if (resolved.len > 1 and workspace.chantypes.contains(resolved[0]))
         return workspace.ensure(resolved) catch null;
     if (cc.net.irc_map.eql(workspace.casemapping, resolved, self_nick)) return workspace.active;
@@ -4281,11 +4301,9 @@ fn applyLiveChannelKey(
             client.setRestorationKey(channel, key);
             continue;
         }
-        if (workspace.prefixes.isMode(mode) or std.mem.indexOfScalar(u8, "beI", mode) != null) {
+        if (workspace.prefixes.isMode(mode) or workspace.chanmodes.takesParam(mode, adding)) {
             if (parameter_index < msg.param_count) parameter_index += 1;
-            continue;
         }
-        if (mode == 'l' and adding and parameter_index < msg.param_count) parameter_index += 1;
     }
     return changed;
 }
@@ -4315,7 +4333,10 @@ fn isCommandFailureNumeric(command: []const u8) bool {
         std.mem.eql(u8, command, "462") or
         std.mem.eql(u8, command, "479") or
         std.mem.eql(u8, command, "484") or
-        std.mem.eql(u8, command, "485");
+        std.mem.eql(u8, command, "485") or
+        std.mem.eql(u8, command, "406") or
+        std.mem.eql(u8, command, "468") or
+        std.mem.eql(u8, command, "524");
 }
 
 fn isNickFailureNumeric(command: []const u8) bool {
@@ -4463,12 +4484,15 @@ fn applyChannelForward(
     const dest = to.?;
     client.renameRestoration(from, dest);
     if (workspace.find(from)) |from_index| {
-        var source = &workspace.rooms.items[from_index];
-        source.joined = false;
+        workspace.rooms.items[from_index].joined = false;
         const dest_index = workspace.ensure(dest) catch from_index;
         if (dest_index != from_index) {
-            if (source.join_key) |key| try workspace.rooms.items[dest_index].setJoinKey(workspace.gpa, key);
-            if (source.client_data) |data| try workspace.rooms.items[dest_index].setClientData(workspace.gpa, data);
+            if (workspace.find(from)) |source_index| {
+                if (workspace.rooms.items[source_index].join_key) |key|
+                    try workspace.rooms.items[dest_index].setJoinKey(workspace.gpa, key);
+                if (workspace.rooms.items[source_index].client_data) |data|
+                    try workspace.rooms.items[dest_index].setClientData(workspace.gpa, data);
+            }
             _ = workspace.activate(dest_index);
         }
     } else _ = workspace.ensure(dest) catch {};
@@ -5059,7 +5083,7 @@ fn messageRoom(msg: *const cc.net.message.Message, workspace: *const cc.client.w
         std.ascii.eqlIgnoreCase(msg.command, "TAGMSG") or
         std.ascii.eqlIgnoreCase(msg.command, "EDIT") or
         std.ascii.eqlIgnoreCase(msg.command, "REDACT")) return if (msg.param(0)) |target|
-        stripStatusmsgTargetWith(target, workspace.prefixes, workspace.chantypes)
+        stripStatusmsgTargetWith(target, workspace.statusmsg, workspace.chantypes)
     else
         null;
     if (std.mem.eql(u8, msg.command, "331") or
@@ -5810,6 +5834,17 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isVisibleServerWorkflowReply("320"));
     try std.testing.expect(isVisibleServerWorkflowReply("351"));
     try std.testing.expect(isVisibleServerWorkflowReply("391"));
+    try std.testing.expect(isVisibleServerWorkflowReply("256"));
+    try std.testing.expect(isVisibleServerWorkflowReply("257"));
+    try std.testing.expect(isVisibleServerWorkflowReply("302"));
+    try std.testing.expect(isVisibleServerWorkflowReply("303"));
+    try std.testing.expect(isVisibleServerWorkflowReply("321"));
+    try std.testing.expect(isVisibleServerWorkflowReply("369"));
+    try std.testing.expect(isVisibleServerWorkflowReply("371"));
+    try std.testing.expect(isVisibleServerWorkflowReply("374"));
+    try std.testing.expect(isCommandFailureNumeric("406"));
+    try std.testing.expect(isCommandFailureNumeric("468"));
+    try std.testing.expect(isCommandFailureNumeric("524"));
     try std.testing.expect(isCommandFailureNumeric("431"));
     try std.testing.expect(isCommandFailureNumeric("443"));
     try std.testing.expect(isCommandFailureNumeric("451"));
@@ -5832,6 +5867,8 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(!isVisibleServerWorkflowReply("315"));
     try std.testing.expect(!isVisibleServerWorkflowReply("730"));
     try std.testing.expect(!isVisibleServerWorkflowReply("731"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("005"));
+    try std.testing.expect(!isVisibleServerWorkflowReply("800"));
     try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("@#root"));
     try std.testing.expectEqualStrings("#root", stripStatusmsgTarget("+#root"));
     try std.testing.expectEqualStrings("&local", stripStatusmsgTarget("&local"));
@@ -6142,13 +6179,32 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
         gpa.free(owned_host);
     }
     if (client.features) |*owned_features|
-        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& :are supported"));
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& STATUSMSG=!.@+ CHANMODES=beIZ,k,lfj,imnstCTNMSgWOAVUFD NICKLEN=4 CHANNELLEN=6 KEYLEN=3 TOPICLEN=5 AWAYLEN=3 KICKLEN=4 :are supported"));
     applyClientIsupport(&workspace, &client);
     try std.testing.expectEqual(cc.net.irc_map.CaseMapping.ascii, workspace.casemapping);
     try std.testing.expect(workspace.prefixes.isSymbol('*'));
     try std.testing.expect(!workspace.prefixes.isSymbol('~'));
-    try std.testing.expectEqualStrings("#root", stripStatusmsgTargetWith("*#root", workspace.prefixes, workspace.chantypes));
-    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h PRIVMSG *#root :ops"), &workspace).?);
+    try std.testing.expect(workspace.chanmodes.takesParam('Z', true));
+    try std.testing.expect(workspace.chanmodes.takesParam('f', true));
+    try std.testing.expect(!workspace.statusmsg.contains('*'));
+    try std.testing.expectEqualStrings("*#root", stripStatusmsgTargetWith("*#root", workspace.statusmsg, workspace.chantypes));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTargetWith("@#root", workspace.statusmsg, workspace.chantypes));
+    try std.testing.expectEqualStrings("#root", stripStatusmsgTargetWith("!#root", workspace.statusmsg, workspace.chantypes));
+    try std.testing.expectEqualStrings("#root", messageRoom(&cc.net.message.parse(":alice!u@h PRIVMSG @#root :ops"), &workspace).?);
+    try std.testing.expectError(error.InvalidIrcParameter, client.changeNick("alice"));
+    try std.testing.expectError(error.InvalidIrcParameter, client.join("#toolong"));
+    try std.testing.expectError(error.InvalidIrcParameter, client.joinWithKey("#ab", "toolong"));
+    try client.setTopic("#root", "Welcome");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "TOPIC #root :Welco\r\n") != null);
+    try client.setAway("later");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "AWAY :lat\r\n") != null);
+    try client.kick("#root", "eve", "flood");
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "KICK #root eve :floo\r\n") != null);
+
+    const root = try workspace.ensure("#root");
+    const set_key = cc.net.message.parse(":op!u@h MODE #root +Zfk secretfilter 10 swordfish");
+    try std.testing.expect(try applyLiveChannelKey(&workspace, &client, &set_key));
+    try std.testing.expectEqualStrings("swordfish", workspace.rooms.items[root].join_key.?);
 
     const old = try workspace.ensure("#old");
     workspace.rooms.items[old].joined = true;
@@ -6160,9 +6216,25 @@ test "ISUPPORT maps, STATUSMSG prefixes, and 470 forwards stay live" {
     try std.testing.expect(!workspace.rooms.items[old].joined);
     try std.testing.expect(client.restoresChannel("#vault"));
     try std.testing.expect(std.mem.indexOf(u8, workspace.rooms.items[vault].transcript.lines.items[0].text, "Forwarded from #old to #vault") != null);
+
+    try workspace.rooms.items[vault].setClientData(gpa, "bk=room;");
+    workspace.rooms.items[vault].joined = true;
+    republishJoinedClientData(&client, &workspace);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PROP #vault CLIENT :bk=room;\r\n") != null);
+
+    if (client.features) |*owned_features|
+        _ = try owned_features.observe(&cc.net.message.parse(":irc 005 me CHANLIMIT=#&:1 :are supported"));
+    applyClientIsupport(&workspace, &client);
+    try std.testing.expectError(error.InvalidIrcParameter, client.join("#x"));
+    try std.testing.expectError(error.TooManyRooms, workspace.ensure("#x"));
+
     resetChatConnectionState(&state, &workspace, gpa);
     try std.testing.expectEqual(cc.net.irc_map.CaseMapping.rfc1459, workspace.casemapping);
     try std.testing.expect(workspace.prefixes.isSymbol('~'));
+    try std.testing.expect(!workspace.chanmodes.takesParam('Z', true));
+    try std.testing.expect(workspace.statusmsg.contains('~'));
+    try std.testing.expectEqual(@as(usize, 0), workspace.session_limits.nicklen);
+    try std.testing.expectEqual(@as(usize, 0), workspace.session_limits.chanlimit);
 }
 
 fn runRenderStrip(gpa: std.mem.Allocator, io: std.Io) !void {

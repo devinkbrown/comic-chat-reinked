@@ -73,6 +73,9 @@ pub const State = struct {
     casemapping: irc_map.CaseMapping = .rfc1459,
     prefixes: irc_map.PrefixMap = .default,
     chantypes: irc_map.ChanTypes = .default,
+    chanmodes: irc_map.ChanModes = .default,
+    statusmsg: irc_map.StatusMsg = .default,
+    session_limits: irc_map.SessionLimits = .{},
     redacted_ids: std.ArrayList([]u8) = .empty,
     pending_echoes: std.ArrayList(Echo) = .empty,
     outstanding_labels: std.ArrayList(Label) = .empty,
@@ -348,6 +351,17 @@ pub const State = struct {
         self.refreshAdvertisedMaps();
     }
 
+    pub fn advertised(self: *const State) irc_map.Advertised {
+        return .{
+            .casemapping = self.casemapping,
+            .prefixes = self.prefixes,
+            .chantypes = self.chantypes,
+            .chanmodes = self.chanmodes,
+            .statusmsg = self.statusmsg,
+            .session_limits = self.session_limits,
+        };
+    }
+
     fn refreshAdvertisedMaps(self: *State) void {
         self.casemapping = if (self.isupport("CASEMAPPING")) |token|
             irc_map.parseCaseMapping(token.value orelse "")
@@ -361,6 +375,36 @@ pub const State = struct {
             if (token.value) |value| irc_map.ChanTypes.parse(value) else .default
         else
             .default;
+        self.chanmodes = if (self.isupport("CHANMODES")) |token|
+            if (token.value) |value| irc_map.ChanModes.parse(value) else .default
+        else
+            .default;
+        self.statusmsg = if (self.isupport("STATUSMSG")) |token|
+            if (token.value) |value| irc_map.StatusMsg.parse(value) else irc_map.StatusMsg.fromPrefix(self.prefixes)
+        else
+            irc_map.StatusMsg.fromPrefix(self.prefixes);
+        self.session_limits = .{};
+        if (self.isupport("NICKLEN")) |token| if (token.value) |value| {
+            self.session_limits.nicklen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("CHANNELLEN")) |token| if (token.value) |value| {
+            self.session_limits.channellen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("TOPICLEN")) |token| if (token.value) |value| {
+            self.session_limits.topiclen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("AWAYLEN")) |token| if (token.value) |value| {
+            self.session_limits.awaylen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("KICKLEN")) |token| if (token.value) |value| {
+            self.session_limits.kicklen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("KEYLEN")) |token| if (token.value) |value| {
+            self.session_limits.keylen = irc_map.SessionLimits.parseCount(value);
+        };
+        if (self.isupport("CHANLIMIT")) |token| if (token.value) |value| {
+            self.session_limits.chanlimit = irc_map.SessionLimits.parseChanlimit(value);
+        };
     }
 
     fn putIsupport(self: *State, name: []const u8, value: ?[]const u8) !void {
@@ -838,12 +882,22 @@ test "capability state tracks identity, rename, marker, metadata, and standard r
     try std.testing.expectEqualStrings("https://example/icon.png", state.isupport("draft/icon").?.value.?);
     _ = try state.observe(&message.parse(":irc 005 self -UTF8ONLY :are supported"));
     try std.testing.expect(state.isupport("UTF8ONLY") == null);
-    _ = try state.observe(&message.parse(":irc 005 self CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& :are supported"));
+    _ = try state.observe(&message.parse(":irc 005 self CASEMAPPING=ascii PREFIX=(YQqov)*!.@+ CHANTYPES=#& STATUSMSG=!.@+ CHANMODES=beIZ,k,lfj,imnstCTNMSgWOAVUFD NICKLEN=64 CHANNELLEN=64 KEYLEN=64 TOPICLEN=390 AWAYLEN=256 KICKLEN=307 CHANLIMIT=#&:50 :are supported"));
     try std.testing.expectEqual(irc_map.CaseMapping.ascii, state.casemapping);
     try std.testing.expect(state.prefixes.isSymbol('*'));
     try std.testing.expect(state.prefixes.isMode('Y'));
     try std.testing.expect(!state.prefixes.isSymbol('~'));
     try std.testing.expect(state.chantypes.contains('#'));
+    try std.testing.expect(state.chanmodes.takesParam('Z', true));
+    try std.testing.expect(state.chanmodes.takesParam('f', true));
+    try std.testing.expect(!state.statusmsg.contains('*'));
+    try std.testing.expect(state.statusmsg.contains('!'));
+    try std.testing.expectEqual(@as(usize, 64), state.session_limits.nicklen);
+    try std.testing.expectEqual(@as(usize, 50), state.session_limits.chanlimit);
+    try std.testing.expectEqual(@as(usize, 390), state.session_limits.topiclen);
+    _ = try state.observe(&message.parse(":irc 005 self -NICKLEN :are supported"));
+    try std.testing.expectEqual(@as(usize, 0), state.session_limits.nicklen);
+    try std.testing.expectEqual(@as(usize, 50), state.session_limits.chanlimit);
 }
 
 test "echo dedupe, redaction tombstones, and labels are bounded owned state" {

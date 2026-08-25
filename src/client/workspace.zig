@@ -69,6 +69,9 @@ pub const Workspace = struct {
     casemapping: irc_map.CaseMapping = .rfc1459,
     prefixes: irc_map.PrefixMap = .default,
     chantypes: irc_map.ChanTypes = .default,
+    chanmodes: irc_map.ChanModes = .default,
+    statusmsg: irc_map.StatusMsg = .default,
+    session_limits: irc_map.SessionLimits = .{},
 
     pub fn init(gpa: std.mem.Allocator, self_nick: []const u8) !Workspace {
         return .{ .gpa = gpa, .self_nick = try gpa.dupe(u8, self_nick) };
@@ -87,15 +90,30 @@ pub const Workspace = struct {
         return null;
     }
 
+    pub fn advertised(self: *const Workspace) irc_map.Advertised {
+        return .{
+            .casemapping = self.casemapping,
+            .prefixes = self.prefixes,
+            .chantypes = self.chantypes,
+            .chanmodes = self.chanmodes,
+            .statusmsg = self.statusmsg,
+            .session_limits = self.session_limits,
+        };
+    }
+
     pub fn ensure(self: *Workspace, name: []const u8) !usize {
         if (!irc_map.isChannelName(self.chantypes, name)) return error.InvalidRoomName;
+        if (self.session_limits.channellen != 0 and name.len > self.session_limits.channellen)
+            return error.InvalidRoomName;
         if (self.find(name)) |index| return index;
         if (self.rooms.items.len >= max_rooms) return error.TooManyRooms;
+        if (self.session_limits.chanlimit != 0 and self.rooms.items.len >= self.session_limits.chanlimit)
+            return error.TooManyRooms;
         const owned_name = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(owned_name);
         var transcript = session.Transcript.init(self.gpa);
         errdefer transcript.deinit();
-        transcript.applyIsupport(self.casemapping, self.prefixes);
+        transcript.applyIsupport(self.advertised());
         try transcript.setSelf(self.self_nick);
         try self.rooms.append(self.gpa, .{ .name = owned_name, .transcript = transcript, .editor = input.Editor.init(self.gpa) });
         if (self.active == null) self.active = self.rooms.items.len - 1;
@@ -164,15 +182,18 @@ pub const Workspace = struct {
         for (self.rooms.items) |*room| room.markDisconnected();
     }
 
-    pub fn applyIsupport(self: *Workspace, casemapping: irc_map.CaseMapping, prefixes: irc_map.PrefixMap, chantypes: irc_map.ChanTypes) void {
-        self.casemapping = casemapping;
-        self.prefixes = prefixes;
-        self.chantypes = chantypes;
-        for (self.rooms.items) |*room| room.transcript.applyIsupport(casemapping, prefixes);
+    pub fn applyIsupport(self: *Workspace, maps: irc_map.Advertised) void {
+        self.casemapping = maps.casemapping;
+        self.prefixes = maps.prefixes;
+        self.chantypes = maps.chantypes;
+        self.chanmodes = maps.chanmodes;
+        self.statusmsg = maps.statusmsg;
+        self.session_limits = maps.session_limits;
+        for (self.rooms.items) |*room| room.transcript.applyIsupport(maps);
     }
 
     pub fn resetIsupport(self: *Workspace) void {
-        self.applyIsupport(.rfc1459, .default, .default);
+        self.applyIsupport(.{});
     }
 
     pub fn setClipboard(self: *Workspace, text: []const u8) !void {
@@ -240,9 +261,19 @@ test "workspace uses RFC 1459 channel casemapping" {
 test "workspace applies advertised ascii casemapping and CHANTYPES" {
     var workspace = try Workspace.init(std.testing.allocator, "alex");
     defer workspace.deinit();
-    workspace.applyIsupport(.ascii, .default, irc_map.ChanTypes.parse("#"));
+    workspace.applyIsupport(.{ .casemapping = .ascii, .chantypes = irc_map.ChanTypes.parse("#") });
     const index = try workspace.ensure("#[room]");
     try std.testing.expectEqual(@as(?usize, null), workspace.find("#{ROOM}"));
     try std.testing.expectEqual(index, try workspace.ensure("#[ROOM]"));
     try std.testing.expectError(error.InvalidRoomName, workspace.ensure("&local"));
+}
+
+test "workspace applies CHANNELLEN and CHANLIMIT from ISUPPORT" {
+    var workspace = try Workspace.init(std.testing.allocator, "alex");
+    defer workspace.deinit();
+    workspace.applyIsupport(.{ .session_limits = .{ .channellen = 6, .chanlimit = 1 } });
+    _ = try workspace.ensure("#root");
+    try std.testing.expectError(error.InvalidRoomName, workspace.ensure("#toolong"));
+    try std.testing.expectError(error.TooManyRooms, workspace.ensure("#next"));
+    try std.testing.expectEqual(@as(usize, 1), workspace.rooms.items.len);
 }
