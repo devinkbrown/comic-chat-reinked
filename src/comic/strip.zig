@@ -2376,7 +2376,11 @@ test "leftover dests keep pose-authored face color on unused Color and HD rooms"
         @embedFile("../assets/generated/hd-cafe.bgb"),
         @embedFile("../assets/generated/hd-apartment.bgb"),
     };
-    const dests = [_][]const u8{ "hugh color", "cro color", "maynard color", "rebecca color", "xeno color", "jordan color" };
+    const dests = [_][]const u8{
+        "hugh color",     "cro color",      "maynard color", "rebecca color", "xeno color",    "jordan color",
+        "dan color",      "lance color",    "susan color",   "armando color", "bolo color",    "margaret color",
+        "kwensa color",   "tongtyed color", "mike color",    "sage color",    "scotty color",  "lynnea color",
+    };
     const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
     for (rooms) |room| {
         var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
