@@ -2369,6 +2369,7 @@ test "leftover dests keep pose-authored face color on unused Color and HD rooms"
     // counts leftover dest chromatic ink, including cool dests on sky rooms.
     const gpa = std.testing.allocator;
     const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
         @embedFile("../assets/generated/color-park.bgb"),
         @embedFile("../assets/generated/color-rooftop.bgb"),
         @embedFile("../assets/generated/color-library.bgb"),
