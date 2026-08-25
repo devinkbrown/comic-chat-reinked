@@ -4009,6 +4009,38 @@ fn composerSlashRest(text: []const u8) []const u8 {
 
 const JoinSlash = struct { channel: []const u8, key: []const u8 };
 
+const SpeechSlash = struct { text: []const u8, modes: u16 };
+
+fn parseSpeechSlash(text: []const u8) ?SpeechSlash {
+    if (composerSlashIs(text, "me") or composerSlashIs(text, "describe") or composerSlashIs(text, "action"))
+        return .{ .text = composerSlashRest(text), .modes = cc.proto.udi.bm_action };
+    if (composerSlashIs(text, "think"))
+        return .{ .text = composerSlashRest(text), .modes = cc.proto.udi.bm_think };
+    if (composerSlashIs(text, "say"))
+        return .{ .text = composerSlashRest(text), .modes = cc.proto.udi.bm_say };
+    return null;
+}
+
+fn leftoverComposerSlash(text: []const u8) bool {
+    return text.len != 0 and text[0] == '/' and parseSpeechSlash(text) == null;
+}
+
+fn joinSlashWords(buf: []u8, words: []const []const u8, sep: u8) ?[]const u8 {
+    if (words.len == 0) return null;
+    var len: usize = 0;
+    for (words, 0..) |word, index| {
+        if (index != 0) {
+            if (len >= buf.len) return null;
+            buf[len] = sep;
+            len += 1;
+        }
+        if (len + word.len > buf.len) return null;
+        @memcpy(buf[len..][0..word.len], word);
+        len += word.len;
+    }
+    return buf[0..len];
+}
+
 fn parseJoinSlash(text: []const u8) ?JoinSlash {
     if (!composerSlashIs(text, "join")) return null;
     const rest = composerSlashRest(text);
@@ -4582,7 +4614,7 @@ fn processWorkspaceMessages(
 fn isVisibleServerWorkflowReply(command: []const u8) bool {
     const code = std.fmt.parseInt(u16, command, 10) catch
         return std.ascii.eqlIgnoreCase(command, "PROP") or std.ascii.eqlIgnoreCase(command, "SILENCE") or
-            isOnyxServiceReply(command);
+            std.ascii.eqlIgnoreCase(command, "ACCESS") or isOnyxServiceReply(command);
     return switch (code) {
         2, 3, 4, 10, 15, 16, 17, 20, 42, 43, 221, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 263, 265, 266, 270, 271, 272, 276, 281, 282 => true,
         301, 302, 303, 304, 305, 306, 307, 308, 310, 311, 312, 313, 314, 316, 317, 318, 319, 320, 321, 330, 335, 338, 344, 351, 354, 360, 369, 371, 373, 374, 378, 379, 382, 391 => true,
@@ -5521,6 +5553,160 @@ fn sendOnyxServiceSlash(
         try room.transcript.addWithOptions(workspace.self_nick, text_arg, .{ .modes = cc.proto.udi.bm_whisper });
         return true;
     }
+    if (std.ascii.eqlIgnoreCase(verb, "umode")) {
+        if (count == 0) {
+            client.queryMode(workspace.self_nick) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        client.setMode(workspace.self_nick, words[0], if (count > 1) words[1] else "") catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "prop")) {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const entity = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Property needs a room.");
+            return true;
+        };
+        const after_entity = if (named)
+            if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else ""
+        else
+            rest;
+        if (after_entity.len == 0) {
+            client.queryProperty(entity, "*") catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const property_end = std.mem.indexOfScalar(u8, after_entity, ' ') orelse after_entity.len;
+        const property = after_entity[0..property_end];
+        const value = std.mem.trim(u8, after_entity[property_end..], " \t");
+        const send = if (value.len == 0)
+            client.queryProperty(entity, property)
+        else
+            client.setProperty(entity, property, value);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "access")) {
+        const named = count > 0 and cc.net.irc_map.isChannelName(workspace.chantypes, words[0]);
+        const channel = if (named) words[0] else if (workspace.activeRoom()) |room| room.name else {
+            try appendSessionNotice(workspace, "Access needs a room.");
+            return true;
+        };
+        const op_index: usize = if (named) 1 else 0;
+        if (count <= op_index or std.ascii.eqlIgnoreCase(words[op_index], "LIST")) {
+            client.accessList(channel) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const operation = words[op_index];
+        if (std.ascii.eqlIgnoreCase(operation, "CLEAR")) {
+            client.accessClear(channel, if (count > op_index + 1) words[op_index + 1] else "") catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(operation, "DELETE") or std.ascii.eqlIgnoreCase(operation, "DEL")) {
+            if (count < op_index + 3) {
+                try appendSessionNotice(workspace, "Usage: /access [channel] DELETE <level> <mask>");
+                return true;
+            }
+            client.accessDelete(channel, words[op_index + 1], words[op_index + 2]) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(operation, "ADD")) {
+            if (count < op_index + 3) {
+                try appendSessionNotice(workspace, "Usage: /access [channel] ADD <level> <mask> [minutes] [reason]");
+                return true;
+            }
+            const level = words[op_index + 1];
+            const mask = words[op_index + 2];
+            var after = rest;
+            if (named) after = if (rest.len > words[0].len) std.mem.trim(u8, rest[words[0].len..], " \t") else "";
+            after = if (after.len > operation.len) std.mem.trim(u8, after[operation.len..], " \t") else "";
+            after = if (after.len > level.len) std.mem.trim(u8, after[level.len..], " \t") else "";
+            after = if (after.len > mask.len) std.mem.trim(u8, after[mask.len..], " \t") else "";
+            var duration: []const u8 = "";
+            if (after.len != 0) {
+                const token_end = std.mem.indexOfScalar(u8, after, ' ') orelse after.len;
+                const token = after[0..token_end];
+                if (token.len != 0 and std.ascii.isDigit(token[0])) {
+                    var digits = true;
+                    for (token) |byte| if (!std.ascii.isDigit(byte)) {
+                        digits = false;
+                        break;
+                    };
+                    if (digits) {
+                        duration = token;
+                        after = std.mem.trim(u8, after[token_end..], " \t");
+                    }
+                }
+            }
+            client.accessAdd(channel, level, mask, duration, after) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        try appendSessionNotice(workspace, "Usage: /access [channel] LIST|ADD|DELETE|CLEAR ...");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(verb, "monitor")) {
+        if (count == 0 or std.ascii.eqlIgnoreCase(words[0], "list") or std.ascii.eqlIgnoreCase(words[0], "L")) {
+            client.monitor(.list, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "clear") or std.ascii.eqlIgnoreCase(words[0], "C")) {
+            client.monitor(.clear, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(words[0], "status") or std.ascii.eqlIgnoreCase(words[0], "S")) {
+            client.monitor(.status, null) catch |err| {
+                try rejectServiceIrc(workspace, err);
+                return true;
+            };
+            return true;
+        }
+        const removing = std.ascii.eqlIgnoreCase(words[0], "-") or
+            std.ascii.eqlIgnoreCase(words[0], "remove") or
+            std.ascii.eqlIgnoreCase(words[0], "del");
+        const adding = std.ascii.eqlIgnoreCase(words[0], "+") or
+            std.ascii.eqlIgnoreCase(words[0], "add");
+        const names_start: usize = if (removing or adding) 1 else 0;
+        var names_buf: [512]u8 = undefined;
+        const names = joinSlashWords(names_buf[0..], words[names_start..count], ',') orelse {
+            try appendSessionNotice(workspace, "Usage: /monitor +|-|add|remove|list|clear|status [nick[,nick]...]");
+            return true;
+        };
+        const send = if (removing) client.monitor(.remove, names) else client.monitor(.add, names);
+        send catch |err| {
+            try rejectServiceIrc(workspace, err);
+            return true;
+        };
+        return true;
+    }
     if (!isOnyxServiceSlash(verb)) return false;
     var command_buf: [16]u8 = undefined;
     if (verb.len > command_buf.len) return false;
@@ -5548,6 +5734,7 @@ fn isOnyxQuerySlash(verb: []const u8) bool {
         "topic", "invite", "mode", "kick", "rename", "ctcp", "ping",
         "op", "deop", "voice", "devoice", "owner", "deowner", "ban", "unban",
         "except", "unexcept", "invex", "uninvex", "whisper",
+        "umode", "prop", "access", "monitor",
     };
     inline for (names) |name| {
         if (std.ascii.eqlIgnoreCase(verb, name)) return true;
@@ -6829,28 +7016,28 @@ fn handleInputKey(
                 return true;
             }
             const selected_mode = view.shell.say_mode;
-            const action_text: ?[]const u8 = if (composerSlashIs(line, "me"))
-                composerSlashRest(line)
-            else if (selected_mode == .action)
-                line
-            else
-                null;
-            if (action_text) |body| if (body.len == 0) return true;
-            const visible_text = action_text orelse line;
-            const modes: u16 = if (action_text != null) cc.proto.udi.bm_action else switch (selected_mode) {
+            const speech = parseSpeechSlash(line);
+            if (speech) |parsed| if (parsed.text.len == 0) return true;
+            if (speech == null and leftoverComposerSlash(line)) {
+                try transcript.addWithOptions("Server", "That command is not available here.", .{ .modes = cc.proto.udi.bm_action });
+                return true;
+            }
+            const visible_text = if (speech) |parsed| parsed.text else line;
+            const modes: u16 = if (speech) |parsed| parsed.modes else switch (selected_mode) {
                 .say => cc.proto.udi.bm_say,
                 .think => cc.proto.udi.bm_think,
                 .whisper => cc.proto.udi.bm_whisper,
-                .action => unreachable,
+                .action => cc.proto.udi.bm_action,
                 .sound => cc.proto.udi.bm_sound,
             };
-            const target = if (selected_mode == .whisper) whisper: {
+            const use_whisper_target = speech == null and selected_mode == .whisper;
+            const target = if (use_whisper_target) whisper: {
                 const member_index = view.shell.selected_member orelse return true;
                 if (member_index >= transcript.roster.items.len) return true;
                 if (transcript.roster.items[member_index].departed) return true;
                 break :whisper transcript.roster.items[member_index].nick;
             } else channel;
-            const is_private = selected_mode == .whisper;
+            const is_private = use_whisper_target;
             var talk_to_storage: [1][]const u8 = undefined;
             const talk_tos: []const []const u8 = talk_tos: {
                 const member_index = view.shell.selected_member orelse break :talk_tos &.{};
@@ -7437,6 +7624,8 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isCommandFailureNumeric("451"));
     try std.testing.expect(isCommandFailureNumeric("461"));
     try std.testing.expect(isVisibleServerWorkflowReply("SILENCE"));
+    try std.testing.expect(isVisibleServerWorkflowReply("ACCESS"));
+    try std.testing.expect(isVisibleServerWorkflowReply("PROP"));
     try std.testing.expect(isVisibleServerWorkflowReply("346"));
     try std.testing.expect(isVisibleServerWorkflowReply("348"));
     try std.testing.expect(isVisibleServerWorkflowReply("349"));
@@ -7485,6 +7674,45 @@ test "connect replies, STATUSMSG rooms, CTCP replies, and disconnect cleanup sta
     try std.testing.expect(isOnyxServiceSlash("owner"));
     try std.testing.expect(isOnyxServiceSlash("except"));
     try std.testing.expect(isOnyxServiceSlash("invex"));
+    try std.testing.expect(isOnyxServiceSlash("umode"));
+    try std.testing.expect(isOnyxServiceSlash("prop"));
+    try std.testing.expect(isOnyxServiceSlash("access"));
+    try std.testing.expect(isOnyxServiceSlash("monitor"));
+    try std.testing.expect(isOnyxQuerySlash("umode"));
+    try std.testing.expect(isOnyxQuerySlash("prop"));
+    try std.testing.expect(isOnyxQuerySlash("access"));
+    try std.testing.expect(isOnyxQuerySlash("monitor"));
+    try std.testing.expect(!isOnyxQuerySlash("say"));
+    try std.testing.expect(!isOnyxQuerySlash("think"));
+    try std.testing.expect(!isOnyxQuerySlash("describe"));
+    try std.testing.expect(!isOnyxQuerySlash("action"));
+    try std.testing.expect(!isOnyxQuerySlash("me"));
+    try std.testing.expect(!isOnyxServiceSlash("say"));
+    try std.testing.expect(!isOnyxServiceSlash("think"));
+    try std.testing.expect(!isOnyxServiceSlash("describe"));
+    try std.testing.expect(!isOnyxServiceSlash("action"));
+    try std.testing.expect(!isOnyxServiceSlash("me"));
+    try std.testing.expect(!isOnyxServiceReply("PROP"));
+    try std.testing.expect(!isOnyxServiceReply("ACCESS"));
+    try std.testing.expect(!isOnyxServiceReply("MONITOR"));
+    const say = parseSpeechSlash("/SAY hello").?;
+    try std.testing.expectEqualStrings("hello", say.text);
+    try std.testing.expect(say.modes == cc.proto.udi.bm_say);
+    const think = parseSpeechSlash("/THINK hmm").?;
+    try std.testing.expectEqualStrings("hmm", think.text);
+    try std.testing.expect(think.modes == cc.proto.udi.bm_think);
+    const describe = parseSpeechSlash("/DESCRIBE waves").?;
+    try std.testing.expectEqualStrings("waves", describe.text);
+    try std.testing.expect(describe.modes == cc.proto.udi.bm_action);
+    const action = parseSpeechSlash("/ACTION waves").?;
+    try std.testing.expectEqualStrings("waves", action.text);
+    try std.testing.expect(action.modes == cc.proto.udi.bm_action);
+    try std.testing.expect(parseSpeechSlash("/umode +i") == null);
+    try std.testing.expect(leftoverComposerSlash("/users"));
+    try std.testing.expect(leftoverComposerSlash("/silence nick!*@*"));
+    try std.testing.expect(!leftoverComposerSlash("/SAY hello"));
+    try std.testing.expect(!leftoverComposerSlash("/think hmm"));
+    try std.testing.expect(!leftoverComposerSlash("hello"));
     try std.testing.expect(composerSlashIs("/cycle #root", "cycle"));
     try std.testing.expect(composerSlashIs("/ME waves", "me"));
     try std.testing.expectEqualStrings("waves", composerSlashRest("/ME waves"));
@@ -8123,6 +8351,17 @@ test "Onyx account slashes and session-sync skip a JOIN storm" {
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 2].bytes, "PART #root :cycling") != null);
     try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "JOIN #root") != null);
     try std.testing.expect(workspace.find("#root") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/umode +i"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MODE me +i") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/prop #root TOPIC hello room"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "PROP #root TOPIC :hello room") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/access #root ADD HOST anna!*@* 0 trusted helper"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "ACCESS #root ADD HOST anna!*@* 0 :trusted helper") != null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/monitor + alice"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MONITOR + alice") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MONITOR + :alice") == null);
+    try std.testing.expect(try sendOnyxServiceSlash(&client, &workspace, "/monitor"));
+    try std.testing.expect(std.mem.indexOf(u8, client.tx.items.items[client.tx.items.items.len - 1].bytes, "MONITOR L") != null);
     try std.testing.expect(!try sendOnyxServiceSlash(&client, &workspace, "/users"));
     try std.testing.expect(!client.projectsSessionChannels());
 

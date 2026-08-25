@@ -175,6 +175,16 @@ Onyx TLS IRC server, without redesigning desktop UI.
 - Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
   STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
 
+## Wave 40 leftovers in scope
+
+- `/say` `/think` `/describe` `/action` stay comic-mode speech; leftover `/`
+  slashes notice instead of becoming comic PRIVMSG
+- `/umode` applies to the self nick; `/prop` `/access` `/monitor` use the live
+  client methods (trailing PROP/ACCESS values, MONITOR `+`/`-`/`C`/`L`/`S`)
+- Inbound `ACCESS` command lines stay visible like `PROP`/`SILENCE`
+- Skip NetMeeting, remote art, `onyx/e2ee`, WEBAUTHN, SASLprep, operator
+  STATS/TRACE/USERS, METADATA unless a live dialog sends it, and PR #11 chrome
+
 ## Wave 39 leftovers in scope
 
 - `/owner` `/deowner` stay on advertised Onyx `+q`; `/except` `/invex` use
