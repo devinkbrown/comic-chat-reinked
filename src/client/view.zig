@@ -24,34 +24,12 @@ const Canvas = canvas_mod.Canvas;
 const Rect = geometry.Rect;
 const TextSelection = input_mod.Editor.Selection;
 
-/// The desktop presentation defaults to the generated HD avatar family. The
-/// source-faithful comic pipeline still resolves its historical asset names in
-/// `strip`, so this boundary never alters source raster behavior.
+/// The desktop presentation defaults to the generated Color avatar family.
+/// `strip.avatarByName("anna")` stays on testdata for Microsoft goldens;
+/// this boundary remaps leftover bare names so CAST / bodycam / the live
+/// comic page are never 1-bit ink.
 fn displayAvatarByName(name: []const u8) ?[]const u8 {
-    const eql = std.ascii.eqlIgnoreCase;
-    if (eql(name, "anna")) return strip.avatarByName("anna hd");
-    if (eql(name, "armando")) return strip.avatarByName("armando hd");
-    if (eql(name, "bolo")) return strip.avatarByName("bolo hd");
-    if (eql(name, "cro")) return strip.avatarByName("cro hd");
-    if (eql(name, "dan")) return strip.avatarByName("dan hd");
-    if (eql(name, "denise")) return strip.avatarByName("denise hd");
-    if (eql(name, "hugh")) return strip.avatarByName("hugh hd");
-    if (eql(name, "jordan")) return strip.avatarByName("jordan hd");
-    if (eql(name, "kevin")) return strip.avatarByName("kevin hd");
-    if (eql(name, "kwensa")) return strip.avatarByName("kwensa hd");
-    if (eql(name, "lance")) return strip.avatarByName("lance hd");
-    if (eql(name, "lynnea")) return strip.avatarByName("lynnea hd");
-    if (eql(name, "margaret")) return strip.avatarByName("margaret hd");
-    if (eql(name, "maynard")) return strip.avatarByName("maynard hd");
-    if (eql(name, "mike")) return strip.avatarByName("mike hd");
-    if (eql(name, "rebecca")) return strip.avatarByName("rebecca hd");
-    if (eql(name, "sage")) return strip.avatarByName("sage hd");
-    if (eql(name, "scotty")) return strip.avatarByName("scotty hd");
-    if (eql(name, "susan")) return strip.avatarByName("susan hd");
-    if (eql(name, "tiki")) return strip.avatarByName("tiki hd");
-    if (eql(name, "tongtyed")) return strip.avatarByName("tongtyed hd");
-    if (eql(name, "xeno")) return strip.avatarByName("xeno hd");
-    return strip.avatarByName(name);
+    return strip.avatarByName(session.colorCounterpart(name));
 }
 
 pub const min_width: u32 = 640;
@@ -1345,8 +1323,8 @@ pub const View = struct {
                 const gallery = characterGalleryRect(dialog_layout, self.dialog_first_field);
                 const family = characterFamilyRect(gallery);
                 const cards = characterGalleryCardsRect(gallery);
-                const family_labels = [_][]const u8{ "HD characters", "Color characters", "Original characters" };
-                const family_ids = [_][]const u8{ "dialog-character-family-hd", "dialog-character-family-color", "dialog-character-family-original" };
+                const family_labels = [_][]const u8{ "Color characters", "HD characters", "Original characters" };
+                const family_ids = [_][]const u8{ "dialog-character-family-color", "dialog-character-family-hd", "dialog-character-family-original" };
                 if (family.h > 0) for (family_labels, 0..) |label, index| snapshot.append(.{
                     .id = family_ids[index],
                     .role = .button,
@@ -1379,35 +1357,45 @@ pub const View = struct {
     fn drawComicBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) !void {
         ui.drawContentSurface(&self.canvas, rect, true);
         if (rect.w <= 0 or rect.h <= 0) return;
-        if (transcript.lines.items.len == 0) {
-            drawEmptyBuffer(&self.canvas, rect, "No messages yet - type below and press Enter", self.shell.comic_columns);
-            return;
-        }
+
+        const title_roster = try self.gpa.alloc(strip.TitleParticipant, transcript.roster.items.len);
+        defer self.gpa.free(title_roster);
+        for (transcript.roster.items, 0..) |member, index| title_roster[index] = .{
+            .identity = member.nick,
+            .display_name = member.nick,
+            .avatar = session.colorCounterpart(member.avatar),
+            .is_self = member.is_self,
+            .sends = member.sends,
+            .departed = member.departed,
+        };
 
         const all = transcript.lines.items;
         const range = self.shell.visibleRange(all.len, 9);
-        const visible = all[range.start..range.end];
-        const lines = try self.gpa.alloc(strip.Line, visible.len);
+        // AddLine/hysteresis/the CRT stream require the full prefix through
+        // range.end. A last-nine slice would make the first visible line an
+        // establishing shot. latestPageCrop then shows only the newest rows.
+        const prefix = all[0..range.end];
+        const lines = try self.gpa.alloc(strip.Line, prefix.len);
         defer self.gpa.free(lines);
-        const target_views = try self.gpa.alloc([]strip.Participant, visible.len);
+        const target_views = try self.gpa.alloc([]strip.Participant, prefix.len);
         var target_views_count: usize = 0;
         defer {
             for (target_views[0..target_views_count]) |targets| self.gpa.free(targets);
             self.gpa.free(target_views);
         }
-        for (visible, 0..) |line, i| {
+        for (prefix, 0..) |line, i| {
             const targets = try self.gpa.alloc(strip.Participant, line.talk_targets.len);
             target_views[i] = targets;
             target_views_count += 1;
             for (line.talk_targets, 0..) |target, target_index| targets[target_index] = .{
                 .identity = target.nick,
                 .display_name = target.nick,
-                .avatar = target.avatar,
+                .avatar = session.colorCounterpart(target.avatar),
             };
             lines[i] = .{
                 .identity = line.nick,
                 .display_name = line.nick,
-                .avatar = line.avatar,
+                .avatar = session.colorCounterpart(line.avatar),
                 .text = line.text,
                 .formatting = line.formatting,
                 .pose_text = line.pose_text,
@@ -1417,18 +1405,7 @@ pub const View = struct {
             };
         }
 
-        const title_roster = try self.gpa.alloc(strip.TitleParticipant, transcript.roster.items.len);
-        defer self.gpa.free(title_roster);
-        for (transcript.roster.items, 0..) |member, index| title_roster[index] = .{
-            .identity = member.nick,
-            .display_name = member.nick,
-            .avatar = member.avatar,
-            .is_self = member.is_self,
-            .sends = member.sends,
-            .departed = member.departed,
-        };
-
-        const backdrop = dialogBackgroundByName(transcript.resolvedBackdrop()) orelse dialogBackgroundByName("field").?;
+        const backdrop = dialogBackgroundByName(transcript.resolvedBackdrop()) orelse dialogBackgroundByName("color apartment").?;
         var page = try strip.renderWithOptions(self.gpa, lines, .{
             .title_roster = title_roster,
             .backdrop = backdrop,
@@ -1436,13 +1413,13 @@ pub const View = struct {
             .reserve_page_columns = true,
         });
         defer page.deinit(self.gpa);
-        blitFit(&self.canvas, page.pixels, page.width, page.height, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
+        blitSourcePage(&self.canvas, page.pixels, page.width, page.height, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
 
         if (self.shell.history_offset > 0) {
             const label = "Earlier messages - Page Down returns toward latest";
             ui.drawHistoryBanner(&self.canvas, rect, label);
         }
-        ui.drawVerticalScrollbar(&self.canvas, rect, all.len, 9, range.start);
+        if (all.len > 0) ui.drawVerticalScrollbar(&self.canvas, rect, all.len, 9, range.start);
     }
 
     fn drawTextBuffer(self: *View, rect: Rect, transcript: *const session.Transcript) void {
@@ -1528,9 +1505,9 @@ pub const View = struct {
             const selected = if (self.shell.selected_member) |selected_index| selected_index == index else member.is_self;
             ui.drawMemberCard(&self.canvas, cell, selected, member.departed, member.away, self.hovered_member == index);
             const avatar = displayAvatarByName(member.avatar) orelse continue;
-            var icon = bgb.decodeIcon(self.gpa, avatar) catch continue;
+            var icon = figure.chromePortrait(self.gpa, avatar) catch continue;
             defer icon.deinit(self.gpa);
-            blitHeightBottomAlphaSmooth(&self.canvas, icon.pixels, icon.width, icon.height, cell.x + @divTrunc(cell.w - 52, 2), cell.y + 6, 52, 52);
+            blitContainCenterAlphaSmooth(&self.canvas, icon.pixels, icon.width, icon.height, cell.x + @divTrunc(cell.w - 52, 2), cell.y + 6, 52, 52);
             if (member.role.badge().len != 0) ui.drawPill(&self.canvas, .{ .x = cell.right() - 25, .y = cell.y + 5, .w = 20, .h = 18 }, member.role.badge(), true);
             const name_w = Canvas.uiTextWidth(member.nick);
             drawTextEllipsized(
@@ -1583,10 +1560,9 @@ pub const View = struct {
         const avb_data = displayAvatarByName(avatar_name) orelse return;
         var rendered = selected: {
             const selected_emotion = self.shell.selectedEmotion();
-            if (selected_emotion == .neutral) break :selected figure.assembleForText(self.gpa, avb_data, "") catch return;
+            if (selected_emotion == .neutral) break :selected figure.chromeBody(self.gpa, avb_data, "") catch return;
             const pose = figure.poseStateForEmotion(self.gpa, avb_data, selected_emotion, self.shell.selectedEmotionIntensity()) catch return;
-            const detailed = figure.assembleDetailedForSourcePose(self.gpa, avb_data, pose) catch return;
-            break :selected detailed.image;
+            break :selected figure.chromeBodyForSourcePose(self.gpa, avb_data, pose) catch return;
         };
         defer rendered.deinit(self.gpa);
         blitHeightBottomAlphaSmooth(
@@ -1595,9 +1571,9 @@ pub const View = struct {
             rendered.width,
             rendered.height,
             rect.x + 12,
-            rect.y + 30,
+            rect.y + 24,
             @max(0, rect.w - 24),
-            @max(0, body_h - 30),
+            @max(0, body_h - 48),
         );
         if (wheel_side > 0) ui.drawMoodDial(&self.canvas, emotionWheelRectFromPane(rect), emotionLabel(self.shell.emotion_x, self.shell.emotion_y), self.shell.emotion_x, self.shell.emotion_y, self.shell.emotion_radius);
         // Avatar pixels can be opaque even around the figure. Draw the card
@@ -2399,20 +2375,74 @@ fn drawTextEllipsized(c: *Canvas, text: []const u8, x: i32, y: i32, max_w: i32, 
 }
 
 fn blitFit(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
-    var fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
-    fit.y = y + @min(14, @max(0, max_h - fit.h));
+    const fit = fitRect(sw, sh, x, y, max_w, max_h) orelse return;
+    blitNearest(c, src, sw, sh, 0, 0, sw, sh, fit.x, fit.y, fit.w, fit.h);
+}
+
+/// Width-fit the latest source page rows into the comic buffer. Top-aligned;
+/// no decorative vertical bias. The planner still receives the full prefix.
+fn blitSourcePage(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, max_w: i32, max_h: i32) void {
+    if (sw == 0 or sh == 0 or max_w <= 0 or max_h <= 0) return;
+    const crop = strip.latestPageCrop(sw, sh, @intCast(max_w), @intCast(max_h));
+    const dest_w = max_w;
+    const dest_h = @min(max_h, @max(1, @as(i32, @intCast(@divTrunc(
+        @as(u64, crop.h) * @as(u32, @intCast(max_w)),
+        crop.w,
+    )))));
+    blitNearest(c, src, sw, sh, crop.x, crop.y, crop.w, crop.h, x, y, dest_w, dest_h);
+}
+
+fn blitNearest(
+    c: *Canvas,
+    src: []const u32,
+    sw: u32,
+    sh: u32,
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    dx: i32,
+    dy: i32,
+    dw: i32,
+    dh: i32,
+) void {
+    if (src_w == 0 or src_h == 0 or dw <= 0 or dh <= 0) return;
+    _ = sh;
     var oy: i32 = 0;
-    while (oy < fit.h) : (oy += 1) {
-        const sy: u32 = @intCast(@divTrunc(@as(i64, oy) * sh, fit.h));
+    while (oy < dh) : (oy += 1) {
+        const sy: u32 = src_y + @as(u32, @intCast(@divTrunc(@as(i64, oy) * src_h, dh)));
         var ox: i32 = 0;
-        while (ox < fit.w) : (ox += 1) {
-            const sx: u32 = @intCast(@divTrunc(@as(i64, ox) * sw, fit.w));
-            c.set(fit.x + ox, fit.y + oy, src[@as(usize, sy) * sw + sx]);
+        while (ox < dw) : (ox += 1) {
+            const sx: u32 = src_x + @as(u32, @intCast(@divTrunc(@as(i64, ox) * src_w, dw)));
+            c.set(dx + ox, dy + oy, src[@as(usize, sy) * sw + sx]);
         }
     }
 }
 
 fn blitHeightBottomAlphaSmooth(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, area_w: i32, area_h: i32) void {
+    blitContainAlphaSmooth(c, src, sw, sh, x, y, area_w, area_h, .bottom);
+}
+
+/// Member icons and CAST portraits: contain-fit and center. Bodycam uses
+/// `GetBodyBox`'s bottom alignment; mugshots must not sit in the footer of
+/// the slot.
+fn blitContainCenterAlphaSmooth(c: *Canvas, src: []const u32, sw: u32, sh: u32, x: i32, y: i32, area_w: i32, area_h: i32) void {
+    blitContainAlphaSmooth(c, src, sw, sh, x, y, area_w, area_h, .center);
+}
+
+const ContainAlign = enum { center, bottom };
+
+fn blitContainAlphaSmooth(
+    c: *Canvas,
+    src: []const u32,
+    sw: u32,
+    sh: u32,
+    x: i32,
+    y: i32,
+    area_w: i32,
+    area_h: i32,
+    align_v: ContainAlign,
+) void {
     if (sw == 0 or sh == 0 or area_w <= 0 or area_h <= 0) return;
     var draw_h = area_h;
     var draw_w: i32 = @max(1, @as(i32, @intCast(@divTrunc(@as(i64, sw) * draw_h, sh))));
@@ -2421,7 +2451,10 @@ fn blitHeightBottomAlphaSmooth(c: *Canvas, src: []const u32, sw: u32, sh: u32, x
         draw_h = @max(1, @as(i32, @intCast(@divTrunc(@as(i64, sh) * draw_w, sw))));
     }
     const draw_x = x + @divTrunc(area_w - draw_w, 2);
-    const draw_y = y + area_h - draw_h;
+    const draw_y = switch (align_v) {
+        .center => y + @divTrunc(area_h - draw_h, 2),
+        .bottom => y + area_h - draw_h,
+    };
     var oy: i32 = 0;
     while (oy < draw_h) : (oy += 1) {
         const sy_fp: u64 = if (draw_h <= 1 or sh <= 1) 0 else @intCast(@divTrunc(@as(i64, oy) * (@as(i64, sh) - 1) * 65536, draw_h - 1));
@@ -2756,7 +2789,7 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
             const family_start = @divTrunc(selected_index, family_len) * family_len;
             const family_index = selected_index - family_start;
             const family_rect = characterFamilyRect(rect);
-            if (family_rect.h > 0) ui.drawSegmentedChoice(c, family_rect, &.{ "HD", "Color", "Original" }, @divTrunc(selected_index, family_len));
+            if (family_rect.h > 0) ui.drawSegmentedChoice(c, family_rect, &.{ "Color", "HD", "Original" }, @divTrunc(selected_index, family_len));
             const indices = [_]usize{
                 family_start + (family_index + family_len - 1) % family_len,
                 selected_index,
@@ -2772,14 +2805,14 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
                 const preview = ui.AssetPreviewLayout.card(.{ .x = x, .y = cards_rect.y + 4, .w = card_w - 6, .h = cards_rect.h - 8 });
                 ui.drawAssetPreviewFrame(c, preview, active);
                 const avatar = displayAvatarByName(name) orelse continue;
-                var icon = bgb.decodeIcon(std.heap.page_allocator, avatar) catch continue;
+                var icon = figure.chromePortrait(std.heap.page_allocator, avatar) catch continue;
                 defer icon.deinit(std.heap.page_allocator);
-                blitHeightBottomAlphaSmooth(c, icon.pixels, icon.width, icon.height, preview.artwork.x, preview.artwork.y, preview.artwork.w, preview.artwork.h);
+                blitContainCenterAlphaSmooth(c, icon.pixels, icon.width, icon.height, preview.artwork.x, preview.artwork.y, preview.artwork.w, preview.artwork.h);
                 if (preview.label.h > 0) drawTextEllipsized(c, name, preview.label.x, preview.label.y, preview.label.w, if (active) ui.current.accent else ui.current.secondary);
             }
         },
         .background => {
-            const name = if (selected.len == 0) "Field" else selected;
+            const name = if (selected.len == 0) "Color Apartment" else selected;
             const data = dialogBackgroundByName(name) orelse return;
             var image = bgb.decodeBackground(std.heap.page_allocator, data) catch return;
             defer image.deinit(std.heap.page_allocator);
@@ -2794,7 +2827,10 @@ fn drawDialogPreview(c: *Canvas, id: dialogs.Id, editors: *const [8]input_mod.Ed
 
 fn characterGalleryRect(layout: ui.DialogLayout, first_field: usize) Rect {
     var rect = layout.fieldRectScrolled(2, first_field);
-    rect.h = @min(96, @max(30, layout.primary.y - rect.y - 28));
+    // Standing Color/HD cards are ~100×260. A 96px strip contain-fits them into
+    // a sliver. Use the room down to the dialog buttons so the full silhouette
+    // stays readable.
+    rect.h = @min(280, @max(30, layout.primary.y - rect.y - 28));
     return rect;
 }
 
@@ -2835,6 +2871,24 @@ test "view renders modern empty buffer and ui.current.chrome" {
     const dial = ui.moodDialInterior(wheel);
     try std.testing.expectEqual(ui.current.accent, view.pixels()[@as(usize, @intCast(wheel.y + 13)) * 960 + @as(usize, @intCast(layout.body_camera.x + 20))]);
     try std.testing.expectEqual(ui.current.paper, view.pixels()[@as(usize, @intCast(dial.y + @divTrunc(dial.h, 2))) * 960 + @as(usize, @intCast(dial.x + @divTrunc(dial.w, 2) + 20))]);
+}
+
+test "empty comic buffer draws the source title panel" {
+    const gpa = std.testing.allocator;
+    var view = try View.init(gpa, 960, 720);
+    defer view.deinit();
+    var transcript = session.Transcript.init(gpa);
+    defer transcript.deinit();
+    try transcript.setSelf("anna");
+    try view.render("Comic Chat | #root | anna", "connected", &transcript, "", 0);
+
+    const layout = geometry.Layout.compute(960, 720, true, true);
+    const sample_x = layout.transcript.x + 24;
+    const sample_y = layout.transcript.y + 24;
+    try std.testing.expectEqual(
+        canvas_mod.white,
+        view.pixels()[@as(usize, @intCast(sample_y)) * 960 + @as(usize, @intCast(sample_x))],
+    );
 }
 
 test "emotion dial selects and drags only within its circular control" {
@@ -3094,12 +3148,12 @@ test "character gallery browses adjacent cast members and previews expression" {
     var view = try View.init(std.testing.allocator, 960, 720);
     defer view.deinit();
     view.openDialog(.character);
-    try std.testing.expectEqualStrings("Anna HD", view.dialogValueAt(0));
+    try std.testing.expectEqualStrings("Anna Color", view.dialogValueAt(0));
     const layout = dialogLayout(view.width(), view.height(), dialogs.get(.character));
     const gallery = characterGalleryRect(layout, 0);
     const cards = characterGalleryCardsRect(gallery);
     _ = view.handlePointer(.{ .kind = .down, .x = cards.right() - 8, .y = cards.y + 12, .button = .primary }, 0, 0);
-    try std.testing.expectEqualStrings("Armando HD", view.dialogValueAt(0));
+    try std.testing.expectEqualStrings("Armando Color", view.dialogValueAt(0));
     const family = characterFamilyRect(gallery);
     _ = view.handlePointer(.{ .kind = .down, .x = family.x + @divTrunc(family.w * 2, 3) + 8, .y = family.y + 10, .button = .primary }, 0, 0);
     try std.testing.expectEqualStrings("Armando Original", view.dialogValueAt(0));
@@ -3112,6 +3166,15 @@ test "character gallery browses adjacent cast members and previews expression" {
     _ = try view.handleDialogKey(.right, .{});
     try std.testing.expectEqualStrings("Happy", view.dialogValueAt(1));
     try std.testing.expectEqualStrings("Happy", view.currentEmotionLabel());
+    try std.testing.expect(gallery.h >= 72);
+    try std.testing.expect(gallery.h >= 180);
+    const preview = ui.AssetPreviewLayout.card(.{
+        .x = cards.x + 6 + @divTrunc(cards.w - 16, 3),
+        .y = cards.y + 4,
+        .w = @divTrunc(cards.w - 16, 3) - 6,
+        .h = cards.h - 8,
+    });
+    try std.testing.expect(preview.artwork.h >= 120);
 }
 
 test "dialog keyboard focus includes actions and protects typed choices" {
@@ -3326,11 +3389,11 @@ test "every bundled avatar produces a visible mugshot and full figure" {
     defer canvas.deinit(std.testing.allocator);
     for (names) |name| {
         const data = strip.avatarByName(name) orelse return error.TestUnexpectedResult;
-        var icon = try bgb.decodeIcon(std.testing.allocator, data);
+        var icon = try figure.chromePortrait(std.testing.allocator, data);
         defer icon.deinit(std.testing.allocator);
         try std.testing.expect(icon.width > 0 and icon.height > 0);
         canvas.clear(ui.current.layer);
-        blitHeightBottomAlphaSmooth(&canvas, icon.pixels, icon.width, icon.height, 30, 10, 60, 60);
+        blitContainCenterAlphaSmooth(&canvas, icon.pixels, icon.width, icon.height, 30, 10, 60, 60);
         var visible_icon = false;
         for (canvas.px) |pixel| if (pixel != ui.current.layer) {
             visible_icon = true;
@@ -3338,7 +3401,7 @@ test "every bundled avatar produces a visible mugshot and full figure" {
         };
         try std.testing.expect(visible_icon);
 
-        var full = try figure.assembleForText(std.testing.allocator, data, "");
+        var full = try figure.chromeBody(std.testing.allocator, data, "");
         defer full.deinit(std.testing.allocator);
         try std.testing.expect(full.width > 0 and full.height > 0);
         canvas.clear(ui.current.layer);
@@ -3353,11 +3416,86 @@ test "every bundled avatar produces a visible mugshot and full figure" {
     }
 }
 
+test "color and HD chrome portraits are heads with a keyed paper matte" {
+    const names = [_][]const u8{ "anna hd", "anna color", "kevin color", "jordan", "xeno color" };
+    var canvas = try Canvas.init(std.testing.allocator, 80, 80);
+    defer canvas.deinit(std.testing.allocator);
+    for (names) |name| {
+        const data = strip.avatarByName(name) orelse return error.TestUnexpectedResult;
+        var portrait = try figure.chromePortrait(std.testing.allocator, data);
+        defer portrait.deinit(std.testing.allocator);
+        var body = try figure.chromeBody(std.testing.allocator, data, "");
+        defer body.deinit(std.testing.allocator);
+        try std.testing.expect(portrait.height <= body.height);
+        try std.testing.expect(portrait.height >= 24);
+        canvas.clear(ui.current.layer);
+        blitContainCenterAlphaSmooth(&canvas, portrait.pixels, portrait.width, portrait.height, 10, 10, 60, 60);
+        try std.testing.expectEqual(ui.current.layer, canvas.px[0]);
+        var visible = false;
+        for (canvas.px) |pixel| if (pixel != ui.current.layer) {
+            visible = true;
+            break;
+        };
+        try std.testing.expect(visible);
+    }
+}
+
+test "contain-center portrait blit keeps a wide mugshot off the card footer" {
+    var canvas = try Canvas.init(std.testing.allocator, 8, 8);
+    defer canvas.deinit(std.testing.allocator);
+    canvas.clear(ui.current.layer);
+    const src = [_]u32{ 0xff00ff00, 0xff00ff00, 0xff00ff00, 0xff00ff00 };
+    blitContainCenterAlphaSmooth(&canvas, src[0..], 4, 1, 0, 0, 8, 8);
+    try std.testing.expectEqual(ui.current.layer, canvas.px[0]);
+    try std.testing.expectEqual(ui.current.layer, canvas.px[8 * 8 - 1]);
+    try std.testing.expect(canvas.px[8 * 3 + 3] != ui.current.layer);
+}
+
+test "bare historical names remap to Color for chrome and stay testdata in strip" {
+    const testdata = strip.avatarByName("anna").?;
+    const color = strip.avatarByName("anna color").?;
+    const remapped = displayAvatarByName("anna").?;
+    try std.testing.expect(testdata.ptr != color.ptr);
+    try std.testing.expectEqual(color.ptr, remapped.ptr);
+    try std.testing.expectEqualStrings("anna color", session.colorCounterpart("anna"));
+    try std.testing.expectEqualStrings("anna original", session.colorCounterpart("anna original"));
+}
+
+test "Anna Color chrome portrait is a full standing silhouette with local color" {
+    const data = strip.avatarByName("anna color") orelse return error.TestUnexpectedResult;
+    var portrait = try figure.chromePortrait(std.testing.allocator, data);
+    defer portrait.deinit(std.testing.allocator);
+    try std.testing.expect(portrait.height > portrait.width);
+    try std.testing.expect(portrait.height >= 220);
+    var peach: usize = 0;
+    var red: usize = 0;
+    var top_ink: usize = 0;
+    var bot_ink: usize = 0;
+    for (portrait.pixels, 0..) |pixel, index| {
+        if (pixel >> 24 == 0) continue;
+        if (pixel & 0x00ffffff == 0x00ffffff) continue;
+        const y = index / portrait.width;
+        const red_ch: i32 = @as(u8, @truncate(pixel >> 16));
+        const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue_ch: i32 = @as(u8, @truncate(pixel));
+        if (y < portrait.height / 3) top_ink += 1;
+        if (y >= (portrait.height * 2) / 3) bot_ink += 1;
+        if (red_ch > green_ch + 15 and red_ch > blue_ch + 15 and green_ch + 25 > blue_ch)
+            peach += 1;
+        if (red_ch > 120 and red_ch > green_ch + 40 and red_ch > blue_ch + 40 and green_ch < 90)
+            red += 1;
+    }
+    try std.testing.expect(peach > 80);
+    try std.testing.expect(red > 40);
+    try std.testing.expect(top_ink > 40);
+    try std.testing.expect(bot_ink > 40);
+}
+
 test "every selectable color avatar decodes to a visibly colored gallery portrait" {
     for (dialogs.choiceOptions(.character, 0)) |name| {
         if (!std.mem.endsWith(u8, name, "Color")) continue;
         const data = strip.avatarByName(name) orelse return error.TestUnexpectedResult;
-        var icon = try bgb.decodeIcon(std.testing.allocator, data);
+        var icon = try figure.chromePortrait(std.testing.allocator, data);
         defer icon.deinit(std.testing.allocator);
         var colorful = false;
         for (icon.pixels) |pixel| {

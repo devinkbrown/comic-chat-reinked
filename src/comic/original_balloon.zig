@@ -218,6 +218,44 @@ pub const BalloonGeometry = struct {
         allocator.free(self.thought_bubbles);
         self.* = undefined;
     }
+
+    /// Color-only: slide the cloud up so it stays above `max_bottom` (y-up)
+    /// without crossing `panel_top`. The tail tip stays on the speaker dest.
+    /// Testdata goldens never call this.
+    pub fn liftAbove(self: *BalloonGeometry, max_bottom: i32, panel_top: i32) void {
+        if (self.cloud_bbox.bottom >= max_bottom) return;
+        var dy = max_bottom - self.cloud_bbox.bottom;
+        if (self.cloud_bbox.top + dy > panel_top) {
+            dy = panel_top - self.cloud_bbox.top;
+        }
+        if (dy <= 0) return;
+        self.origin.y += dy;
+        self.cloud_bbox.top += dy;
+        self.cloud_bbox.bottom += dy;
+        self.route_region.top += dy;
+        self.route_region.bottom += dy;
+        for (self.lines) |*line| line.y += dy;
+        for (self.thought_bubbles) |*bubble| {
+            bubble.top += dy;
+            bubble.bottom += dy;
+        }
+        if (self.tail) |*tail| {
+            tail.tip.y -= dy;
+            tail.first_arc.end.y -= dy;
+            tail.second_arc.start.y -= dy;
+        }
+    }
+
+    /// Color-only: move the tail tip to a new world y (y-up) after dest nudge.
+    /// Testdata goldens never call this.
+    pub fn retargetTip(self: *BalloonGeometry, world_tip_y: i32) void {
+        const tail = if (self.tail) |*value| value else return;
+        const dy = world_tip_y - (self.origin.y + tail.tip.y);
+        if (dy == 0) return;
+        tail.tip.y += dy;
+        tail.first_arc.end.y += dy;
+        tail.second_arc.start.y += dy;
+    }
 };
 
 pub const PanelLayout = struct {
@@ -1967,4 +2005,68 @@ test "layout ownership is safe at every allocation failure point" {
         exerciseLayoutAllocationFailures,
         .{},
     );
+}
+
+test "liftAbove docks a Color balloon above a standing dest" {
+    const gpa = std.testing.allocator;
+    var lines = [_]TextLine{.{ .start = 0, .len = 0, .width = 0, .x = 200, .y = -400 }};
+    var geo = BalloonGeometry{
+        .input_index = 0,
+        .kind = .say,
+        .dashed = false,
+        .text = try gpa.dupe(u8, "HI"),
+        .formatting = &.{},
+        .lines = &lines,
+        .cloud_bbox = .{ .left = 100, .top = -400, .right = 800, .bottom = -1200 },
+        .route_region = .{ .left = 100, .top = -400, .right = 800, .bottom = -1200 },
+        .origin = .{ .x = 100, .y = -400 },
+        .outline_points = &.{},
+        .outline_beziers = &.{},
+        .tail = .{
+            .tip = .{ .x = 50, .y = -1400 },
+            .opening_left = .{ .x = 0, .y = 0 },
+            .opening_right = .{ .x = 10, .y = 0 },
+            .first_arc = .{ .start = .{ .x = 0, .y = 0 }, .end = .{ .x = 50, .y = -1400 }, .altitude = 0 },
+            .second_arc = .{ .start = .{ .x = 50, .y = -1400 }, .end = .{ .x = 10, .y = 0 }, .altitude = 0 },
+        },
+        .thought_bubbles = &.{},
+    };
+    defer gpa.free(geo.text);
+    const world_tip_before = geo.origin.y + geo.tail.?.tip.y;
+    geo.liftAbove(-900, -20);
+    try std.testing.expectEqual(@as(i32, -900), geo.cloud_bbox.bottom);
+    try std.testing.expectEqual(@as(i32, -400 + 300), geo.origin.y);
+    try std.testing.expectEqual(world_tip_before, geo.origin.y + geo.tail.?.tip.y);
+    try std.testing.expectEqual(geo.tail.?.tip.y, geo.tail.?.first_arc.end.y);
+    try std.testing.expectEqual(geo.tail.?.tip.y, geo.tail.?.second_arc.start.y);
+}
+
+test "retargetTip aims a Color tail at the post-nudge dest" {
+    var lines = [_]TextLine{.{ .start = 0, .len = 0, .width = 0, .x = 200, .y = -400 }};
+    var geo = BalloonGeometry{
+        .input_index = 0,
+        .kind = .say,
+        .dashed = false,
+        .text = try std.testing.allocator.dupe(u8, "HI"),
+        .formatting = &.{},
+        .lines = &lines,
+        .cloud_bbox = .{ .left = 100, .top = -400, .right = 800, .bottom = -900 },
+        .route_region = .{ .left = 100, .top = -400, .right = 800, .bottom = -900 },
+        .origin = .{ .x = 100, .y = -400 },
+        .outline_points = &.{},
+        .outline_beziers = &.{},
+        .tail = .{
+            .tip = .{ .x = 50, .y = -320 },
+            .opening_left = .{ .x = 0, .y = 0 },
+            .opening_right = .{ .x = 10, .y = 0 },
+            .first_arc = .{ .start = .{ .x = 0, .y = 0 }, .end = .{ .x = 50, .y = -320 }, .altitude = 0 },
+            .second_arc = .{ .start = .{ .x = 50, .y = -320 }, .end = .{ .x = 10, .y = 0 }, .altitude = 0 },
+        },
+        .thought_bubbles = &.{},
+    };
+    defer std.testing.allocator.free(geo.text);
+    geo.retargetTip(-1100 + 200);
+    try std.testing.expectEqual(@as(i32, -900), geo.origin.y + geo.tail.?.tip.y);
+    try std.testing.expectEqual(geo.tail.?.tip.y, geo.tail.?.first_arc.end.y);
+    try std.testing.expectEqual(geo.tail.?.tip.y, geo.tail.?.second_arc.start.y);
 }

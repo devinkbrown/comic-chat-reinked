@@ -83,7 +83,7 @@ pub const specs = [_]Spec{
     .{ .id = .room_list, .resource = "IDD_ROOMLIST", .title = "Room List", .group = .rooms, .source_w = 400, .source_h = 255 },
     .{ .id = .settings, .resource = "IDD_SETTINGSPAGE", .title = "Settings", .group = .application, .source_w = 360, .source_h = 300 },
     .{ .id = .personal, .resource = "IDD_PERSONALPAGE_IRC", .title = "Personal Profile", .group = .connection, .source_w = 252, .source_h = 218 },
-    .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose Character", .group = .connection, .source_w = 360, .source_h = 260 },
+    .{ .id = .character, .resource = "IDD_CHARACTERPAGE", .title = "Choose Character", .group = .connection, .source_w = 360, .source_h = 360 },
     .{ .id = .background, .resource = "IDD_BACKGROUNDPAGE", .title = "Background", .group = .connection, .source_w = 252, .source_h = 218 },
     .{ .id = .kick, .resource = "IDD_KICK", .title = "Kick Member", .group = .rooms, .source_w = 186, .source_h = 89 },
     .{ .id = .nickname, .resource = "IDD_NICKNAME", .title = "Nickname", .group = .connection, .source_w = 188, .source_h = 71 },
@@ -269,10 +269,10 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         },
         .character => if (index == 0)
             &.{
-                "Anna HD",         "Armando HD",        "Bolo HD",          "Cro HD",        "Dan HD",           "Denise HD",       "Hugh HD",         "Jordan HD",       "Kevin HD",       "Kwensa HD",         "Lance HD",
-                "Lynnea HD",       "Margaret HD",       "Maynard HD",       "Mike HD",       "Rebecca HD",       "Sage HD",         "Scotty HD",       "Susan HD",        "Tiki HD",        "Tongtyed HD",       "Xeno HD",
                 "Anna Color",      "Armando Color",     "Bolo Color",       "Cro Color",     "Dan Color",        "Denise Color",    "Hugh Color",      "Jordan Color",    "Kevin Color",    "Kwensa Color",      "Lance Color",
                 "Lynnea Color",    "Margaret Color",    "Maynard Color",    "Mike Color",    "Rebecca Color",    "Sage Color",      "Scotty Color",    "Susan Color",     "Tiki Color",     "Tongtyed Color",    "Xeno Color",
+                "Anna HD",         "Armando HD",        "Bolo HD",          "Cro HD",        "Dan HD",           "Denise HD",       "Hugh HD",         "Jordan HD",       "Kevin HD",       "Kwensa HD",         "Lance HD",
+                "Lynnea HD",       "Margaret HD",       "Maynard HD",       "Mike HD",       "Rebecca HD",       "Sage HD",         "Scotty HD",       "Susan HD",        "Tiki HD",        "Tongtyed HD",       "Xeno HD",
                 "Anna Original",   "Armando Original",  "Bolo Original",    "Cro Original",  "Dan Original",     "Denise Original", "Hugh Original",   "Jordan Original", "Kevin Original", "Kwensa Original",   "Lance Original",
                 "Lynnea Original", "Margaret Original", "Maynard Original", "Mike Original", "Rebecca Original", "Sage Original",   "Scotty Original", "Susan Original",  "Tiki Original",  "Tongtyed Original", "Xeno Original",
             }
@@ -281,13 +281,13 @@ pub fn choiceOptions(id: Id, index: usize) []const []const u8 {
         else
             &.{},
         .background => if (index == 0) &.{
-            "Field",                   "Volcano",                  "Den",                        "Room",                    "Pastoral",
-            "HD Apartment",            "HD Rooftop",               "HD Cafe",                    "HD Park",                 "HD Space Corridor",
-            "HD Boardwalk",            "HD School Hall",           "HD Rainy Street",            "HD Library",              "HD Campsite",
             "Color Apartment",         "Color Rooftop",            "Color Cafe",                 "Color Park",              "Color Space Corridor",
             "Color Boardwalk",         "Color School Hall",        "Color Rainy Street",         "Color Library",           "Color Campsite",
             "Whacky Spaceship Bridge", "Whacky Asteroid Diner",    "Whacky Sky Island Market",   "Whacky Underwater Dome",  "Whacky Friendly Castle",
             "Whacky Pinball Interior", "Whacky Cosmic Laundromat", "Whacky Cloud Train Station", "Whacky Mushroom Village", "Whacky Arcade Planetarium",
+            "HD Apartment",            "HD Rooftop",               "HD Cafe",                    "HD Park",                 "HD Space Corridor",
+            "HD Boardwalk",            "HD School Hall",           "HD Rainy Street",            "HD Library",              "HD Campsite",
+            "Field",                   "Volcano",                  "Den",                        "Room",                    "Pastoral",
         } else &.{},
         .sound => if (index == 0) &.{ "Chime.wav", "Knock.wav", "Laugh.wav", "Applause.wav" } else &.{},
         .set_text_font, .text_font => if (index == 0) &.{ "Comic Neue 14", "Comic Neue 16", "Comic Neue 18" } else &.{ "Regular", "Bold", "Italic" },

@@ -26,10 +26,17 @@ with `sha256sum -c assets/generated/AVB_SHA256SUMS.txt`.
 
 The 22 `*-color-hd-v1.avb` packages (and the deliberately newer
 `tiki-color-hd-v2.avb`) are selectable Color variants. Each is rebuilt from
-its matching six-pose sheet in `assets/generated/avatar-pose-sheets-v1/` and
-uses the corresponding portrait in `assets/generated/avatar-color-hd-v1/` as
-its palette reference; `tiki-color-hd-v2.png` is the Tiki reference selected
-for the v2 package. Each package is a native simple-avatar AVB with distinct
+its matching six-pose sheet in `assets/generated/avatar-pose-sheets-v1/`.
+The packager keeps the tallest ink y-band in the widest column-run so a
+wrap sliver under the heels is not packaged. Near-gray anti-alias is paper,
+matching runtime `paperInkPixel`, and the 12px pad stops at the next ink
+column so a pose-PNG edge sliver does not ride into the card. Testdata
+`anna` is not rebuilt here.
+Those sheets already carry independent local color (Anna: peach skin, red
+tube top, black skirt). The packager keeps that paint; it only transfers
+color from `avatar-color-hd-v1/` when a pose is still grayscale. A single
+hue wash is never applied. `tiki-color-hd-v2.png` is the Tiki reference
+selected for the v2 package. Each package is a native simple-avatar AVB with distinct
 neutral, laugh, surprised, angry, sad, and action records, so the same asset
 used in the character gallery is also the runtime avatar. Their gallery and
 roster icons are derived from the neutral complete figure; the client does

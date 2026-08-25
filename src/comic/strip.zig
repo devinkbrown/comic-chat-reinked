@@ -117,6 +117,45 @@ pub const device_interstice: u32 = sourceRoundU32(
         @as(f64, @floatFromInt(original_layout.default_unit_width)),
 );
 
+/// Source rectangle inside a composed strip page. Desktop views width-fit this
+/// crop so a tall transcript shows the latest panels instead of shrinking the
+/// entire page.
+pub const PageCrop = struct {
+    x: u32 = 0,
+    y: u32 = 0,
+    w: u32,
+    h: u32,
+};
+
+/// Choose the latest complete panel rows that fill `dest_w`×`dest_h` after a
+/// width-fit scale. Short pages return the whole image. Tall pages crop from
+/// the bottom on a panel-row boundary so a width-fit cannot slice Anna into
+/// legs on one row and hair on the next. Callers must still pass the full
+/// transcript prefix into `renderWithOptions` so AddLine / hysteresis / the
+/// shared CRT stream stay source-faithful.
+pub fn latestPageCrop(page_w: u32, page_h: u32, dest_w: u32, dest_h: u32) PageCrop {
+    if (page_w == 0 or page_h == 0) return .{ .w = page_w, .h = page_h };
+    if (dest_w == 0 or dest_h == 0) return .{ .w = page_w, .h = @min(page_h, panel_height) };
+    const visible_h: u32 = @intCast(@min(
+        @as(u64, page_h),
+        @divTrunc(@as(u64, dest_h) * page_w, dest_w),
+    ));
+    const stride = panel_height + device_interstice;
+    const rows: u32 = if (stride == 0)
+        1
+    else
+        @max(@as(u32, 1), (visible_h + device_interstice) / stride);
+    const crop_h = @min(page_h, rows * panel_height + (rows - 1) * device_interstice);
+    var y: u32 = if (page_h > crop_h) page_h - crop_h else 0;
+    if (stride > 0 and y >= stride) y = (y / stride) * stride;
+    return .{
+        .x = 0,
+        .y = y,
+        .w = page_w,
+        .h = page_h - y,
+    };
+}
+
 const panel_rect = original_balloon.Rect{
     .left = 0,
     .top = 0,
@@ -130,6 +169,67 @@ const balloon_rect = original_balloon.Rect{
     .right = original_layout.default_unit_width - original_title.border_width,
     .bottom = -@divTrunc(original_layout.default_unit_height, 2),
 };
+
+fn drawPanelBodies(
+    gpa: std.mem.Allocator,
+    canvas: *Canvas,
+    placements: []const original_layout.Placement,
+    avatars: []const []const u8,
+    poses: []const []const u8,
+    pose_states: []const ?udi.PoseState,
+    transform: original_raster.Transform,
+) !void {
+    for (placements) |placement| {
+        const source = placement.rect;
+        const draw_options = original_figure.LogicalOptions{
+            .client = .{
+                .left = source.x,
+                .top = -source.y,
+                .right = source.x + source.w,
+                .bottom = -(source.y + source.h),
+            },
+            .transform = transform,
+            .flipped = placement.flipped,
+        };
+        _ = if (pose_states[placement.body_index]) |pose_state|
+            try original_figure.drawSourcePoseLogical(
+                gpa,
+                canvas,
+                avatars[placement.body_index],
+                pose_state,
+                draw_options,
+            )
+        else
+            try original_figure.drawForTextLogical(
+                gpa,
+                canvas,
+                avatars[placement.body_index],
+                poses[placement.body_index],
+                draw_options,
+            );
+    }
+}
+
+fn nudgeColorDestsBelowBalloons(
+    placements: []original_layout.Placement,
+    bodies: []const original_layout.Body,
+    balloons: []const original_balloon.BalloonGeometry,
+) void {
+    var clear_above: i32 = 0;
+    for (balloons) |balloon| {
+        const cloud_bottom_down = -balloon.cloud_bbox.bottom;
+        if (cloud_bottom_down > 0) clear_above = @max(clear_above, cloud_bottom_down + 40);
+    }
+    if (clear_above <= 0) return;
+    for (placements) |*placement| {
+        if (!bodies[placement.body_index].keep_recognizable) continue;
+        original_layout.nudgeRecognizableDestBelow(
+            &placement.rect,
+            clear_above,
+            original_layout.default_unit_height,
+        );
+    }
+}
 
 const HistoryEntry = struct {
     id: u32,
@@ -312,7 +412,8 @@ pub fn renderWithOptions(
             var balloon_random = original_balloon.MsvcrtRand.init(page_random.state);
             var trial_histories: std.ArrayList(HistoryEntry) = .empty;
             defer trial_histories.deinit(gpa);
-            const establishing = isEstablishing(planner.panelCount(), newed_panel);
+            const establishing = isEstablishing(planner.panelCount(), newed_panel) or
+                generatedFamilyAvatar(lineAvatar(input_line));
             var candidate = buildCandidate(
                 gpa,
                 base,
@@ -453,6 +554,13 @@ fn buildCandidate(
             };
         }
     } else {
+        // Balloon layout uppercases before it splits. A continuation leftover
+        // like "...CLEARER NOW." is all-caps and would select a shouting /
+        // kick pose. Generated standing cards then dest-overflow into
+        // legs-only. Keep the original line's pose so Color/HD Anna stays a
+        // whole person. Testdata goldens still use the leftover fragment.
+        const pose_source = input_line.pose_text orelse
+            if (generatedFamilyAvatar(lineAvatar(input_line))) input_line.text else request.words;
         var spoken = try OwnedLine.init(
             gpa,
             lineIdentity(input_line),
@@ -460,7 +568,7 @@ fn buildCandidate(
             lineAvatar(input_line),
             request.words,
             request_formatting,
-            input_line.pose_text orelse request.words,
+            pose_source,
             input_line.pose_state,
             input_line.talk_targets,
             request.modes,
@@ -578,6 +686,7 @@ fn renderScene(
         body.norm_height = 100;
         body.head_height = rendered[index].head_height;
         body.face_x = rendered[index].face_x;
+        body.keep_recognizable = rendered[index].generated_standing;
         body.history = historyFor(history_before, body.id);
     }
 
@@ -638,6 +747,38 @@ fn renderScene(
     );
     defer balloon_layout.deinit(gpa);
 
+    var any_recognizable = false;
+    for (bodies) |body| {
+        if (!body.keep_recognizable) continue;
+        any_recognizable = true;
+        break;
+    }
+    nudgeColorDestsBelowBalloons(layout.placements, bodies, balloon_layout.balloons);
+    if (any_recognizable) {
+        var head_line: i32 = std.math.maxInt(i32);
+        for (layout.placements) |placement| {
+            if (!bodies[placement.body_index].keep_recognizable) continue;
+            head_line = @min(head_line, placement.rect.y);
+        }
+        if (head_line != std.math.maxInt(i32)) {
+            const max_bottom_y_up = -(head_line - 40);
+            for (balloon_layout.balloons) |*balloon| {
+                balloon.liftAbove(max_bottom_y_up, balloon_rect.top);
+            }
+            nudgeColorDestsBelowBalloons(layout.placements, bodies, balloon_layout.balloons);
+        }
+        var balloon_i: usize = 0;
+        for (layout.placements) |placement| {
+            const line = findOwnedLine(lines, bodies[placement.body_index].id) orelse continue;
+            if (!line.has_balloon) continue;
+            if (balloon_i >= balloon_layout.balloons.len) break;
+            if (bodies[placement.body_index].keep_recognizable) {
+                balloon_layout.balloons[balloon_i].retargetTip(-placement.rect.y + 200);
+            }
+            balloon_i += 1;
+        }
+    }
+
     var canvas = try Canvas.init(gpa, panel_width, panel_height);
     defer canvas.deinit(gpa);
     canvas.clear(white);
@@ -671,39 +812,17 @@ fn renderScene(
         false,
     );
 
-    // Microsoft draws bodies in the order produced by OrderAvatars, with
-    // masks/ROPs applied directly to the already-painted backdrop.
-    for (layout.placements) |placement| {
-        const source = placement.rect;
-        const draw_options = original_figure.LogicalOptions{
-            .client = .{
-                .left = source.x,
-                .top = -source.y,
-                .right = source.x + source.w,
-                .bottom = -(source.y + source.h),
-            },
-            .transform = transform,
-            .flipped = placement.flipped,
-        };
-        _ = if (pose_states[placement.body_index]) |pose_state|
-            try original_figure.drawSourcePoseLogical(
-                gpa,
-                &canvas,
-                avatars[placement.body_index],
-                pose_state,
-                draw_options,
-            )
-        else
-            try original_figure.drawForTextLogical(
-                gpa,
-                &canvas,
-                avatars[placement.body_index],
-                poses[placement.body_index],
-                draw_options,
-            );
+    // Microsoft `CUnitPanel::Draw` paints bodies, then balloons. Testdata
+    // dests keep that order so goldens do not move. Generated standing dests
+    // paint after balloons so a cloud that is still taller than the dest gap
+    // after docking at the top cannot cover the face.
+    if (any_recognizable) {
+        try original_raster.drawPanelBalloons(gpa, &canvas, balloon_layout.balloons, transform);
+        try drawPanelBodies(gpa, &canvas, layout.placements, avatars, poses, pose_states, transform);
+    } else {
+        try drawPanelBodies(gpa, &canvas, layout.placements, avatars, poses, pose_states, transform);
+        try original_raster.drawPanelBalloons(gpa, &canvas, balloon_layout.balloons, transform);
     }
-
-    try original_raster.drawPanelBalloons(gpa, &canvas, balloon_layout.balloons, transform);
     drawPanelBorder(&canvas);
 
     const pixels = try gpa.dupe(u32, canvas.px);
@@ -847,7 +966,7 @@ fn renderTitlePanel(gpa: std.mem.Allocator, lines: []const Line, options: Render
         const star = plan.stars[star_index];
         drawTitleLabel(&canvas, star.label);
         if (avatarByName(people.items[star.participant_index].avatar)) |avatar| {
-            var icon = try bgb.decodeIcon(gpa, avatar);
+            var icon = try figure.titleStarIcon(gpa, avatar);
             defer icon.deinit(gpa);
             original_raster.blitImage(
                 &canvas,
@@ -1071,6 +1190,10 @@ fn findTitlePerson(people: []const TitlePerson, identity: []const u8) ?usize {
 
 fn isEstablishing(panel_count: usize, newed_panel: bool) bool {
     return panel_count <= 1 or (!newed_panel and panel_count <= 2);
+}
+
+fn generatedFamilyAvatar(name: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(name, " color") or std.ascii.endsWithIgnoreCase(name, " hd");
 }
 
 fn updateNewedPanel(newed_panel: *bool, kind: original_page.AttemptKind, replace_last: bool) void {
@@ -1516,4 +1639,2013 @@ test "long title wraps and participant names use source single-line ellipsis" {
     });
     defer repeated.deinit(gpa);
     try std.testing.expectEqualSlices(u32, wrapped.pixels, repeated.pixels);
+}
+
+test "latest page crop keeps a short page and crops a tall page from the bottom" {
+    const short = latestPageCrop(650, 315, 400, 400);
+    try std.testing.expectEqual(@as(u32, 0), short.y);
+    try std.testing.expectEqual(@as(u32, 650), short.w);
+    try std.testing.expectEqual(@as(u32, 315), short.h);
+
+    const three_rows = 3 * panel_height + 2 * device_interstice;
+    const tall = latestPageCrop(650, three_rows, 325, 315);
+    try std.testing.expectEqual(@as(u32, 650), tall.w);
+    try std.testing.expectEqual(panel_height, tall.h);
+    try std.testing.expectEqual(2 * (panel_height + device_interstice), tall.y);
+
+    const two_rows = 2 * panel_height + device_interstice;
+    const mid_row = latestPageCrop(4 * panel_width + 3 * device_interstice, two_rows, 700, 250);
+    try std.testing.expectEqual(panel_height, mid_row.h);
+    try std.testing.expectEqual(panel_height + device_interstice, mid_row.y);
+}
+
+test "Anna Color continuation keeps her head in the panel" {
+    const gpa = std.testing.allocator;
+    const lines = [_]Line{
+        .{ .speaker = "anna color", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "anna color", .text = "A repeated speaker starts a fresh panel that must still show her face." },
+    };
+    var image = try renderWithOptions(gpa, &lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try std.testing.expect(image.height >= panel_height);
+
+    const stride = panel_width + device_interstice;
+    const row_stride = panel_height + device_interstice;
+    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    const rows = if (image.height == panel_height) 1 else image.height / row_stride + 1;
+    var checked: usize = 0;
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var high_red: usize = 0;
+            var high_peach: usize = 0;
+            var ink_min_y: u32 = panel_height;
+            var ink_max_y: u32 = 0;
+            var y: u32 = 0;
+            while (y < panel_height) : (y += 1) {
+                var x: u32 = 0;
+                while (x < panel_width) : (x += 1) {
+                    const pixel = image.pixels[(y0 + y) * image.width + x0 + x];
+                    const red: i32 = @as(u8, @truncate(pixel >> 16));
+                    const green: i32 = @as(u8, @truncate(pixel >> 8));
+                    const blue: i32 = @as(u8, @truncate(pixel));
+                    if (red == green and green == blue) continue;
+                    if (red >= 245 and green >= 245 and blue >= 245) continue;
+                    const peach = red > green + 15 and red > blue + 15 and green + 25 > blue and
+                        red > 90 and red < 230 and green > 60 and blue > 40;
+                    const tube = red > 120 and red > green + 40 and red > blue + 40 and green < 90;
+                    if (peach or tube) {
+                        ink_min_y = @min(ink_min_y, y);
+                        ink_max_y = @max(ink_max_y, y + 1);
+                    }
+                    if (y >= (panel_height * 6) / 10) continue;
+                    if (tube) high_red += 1;
+                    if (peach) high_peach += 1;
+                }
+            }
+            if (high_red + high_peach < 20) continue;
+            // A legs-only dest has the red top and face below the midline.
+            try std.testing.expect(high_peach > 10);
+            try std.testing.expect(high_red > 8);
+            // Full standing dest occupies most of the panel, not a mid-thigh crop.
+            try std.testing.expect(ink_max_y > ink_min_y);
+            try std.testing.expect(ink_max_y - ink_min_y >= (panel_height * 45) / 100);
+            try std.testing.expect(ink_min_y < panel_height / 3);
+            try std.testing.expect(ink_max_y > (panel_height * 7) / 10);
+            // Face sits below a 3-line balloon, not under it.
+            var face_peach: usize = 0;
+            var y_face: u32 = panel_height / 4;
+            while (y_face < (panel_height * 6) / 10) : (y_face += 1) {
+                var x: u32 = 0;
+                while (x < panel_width) : (x += 1) {
+                    const pixel = image.pixels[(y0 + y_face) * image.width + x0 + x];
+                    const red: i32 = @as(u8, @truncate(pixel >> 16));
+                    const green: i32 = @as(u8, @truncate(pixel >> 8));
+                    const blue: i32 = @as(u8, @truncate(pixel));
+                    if (red > green + 15 and red > blue + 15 and green + 25 > blue and
+                        red > 90 and red < 230 and green > 60 and blue > 40)
+                        face_peach += 1;
+                }
+            }
+            try std.testing.expect(face_peach > 8);
+            checked += 1;
+        }
+    }
+    try std.testing.expect(checked >= 2);
+
+    var sticker_edge: usize = 0;
+    row = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var y: u32 = 4;
+            while (y + 4 < panel_height) : (y += 1) {
+                var x: u32 = 4;
+                while (x + 4 < panel_width) : (x += 1) {
+                    const pixel = image.pixels[(y0 + y) * image.width + x0 + x];
+                    const red: i32 = @as(u8, @truncate(pixel >> 16));
+                    const green: i32 = @as(u8, @truncate(pixel >> 8));
+                    const blue: i32 = @as(u8, @truncate(pixel));
+                    if (red < 245 or green < 245 or blue < 245) continue;
+                    var body_ink = false;
+                    var room = false;
+                    var dy: i32 = -1;
+                    while (dy <= 1) : (dy += 1) {
+                        var dx: i32 = -1;
+                        while (dx <= 1) : (dx += 1) {
+                            if (dx == 0 and dy == 0) continue;
+                            const ny: u32 = @intCast(@as(i64, y0) + @as(i64, y) + dy);
+                            const nx: u32 = @intCast(@as(i64, x0) + @as(i64, x) + dx);
+                            const n = image.pixels[ny * image.width + nx];
+                            const nr: i32 = @as(u8, @truncate(n >> 16));
+                            const ng: i32 = @as(u8, @truncate(n >> 8));
+                            const nb: i32 = @as(u8, @truncate(n));
+                            const peach = nr > ng + 15 and nr > nb + 15 and ng + 25 > nb and
+                                nr > 90 and nr < 230 and ng > 60 and nb > 40;
+                            const tube = nr > 120 and nr > ng + 40 and nr > nb + 40 and ng < 90;
+                            const hair = nr > 40 and nr > ng + 20 and nr > nb + 20 and ng < 80 and nb < 50;
+                            const outline = @max(@max(nr, ng), nb) < 45;
+                            if (peach or tube or hair or outline) body_ink = true;
+                            const sky = nb > nr + 15 and nb > ng + 5 and nb > 80;
+                            const plant = ng > nr + 12 and ng > nb + 8 and ng > 70;
+                            const wood = nr > 70 and nr >= ng and ng + 10 >= nb and nr - nb > 20 and
+                                nr < 210 and ng < 160 and !peach and !tube;
+                            if (sky or plant or wood) room = true;
+                        }
+                    }
+                    if (body_ink and room) sticker_edge += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expect(sticker_edge < 20);
+}
+
+test "Anna Color tall balloon keeps her face clear" {
+    const gpa = std.testing.allocator;
+    const lines = [_]Line{
+        .{
+            .speaker = "anna color",
+            .text = "Great. The comic view feels much clearer now and the standing Color figures keep their faces visible even when the balloon needs several more lines of text than a short dest would allow without sliding.",
+        },
+    };
+    var image = try renderWithOptions(gpa, &lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try std.testing.expect(image.height >= panel_height);
+
+    const stride = panel_width + device_interstice;
+    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    var checked: usize = 0;
+    var col: u32 = 1;
+    while (col < cols) : (col += 1) {
+        const x0 = col * stride;
+        if (x0 + panel_width > image.width) continue;
+        var face_peach: usize = 0;
+        var high_red: usize = 0;
+        var y: u32 = panel_height / 4;
+        while (y < (panel_height * 6) / 10) : (y += 1) {
+            var x: u32 = 0;
+            while (x < panel_width) : (x += 1) {
+                const pixel = image.pixels[y * image.width + x0 + x];
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red > green + 15 and red > blue + 15 and green + 25 > blue and
+                    red > 90 and red < 230 and green > 60 and blue > 40)
+                    face_peach += 1;
+                if (red > 120 and red > green + 40 and red > blue + 40 and green < 90)
+                    high_red += 1;
+            }
+        }
+        if (face_peach + high_red < 20) continue;
+        // Dest paints after balloons on Color, so peach stays visible even
+        // when a docked cloud is taller than the dest gap.
+        try std.testing.expect(face_peach > 8);
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
+}
+
+test "Color cafe and apartment keep wood plants and sky" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-apartment.bgb"),
+    };
+    for (rooms) |data| {
+        var image = try bgb.decodeBackground(gpa, data);
+        defer image.deinit(gpa);
+        var brown: usize = 0;
+        var green: usize = 0;
+        var blue: usize = 0;
+        var purple: usize = 0;
+        for (image.pixels) |pixel| {
+            const red: i32 = @as(u8, @truncate(pixel >> 16));
+            const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+            const blue_ch: i32 = @as(u8, @truncate(pixel));
+            if (red == green_ch and green_ch == blue_ch) continue;
+            if (red > green_ch + 15 and red > blue_ch + 10 and green_ch > 40 and green_ch + 40 > blue_ch)
+                brown += 1;
+            if (green_ch > red + 15 and green_ch > blue_ch + 10)
+                green += 1;
+            if (blue_ch > red + 15 and blue_ch + 10 > green_ch)
+                blue += 1;
+            if (blue_ch + 10 > red and (blue_ch > green_ch + 20 or red > green_ch + 20) and
+                @abs(red - blue_ch) < 60)
+                purple += 1;
+        }
+        try std.testing.expect(brown > 80);
+        try std.testing.expect(green > 40);
+        try std.testing.expect(blue > 40);
+        try std.testing.expect(brown + green + blue > purple);
+    }
+}
+
+test "Color and whacky rooms do not package a paper sheet gutter" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/color-rainy-street.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-space-corridor.bgb"),
+        @embedFile("../assets/generated/whacky-arcade-planetarium.bgb"),
+        @embedFile("../assets/generated/whacky-asteroid-diner.bgb"),
+        @embedFile("../assets/generated/whacky-cloud-train-station.bgb"),
+        @embedFile("../assets/generated/whacky-cosmic-laundromat.bgb"),
+        @embedFile("../assets/generated/whacky-friendly-castle.bgb"),
+        @embedFile("../assets/generated/whacky-mushroom-village.bgb"),
+        @embedFile("../assets/generated/whacky-pinball-interior.bgb"),
+        @embedFile("../assets/generated/whacky-sky-island-market.bgb"),
+        @embedFile("../assets/generated/whacky-spaceship-bridge.bgb"),
+        @embedFile("../assets/generated/whacky-underwater-dome.bgb"),
+    };
+    for (rooms) |data| {
+        var image = try bgb.decodeBackground(gpa, data);
+        defer image.deinit(gpa);
+        try std.testing.expectEqual(@as(u32, 315), image.width);
+        try std.testing.expectEqual(@as(u32, 315), image.height);
+        var top: usize = 0;
+        var bot: usize = 0;
+        var left: usize = 0;
+        var right: usize = 0;
+        var x: u32 = 0;
+        while (x < image.width) : (x += 1) {
+            const t = image.pixels[x];
+            const b = image.pixels[(image.height - 1) * image.width + x];
+            const tr: u8 = @truncate(t >> 16);
+            const tg: u8 = @truncate(t >> 8);
+            const tb: u8 = @truncate(t);
+            const br: u8 = @truncate(b >> 16);
+            const bg_ch: u8 = @truncate(b >> 8);
+            const bb: u8 = @truncate(b);
+            if (tr >= 245 and tg >= 245 and tb >= 245) top += 1;
+            if (br >= 245 and bg_ch >= 245 and bb >= 245) bot += 1;
+        }
+        var y: u32 = 0;
+        while (y < image.height) : (y += 1) {
+            const l = image.pixels[y * image.width];
+            const r = image.pixels[y * image.width + image.width - 1];
+            const lr: u8 = @truncate(l >> 16);
+            const lg: u8 = @truncate(l >> 8);
+            const lb: u8 = @truncate(l);
+            const rr: u8 = @truncate(r >> 16);
+            const rg: u8 = @truncate(r >> 8);
+            const rb: u8 = @truncate(r);
+            if (lr >= 245 and lg >= 245 and lb >= 245) left += 1;
+            if (rr >= 245 and rg >= 245 and rb >= 245) right += 1;
+        }
+        try std.testing.expect(top * 10 < image.width * 9);
+        try std.testing.expect(bot * 10 < image.width * 9);
+        try std.testing.expect(left * 10 < image.height * 9);
+        try std.testing.expect(right * 10 < image.height * 9);
+    }
+}
+
+test "every Color default chrome portrait stays a standing silhouette" {
+    const gpa = std.testing.allocator;
+    const names = [_][]const u8{
+        "anna color",     "armando color", "bolo color",     "cro color",     "dan color",   "denise color",
+        "hugh color",     "jordan color",  "kevin color",    "kwensa color",  "lance color", "lynnea color",
+        "margaret color", "maynard color", "mike color",     "rebecca color", "sage color",  "scotty color",
+        "susan color",    "tiki color",    "tongtyed color", "xeno color",    "anna hd",     "armando hd",
+        "bolo hd",        "cro hd",        "dan hd",         "denise hd",     "hugh hd",     "jordan hd",
+        "kevin hd",       "kwensa hd",     "lance hd",       "lynnea hd",     "margaret hd", "maynard hd",
+        "mike hd",        "rebecca hd",    "sage hd",        "scotty hd",     "susan hd",    "tiki hd",
+        "tongtyed hd",    "xeno hd",
+    };
+    for (names) |name| {
+        const data = avatarByName(name) orelse return error.TestUnexpectedResult;
+        var portrait = try figure.chromePortrait(gpa, data);
+        defer portrait.deinit(gpa);
+        try std.testing.expect(portrait.height >= 120);
+        try std.testing.expect(portrait.height + 16 > portrait.width);
+        var colorful = false;
+        for (portrait.pixels) |pixel| {
+            if (pixel >> 24 == 0) continue;
+            const red: u8 = @truncate(pixel >> 16);
+            const green: u8 = @truncate(pixel >> 8);
+            const blue: u8 = @truncate(pixel);
+            if (red != green or green != blue) {
+                colorful = true;
+                break;
+            }
+        }
+        try std.testing.expect(colorful);
+    }
+}
+
+test "testdata anna mapping is unchanged for Microsoft goldens" {
+    const testdata = avatarByName("anna") orelse return error.TestUnexpectedResult;
+    const color = avatarByName("anna color") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(testdata.ptr != color.ptr);
+}
+
+test "Color wrap story panels fill the bezel without paper bleed" {
+    const gpa = std.testing.allocator;
+    const lines = [_]Line{
+        .{ .speaker = "anna color", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "anna color", .text = "A repeated speaker starts a fresh panel that must still show her face." },
+    };
+    var image = try renderWithOptions(gpa, &lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+
+    const stride = panel_width + device_interstice;
+    const row_stride = panel_height + device_interstice;
+    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    const rows = if (image.height == panel_height) 1 else image.height / row_stride + 1;
+    var checked: usize = 0;
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var wood: usize = 0;
+            var y_scan: u32 = 8;
+            while (y_scan + 8 < panel_height) : (y_scan += 1) {
+                var x_scan: u32 = 8;
+                while (x_scan + 8 < panel_width) : (x_scan += 1) {
+                    const pixel = image.pixels[(y0 + y_scan) * image.width + x0 + x_scan];
+                    const red: i32 = @as(u8, @truncate(pixel >> 16));
+                    const green: i32 = @as(u8, @truncate(pixel >> 8));
+                    const blue: i32 = @as(u8, @truncate(pixel));
+                    if (red > 70 and red >= green and green + 10 >= blue and red - blue > 20 and
+                        red < 210 and green < 160)
+                        wood += 1;
+                }
+            }
+            if (wood < 40) continue;
+            var paper: usize = 0;
+            var inset: u32 = 1;
+            while (inset <= 3) : (inset += 1) {
+                var x: u32 = 8;
+                while (x + 8 < panel_width) : (x += 1) {
+                    const bottom = image.pixels[(y0 + panel_height - 1 - inset) * image.width + x0 + x];
+                    const red: u8 = @truncate(bottom >> 16);
+                    const green: u8 = @truncate(bottom >> 8);
+                    const blue: u8 = @truncate(bottom);
+                    if (red >= 248 and green >= 248 and blue >= 248) paper += 1;
+                }
+                var y: u32 = 40;
+                while (y + 40 < panel_height) : (y += 1) {
+                    const left = image.pixels[(y0 + y) * image.width + x0 + inset];
+                    const right = image.pixels[(y0 + y) * image.width + x0 + panel_width - 1 - inset];
+                    inline for (.{ left, right }) |edge| {
+                        const red: u8 = @truncate(edge >> 16);
+                        const green: u8 = @truncate(edge >> 8);
+                        const blue: u8 = @truncate(edge);
+                        if (red >= 248 and green >= 248 and blue >= 248) paper += 1;
+                    }
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 0), paper);
+            checked += 1;
+        }
+    }
+    try std.testing.expect(checked >= 2);
+}
+
+test "Color apartment and cafe drop the next-panel sheet sliver" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-cafe.bgb"),
+    };
+    for (rooms) |encoded| {
+        var image = try bgb.decodeBackground(gpa, encoded);
+        defer image.deinit(gpa);
+        try std.testing.expectEqual(@as(u32, 315), image.width);
+        try std.testing.expectEqual(@as(u32, 315), image.height);
+
+        var wood_count: usize = 0;
+        var sky_count: usize = 0;
+        var y: u32 = image.height - 16;
+        while (y < image.height) : (y += 1) {
+            var x: u32 = 0;
+            while (x < image.width) : (x += 1) {
+                const pixel = image.pixels[y * image.width + x];
+                const red: u8 = @truncate(pixel >> 16);
+                const green: u8 = @truncate(pixel >> 8);
+                const blue: u8 = @truncate(pixel);
+                if (red < 95 and green > 115 and blue > 155)
+                    sky_count += 1
+                else if (red > 105 and green > 70 and blue < 90)
+                    wood_count += 1;
+            }
+        }
+        try std.testing.expect(wood_count > 80);
+        try std.testing.expect(wood_count > sky_count * 4);
+        try std.testing.expect(sky_count < 80);
+    }
+}
+
+const LeftoverFaceKind = enum { yellow_or_cool, peach_or_cool, yellow, cool, peach_or_yellow, green, cool_or_brown };
+
+fn leftoverFacePixel(pixel: u32, kind: LeftoverFaceKind) bool {
+    const red: i32 = @as(u8, @truncate(pixel >> 16));
+    const green: i32 = @as(u8, @truncate(pixel >> 8));
+    const blue: i32 = @as(u8, @truncate(pixel));
+    if (red >= 245 and green >= 245 and blue >= 245) return false;
+    const yellow = red > 180 and green > 160 and blue < 90 and red > blue + 40;
+    const cool = blue > red + 15 and blue + 10 > green;
+    const peach = red > 160 and green > 110 and blue > 80 and red > blue + 20;
+    const green_ink = green > red + 15 and green > blue + 10;
+    const brown = red > 40 and green > 20 and blue > 10 and red > green + 10 and green > blue and red < 160;
+    return switch (kind) {
+        .yellow_or_cool => yellow or cool,
+        .peach_or_cool => peach or cool,
+        .yellow => yellow,
+        .cool => cool,
+        .peach_or_yellow => peach or yellow,
+        .green => green_ink,
+        .cool_or_brown => cool or brown,
+    };
+}
+
+fn leftoverStoryFaceHits(image: Image, kind: LeftoverFaceKind) !void {
+    const stride = panel_width + device_interstice;
+    const cols = if (stride == 0) 1 else image.width / stride + 1;
+    var checked: usize = 0;
+    var col: u32 = 1;
+    while (col < cols) : (col += 1) {
+        const x0 = col * stride;
+        if (x0 + panel_width > image.width) continue;
+        var face: usize = 0;
+        var y: u32 = panel_height / 4;
+        while (y < (panel_height * 6) / 10) : (y += 1) {
+            var x: u32 = 0;
+            while (x < panel_width) : (x += 1) {
+                if (leftoverFacePixel(image.pixels[y * image.width + x0 + x], kind)) face += 1;
+            }
+        }
+        if (face < 20) continue;
+        try std.testing.expect(face > 40);
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
+}
+
+fn leftoverDestXorHits(image: Image, empty: Image) !void {
+    try leftoverDestXorHitsMode(image, empty, false);
+}
+
+fn leftoverDestXorEachStoryPanel(image: Image, empty: Image) !void {
+    try leftoverDestXorHitsMode(image, empty, true);
+}
+
+fn leftoverDestXorHitsMode(image: Image, empty: Image, each_panel: bool) !void {
+    try std.testing.expectEqual(empty.width, image.width);
+    try std.testing.expectEqual(empty.height, image.height);
+    const stride = panel_width + device_interstice;
+    const row_stride = panel_height + device_interstice;
+    const cols = if (stride == 0) 1 else (image.width + stride - 1) / stride;
+    const rows = if (row_stride == 0) 1 else (image.height + row_stride - 1) / row_stride;
+    var dest_chrom: usize = 0;
+    var dest_min: u32 = std.math.maxInt(u32);
+    var dest_max: u32 = 0;
+    var checked: usize = 0;
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var panel_chrom: usize = 0;
+            var panel_min: u32 = std.math.maxInt(u32);
+            var panel_max: u32 = 0;
+            var y: u32 = 0;
+            while (y < panel_height) : (y += 1) {
+                var x: u32 = 0;
+                while (x < panel_width) : (x += 1) {
+                    const i = (y0 + y) * image.width + x0 + x;
+                    if (image.pixels[i] == empty.pixels[i]) continue;
+                    panel_min = @min(panel_min, y);
+                    panel_max = @max(panel_max, y);
+                    dest_min = @min(dest_min, y0 + y);
+                    dest_max = @max(dest_max, y0 + y);
+                    const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
+                    const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
+                    const blue: i32 = @as(u8, @truncate(image.pixels[i]));
+                    const mx = @max(red, @max(green, blue));
+                    const mn = @min(red, @min(green, blue));
+                    if (mx > mn + 18 and mx > 40) {
+                        panel_chrom += 1;
+                        dest_chrom += 1;
+                    }
+                }
+            }
+            if (panel_max <= panel_min) continue;
+            if (each_panel) {
+                try std.testing.expect(panel_chrom > 200);
+                try std.testing.expect(panel_max > panel_min + 140);
+            }
+            checked += 1;
+        }
+    }
+    try std.testing.expect(checked >= 1);
+    try std.testing.expect(dest_chrom > 200);
+    try std.testing.expect(dest_max > dest_min + 140);
+}
+
+const LeftoverDestXorBelowBalloonHits = struct {
+    dest_hi: usize,
+    dest_lo: usize,
+};
+
+fn leftoverDestXorBelowBalloonHits(image: Image, empty: Image) LeftoverDestXorBelowBalloonHits {
+    const stride = panel_width + device_interstice;
+    const cols = if (stride == 0) 1 else (image.width + stride - 1) / stride;
+    var dest_hi: usize = 0;
+    var dest_lo: usize = 0;
+    var col: u32 = 1;
+    while (col < cols) : (col += 1) {
+        const x0 = col * stride;
+        if (x0 + panel_width > image.width) continue;
+        var y: u32 = 0;
+        while (y < panel_height) : (y += 1) {
+            var x: u32 = 0;
+            while (x < panel_width) : (x += 1) {
+                const i = y * image.width + x0 + x;
+                if (image.pixels[i] == empty.pixels[i]) continue;
+                const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
+                const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
+                const blue: i32 = @as(u8, @truncate(image.pixels[i]));
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx <= mn + 18 or mx <= 40) continue;
+                if (y < 40) dest_lo += 1;
+                if (y > 100) dest_hi += 1;
+            }
+        }
+    }
+    return .{ .dest_hi = dest_hi, .dest_lo = dest_lo };
+}
+
+fn leftoverDestXorBelowBalloon(image: Image, empty: Image) !void {
+    // Dest-after-balloon keeps leftover dest paint visible. Dest chromatic
+    // ink must live in the standing band, not smash into the balloon cloud.
+    try leftoverDestXorHits(image, empty);
+    try std.testing.expectEqual(empty.width, image.width);
+    const hits = leftoverDestXorBelowBalloonHits(image, empty);
+    try std.testing.expect(hits.dest_hi > 200);
+    try std.testing.expect(hits.dest_hi > hits.dest_lo * 2);
+}
+
+fn leftoverWrapContinuationPaperBleed(image: Image) !usize {
+    const stride = panel_width + device_interstice;
+    const row_stride = panel_height + device_interstice;
+    const cols = if (stride == 0) 1 else (image.width + stride - 1) / stride;
+    const rows = if (row_stride == 0) 1 else (image.height + row_stride - 1) / row_stride;
+    var checked: usize = 0;
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u32 = 0;
+        while (col < cols) : (col += 1) {
+            if (row == 0 and col == 0) continue;
+            const x0 = col * stride;
+            const y0 = row * row_stride;
+            if (x0 + panel_width > image.width or y0 + panel_height > image.height) continue;
+            var interior: usize = 0;
+            var interior_paper: usize = 0;
+            var y_scan: u32 = 8;
+            while (y_scan + 8 < panel_height) : (y_scan += 1) {
+                var x_scan: u32 = 8;
+                while (x_scan + 8 < panel_width) : (x_scan += 1) {
+                    const pixel = image.pixels[(y0 + y_scan) * image.width + x0 + x_scan];
+                    const red: u8 = @truncate(pixel >> 16);
+                    const green: u8 = @truncate(pixel >> 8);
+                    const blue: u8 = @truncate(pixel);
+                    interior += 1;
+                    if (red >= 248 and green >= 248 and blue >= 248) interior_paper += 1;
+                }
+            }
+            if (interior_paper * 10 >= interior * 9) continue;
+            var paper: usize = 0;
+            var inset: u32 = 1;
+            while (inset <= 3) : (inset += 1) {
+                var x: u32 = 8;
+                while (x + 8 < panel_width) : (x += 1) {
+                    const bottom = image.pixels[(y0 + panel_height - 1 - inset) * image.width + x0 + x];
+                    const red: u8 = @truncate(bottom >> 16);
+                    const green: u8 = @truncate(bottom >> 8);
+                    const blue: u8 = @truncate(bottom);
+                    if (red >= 248 and green >= 248 and blue >= 248) paper += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 0), paper);
+            checked += 1;
+        }
+    }
+    return checked;
+}
+
+test "leftover Color dests keep pose-authored face color under a tall balloon" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh color", .kind = .yellow_or_cool },
+        .{ .speaker = "mike color", .kind = .peach_or_cool },
+        .{ .speaker = "sage color", .kind = .yellow },
+        .{ .speaker = "maynard color", .kind = .cool },
+        .{ .speaker = "cro color", .kind = .peach_or_yellow },
+        .{ .speaker = "scotty color", .kind = .green },
+        .{ .speaker = "lynnea color", .kind = .cool_or_brown },
+    };
+    const tall = "Great. The comic view feels much clearer now and the standing Color figures keep their faces visible even when the balloon needs several more lines of text than a short dest would allow without sliding.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "leftover Color continuation keeps dest face color in the panel" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh color", .kind = .yellow_or_cool },
+        .{ .speaker = "maynard color", .kind = .cool },
+        .{ .speaker = "cro color", .kind = .peach_or_yellow },
+        .{ .speaker = "mike color", .kind = .peach_or_cool },
+    };
+    for (cases) |case| {
+        const lines = [_]Line{
+            .{ .speaker = case.speaker, .text = "Great. The comic view feels much clearer now." },
+            .{ .speaker = case.speaker, .text = "A repeated speaker starts a fresh panel that must still show the dest face." },
+        };
+        var image = try renderWithOptions(gpa, &lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "leftover Color dests on unused rooms fill the bezel without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-rainy-street.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/color-space-corridor.bgb"),
+    };
+    for (rooms) |room| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = "hugh color", .text = "Hello from leftover dest." }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        const stride = panel_width + device_interstice;
+        const cols = if (stride == 0) 1 else image.width / stride + 1;
+        var checked: usize = 0;
+        var col: u32 = 1;
+        while (col < cols) : (col += 1) {
+            const x0 = col * stride;
+            if (x0 + panel_width > image.width) continue;
+            var interior: usize = 0;
+            var interior_paper: usize = 0;
+            var y_scan: u32 = 8;
+            while (y_scan + 8 < panel_height) : (y_scan += 1) {
+                var x_scan: u32 = 8;
+                while (x_scan + 8 < panel_width) : (x_scan += 1) {
+                    const pixel = image.pixels[y_scan * image.width + x0 + x_scan];
+                    const red: u8 = @truncate(pixel >> 16);
+                    const green: u8 = @truncate(pixel >> 8);
+                    const blue: u8 = @truncate(pixel);
+                    interior += 1;
+                    if (red >= 248 and green >= 248 and blue >= 248) interior_paper += 1;
+                }
+            }
+            if (interior_paper * 10 >= interior * 9) continue;
+            var paper: usize = 0;
+            var inset: u32 = 1;
+            while (inset <= 3) : (inset += 1) {
+                var x: u32 = 8;
+                while (x + 8 < panel_width) : (x += 1) {
+                    const bottom = image.pixels[(panel_height - 1 - inset) * image.width + x0 + x];
+                    const red: u8 = @truncate(bottom >> 16);
+                    const green: u8 = @truncate(bottom >> 8);
+                    const blue: u8 = @truncate(bottom);
+                    if (red >= 248 and green >= 248 and blue >= 248) paper += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 0), paper);
+            checked += 1;
+        }
+        try std.testing.expect(checked >= 1);
+    }
+}
+
+test "leftover Color laugh and sad dests keep pose-authored face color" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, text: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh color", .text = "ha ha that is hilarious leftover laugh", .kind = .yellow_or_cool },
+        .{ .speaker = "maynard color", .text = "oh no that is so sad leftover", .kind = .cool },
+        .{ .speaker = "cro color", .text = "wow leftover wave hello there", .kind = .peach_or_yellow },
+        .{ .speaker = "sage color", .text = "ha ha leftover laugh", .kind = .yellow },
+        .{ .speaker = "scotty color", .text = "oh no leftover sad", .kind = .green },
+    };
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = case.text }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "unlocked leftover Color dests keep pose-authored face color under a tall balloon" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "rebecca color", .kind = .peach_or_cool },
+        .{ .speaker = "dan color", .kind = .peach_or_cool },
+        .{ .speaker = "jordan color", .kind = .peach_or_cool },
+        .{ .speaker = "lance color", .kind = .yellow_or_cool },
+        .{ .speaker = "susan color", .kind = .cool },
+        .{ .speaker = "xeno color", .kind = .cool },
+        .{ .speaker = "armando color", .kind = .peach_or_cool },
+        .{ .speaker = "bolo color", .kind = .peach_or_cool },
+        .{ .speaker = "margaret color", .kind = .peach_or_cool },
+        .{ .speaker = "kwensa color", .kind = .cool_or_brown },
+        .{ .speaker = "tongtyed color", .kind = .peach_or_cool },
+    };
+    const tall = "Great. The comic view feels much clearer now and the standing Color figures keep their faces visible even when the balloon needs several more lines of text than a short dest would allow without sliding.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "leftover Color thought and whisper dests keep pose-authored face color" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind, modes: u16 }{
+        .{ .speaker = "maynard color", .kind = .cool, .modes = original_page.bm_think },
+        .{ .speaker = "hugh color", .kind = .yellow_or_cool, .modes = original_page.bm_think },
+        .{ .speaker = "cro color", .kind = .peach_or_yellow, .modes = original_page.bm_whisper },
+        .{ .speaker = "mike color", .kind = .peach_or_cool, .modes = original_page.bm_whisper },
+        .{ .speaker = "sage color", .kind = .yellow, .modes = original_page.bm_action },
+    };
+    const text = "Great. The comic view feels much clearer now and the standing dest must stay visible under this leftover balloon.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = text, .modes = case.modes }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "two leftover Color speakers keep dest faces on the wrap page" {
+    const gpa = std.testing.allocator;
+    const lines = [_]Line{
+        .{ .speaker = "hugh color", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "mike color", .text = "Standing dests still keep their faces visible." },
+    };
+    var image = try renderWithOptions(gpa, &lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try leftoverStoryFaceHits(image, .yellow_or_cool);
+    try leftoverStoryFaceHits(image, .peach_or_cool);
+}
+
+test "leftover Color talk-to dests keep pose-authored face color" {
+    const gpa = std.testing.allocator;
+    const mike = [_]Participant{.{ .identity = "mike", .avatar = "mike color" }};
+    var image = try renderWithOptions(gpa, &.{.{
+        .speaker = "hugh color",
+        .text = "Great. The leftover dest talking to another leftover dest must keep both faces visible.",
+        .talk_targets = &mike,
+    }}, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+    });
+    defer image.deinit(gpa);
+    try leftoverStoryFaceHits(image, .yellow_or_cool);
+    try leftoverStoryFaceHits(image, .peach_or_cool);
+}
+
+test "leftover HD dests keep pose-authored face color under a tall balloon" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { speaker: []const u8, kind: LeftoverFaceKind }{
+        .{ .speaker = "hugh hd", .kind = .yellow_or_cool },
+        .{ .speaker = "maynard hd", .kind = .cool },
+        .{ .speaker = "cro hd", .kind = .peach_or_yellow },
+        .{ .speaker = "rebecca hd", .kind = .peach_or_cool },
+        .{ .speaker = "xeno hd", .kind = .cool },
+        .{ .speaker = "jordan hd", .kind = .peach_or_cool },
+    };
+    const tall = "Great. The comic view feels much clearer now and the standing HD figures keep their faces visible even when the balloon needs several more lines of text.";
+    for (cases) |case| {
+        var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = @embedFile("../assets/generated/color-cafe.bgb"),
+        });
+        defer image.deinit(gpa);
+        try leftoverStoryFaceHits(image, case.kind);
+    }
+}
+
+test "leftover dests keep pose-authored face color on unused Color and HD rooms" {
+    // leftoverFacePixel on unused Color rooms also matches park/rooftop sky.
+    // Dest-only XOR against testdata 1-bit anna keeps the room constant and
+    // counts leftover dest chromatic ink, including cool dests on sky rooms.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{
+        "hugh color",     "cro color",      "maynard color", "rebecca color", "xeno color",    "jordan color",
+        "dan color",      "lance color",    "susan color",   "armando color", "bolo color",    "margaret color",
+        "kwensa color",   "tongtyed color", "mike color",    "sage color",    "scotty color",  "lynnea color",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try std.testing.expectEqual(empty.width, image.width);
+            try std.testing.expectEqual(empty.height, image.height);
+            const stride = panel_width + device_interstice;
+            const cols = if (stride == 0) 1 else image.width / stride + 1;
+            var dest_chrom: usize = 0;
+            var dest_min: u32 = std.math.maxInt(u32);
+            var dest_max: u32 = 0;
+            var col: u32 = 1;
+            while (col < cols) : (col += 1) {
+                const x0 = col * stride;
+                if (x0 + panel_width > image.width) continue;
+                var y: u32 = 0;
+                while (y < panel_height) : (y += 1) {
+                    var x: u32 = 0;
+                    while (x < panel_width) : (x += 1) {
+                        const i = y * image.width + x0 + x;
+                        if (image.pixels[i] == empty.pixels[i]) continue;
+                        dest_min = @min(dest_min, y);
+                        dest_max = @max(dest_max, y);
+                        const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
+                        const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
+                        const blue: i32 = @as(u8, @truncate(image.pixels[i]));
+                        const mx = @max(red, @max(green, blue));
+                        const mn = @min(red, @min(green, blue));
+                        if (mx > mn + 18 and mx > 40) dest_chrom += 1;
+                    }
+                }
+            }
+            try std.testing.expect(dest_chrom > 200);
+            try std.testing.expect(dest_max > dest_min + 140);
+        }
+    }
+}
+
+test "leftover dests keep dest-only paint on remaining unused Color HD and whacky rooms" {
+    // Boardwalk, school hall, campsite, space corridor, leftover HD rooms, and
+    // leftover whacky rooms were dest-XOR measured after ec0d49d. dest-only
+    // paint must stay visible; leftoverFacePixel also matches sky/neon.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/color-space-corridor.bgb"),
+        @embedFile("../assets/generated/hd-rooftop.bgb"),
+        @embedFile("../assets/generated/hd-park.bgb"),
+        @embedFile("../assets/generated/hd-library.bgb"),
+        @embedFile("../assets/generated/whacky-asteroid-diner.bgb"),
+        @embedFile("../assets/generated/whacky-sky-island-market.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "armando color", "margaret color" };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try std.testing.expectEqual(empty.width, image.width);
+            try std.testing.expectEqual(empty.height, image.height);
+            const stride = panel_width + device_interstice;
+            const cols = if (stride == 0) 1 else image.width / stride + 1;
+            var dest_chrom: usize = 0;
+            var dest_min: u32 = std.math.maxInt(u32);
+            var dest_max: u32 = 0;
+            var col: u32 = 1;
+            while (col < cols) : (col += 1) {
+                const x0 = col * stride;
+                if (x0 + panel_width > image.width) continue;
+                var y: u32 = 0;
+                while (y < panel_height) : (y += 1) {
+                    var x: u32 = 0;
+                    while (x < panel_width) : (x += 1) {
+                        const i = y * image.width + x0 + x;
+                        if (image.pixels[i] == empty.pixels[i]) continue;
+                        dest_min = @min(dest_min, y);
+                        dest_max = @max(dest_max, y);
+                        const red: i32 = @as(u8, @truncate(image.pixels[i] >> 16));
+                        const green: i32 = @as(u8, @truncate(image.pixels[i] >> 8));
+                        const blue: i32 = @as(u8, @truncate(image.pixels[i]));
+                        const mx = @max(red, @max(green, blue));
+                        const mn = @min(red, @min(green, blue));
+                        if (mx > mn + 18 and mx > 40) dest_chrom += 1;
+                    }
+                }
+            }
+            try std.testing.expect(dest_chrom > 200);
+            try std.testing.expect(dest_max > dest_min + 140);
+        }
+    }
+}
+
+test "leftover HD dests keep dest-only paint on Color and HD rooms" {
+    // Leftover HD dests use the same pose-authored paint as Color. dest-XOR
+    // against testdata anna keeps unused Color sky out of the leftover count.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{
+        "hugh hd",     "cro hd",     "maynard hd", "rebecca hd", "xeno hd",  "jordan hd",
+        "dan hd",      "armando hd", "mike hd",    "sage hd",    "scotty hd", "lynnea hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+}
+
+test "leftover dest laugh and sad dests keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color", "cro color" };
+    const texts = [_][]const u8{ "ha ha leftover laugh that is hilarious", "oh no leftover sad that is terrible" };
+    for (rooms) |room| {
+        for (texts) |text| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            for (dests) |dest| {
+                var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = text }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dests keep dest-only paint on leftover HD and whacky rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-school-hall.bgb"),
+        @embedFile("../assets/generated/hd-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-campsite.bgb"),
+        @embedFile("../assets/generated/hd-space-corridor.bgb"),
+        @embedFile("../assets/generated/whacky-spaceship-bridge.bgb"),
+        @embedFile("../assets/generated/whacky-mushroom-village.bgb"),
+        @embedFile("../assets/generated/whacky-pinball-interior.bgb"),
+        @embedFile("../assets/generated/whacky-friendly-castle.bgb"),
+        @embedFile("../assets/generated/whacky-underwater-dome.bgb"),
+        @embedFile("../assets/generated/whacky-cosmic-laundromat.bgb"),
+        @embedFile("../assets/generated/whacky-cloud-train-station.bgb"),
+        @embedFile("../assets/generated/whacky-arcade-planetarium.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color" };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+}
+
+test "leftover dest thought whisper and talk-to dests keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const cases = [_]struct { speaker: []const u8, modes: u16 }{
+        .{ .speaker = "hugh color", .modes = original_page.bm_think },
+        .{ .speaker = "maynard color", .modes = original_page.bm_think },
+        .{ .speaker = "cro color", .modes = original_page.bm_whisper },
+        .{ .speaker = "sage color", .modes = original_page.bm_action },
+    };
+    const text = "Great. The leftover dest must stay visible under this leftover balloon.";
+    for (rooms) |room| {
+        for (cases) |case| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text, .modes = case.modes }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = text, .modes = case.modes }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+
+    const mike = [_]Participant{.{ .identity = "mike", .avatar = "mike color" }};
+    const anna_target = [_]Participant{.{ .identity = "bob", .avatar = "anna" }};
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{
+            .speaker = "anna",
+            .text = "Great. The leftover dest talking to another leftover dest must keep both faces visible.",
+            .talk_targets = &anna_target,
+        }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        var image = try renderWithOptions(gpa, &.{.{
+            .speaker = "hugh color",
+            .text = "Great. The leftover dest talking to another leftover dest must keep both faces visible.",
+            .talk_targets = &mike,
+        }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        try leftoverDestXorHits(image, empty);
+    }
+}
+
+test "two leftover speakers keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const lines = [_]Line{
+        .{ .speaker = "hugh color", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "mike color", .text = "Standing dests still keep their faces visible." },
+    };
+    const empty_lines = [_]Line{
+        .{ .speaker = "anna", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "anna", .text = "Standing dests still keep their faces visible." },
+    };
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &empty_lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        var image = try renderWithOptions(gpa, &lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        try leftoverDestXorHits(image, empty);
+    }
+}
+
+test "leftover HD dest laugh and sad dests keep dest-only paint" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh hd", "xeno hd", "jordan hd", "cro hd" };
+    const texts = [_][]const u8{ "ha ha leftover laugh that is hilarious", "oh no leftover sad that is terrible" };
+    for (rooms) |room| {
+        for (texts) |text| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            for (dests) |dest| {
+                var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = text }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest wrap continuation keeps dest-only paint on each story panel" {
+    // 2-col Color product pages place the continuation dest on row 2, col 0.
+    // The dest-XOR helper used to scan only row 0 col>=1.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "rebecca color" };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{
+            .{ .speaker = "anna", .text = first },
+            .{ .speaker = "anna", .text = second },
+        }, .{
+            .page_columns = 2,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorEachStoryPanel(image, empty);
+        }
+    }
+}
+
+test "leftover dest shouting dests keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color" };
+    const shout = "WATCH OUT LEFTOVER DEST SHOUTING NOW";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = shout }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = shout }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+}
+
+test "leftover HD dest wrap continuation keeps dest-only paint on each story panel" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh hd", "xeno hd", "jordan hd", "rebecca hd" };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{
+            .{ .speaker = "anna", .text = first },
+            .{ .speaker = "anna", .text = second },
+        }, .{
+            .page_columns = 2,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorEachStoryPanel(image, empty);
+        }
+    }
+}
+
+test "leftover dests on the Color product strip keep dest-only paint on each story panel" {
+    const gpa = std.testing.allocator;
+    const room = @embedFile("../assets/generated/color-apartment.bgb");
+    const color_lines = [_]Line{
+        .{ .speaker = "anna color", .text = "The title panel starts every comic." },
+        .{ .speaker = "kevin color", .text = "Different speakers may share a panel." },
+        .{ .speaker = "anna color", .text = "A repeated speaker starts a fresh panel." },
+        .{ .speaker = "mike color", .text = "Two columns and source-sized interstices." },
+        .{ .speaker = "rebecca color", .text = "Masks and backdrops follow the old draw order." },
+        .{ .speaker = "xeno color", .text = "The source renderer returns one complete page." },
+    };
+    const empty_lines = [_]Line{
+        .{ .speaker = "anna", .text = "The title panel starts every comic." },
+        .{ .speaker = "kevin", .text = "Different speakers may share a panel." },
+        .{ .speaker = "anna", .text = "A repeated speaker starts a fresh panel." },
+        .{ .speaker = "mike", .text = "Two columns and source-sized interstices." },
+        .{ .speaker = "rebecca", .text = "Masks and backdrops follow the old draw order." },
+        .{ .speaker = "xeno", .text = "The source renderer returns one complete page." },
+    };
+    var empty = try renderWithOptions(gpa, &empty_lines, .{ .backdrop = room });
+    defer empty.deinit(gpa);
+    var image = try renderWithOptions(gpa, &color_lines, .{ .backdrop = room });
+    defer image.deinit(gpa);
+    try leftoverDestXorEachStoryPanel(image, empty);
+}
+
+test "remaining leftover HD dests keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{
+        "bolo hd", "lance hd", "susan hd", "margaret hd", "kwensa hd", "tongtyed hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+}
+
+test "leftover dests speaking the conversation UI lines keep dest-only paint" {
+    // drawComicBuffer remaps leftover dests via colorCounterpart and renders
+    // with comic_columns=4 plus reserve_page_columns on the selected room.
+    const gpa = std.testing.allocator;
+    const room = @embedFile("../assets/generated/color-cafe.bgb");
+    const color_lines = [_]Line{
+        .{ .speaker = "armando color", .text = "Welcome to #root. The new studio is ready." },
+        .{ .speaker = "anna color", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "rebecca color", .text = "Color portraits should stay faces, not smashed bodies." },
+        .{ .speaker = "kevin color", .text = "Every default character now keeps its color." },
+    };
+    const empty_lines = [_]Line{
+        .{ .speaker = "anna", .text = "Welcome to #root. The new studio is ready." },
+        .{ .speaker = "anna", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "anna", .text = "Color portraits should stay faces, not smashed bodies." },
+        .{ .speaker = "anna", .text = "Every default character now keeps its color." },
+    };
+    var empty = try renderWithOptions(gpa, &empty_lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = room,
+    });
+    defer empty.deinit(gpa);
+    var image = try renderWithOptions(gpa, &color_lines, .{
+        .page_columns = 4,
+        .reserve_page_columns = true,
+        .backdrop = room,
+    });
+    defer image.deinit(gpa);
+    try leftoverDestXorEachStoryPanel(image, empty);
+}
+
+test "leftover dest wave dests keep dest-only paint on unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color" };
+    const wave = "Hello leftover dest wave from this unused room.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = wave }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = wave }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorHits(image, empty);
+        }
+    }
+}
+
+test "leftover dest emotion-wheel surprised and angry dests keep dest-only paint" {
+    const gpa = std.testing.allocator;
+    const emotion_mod = @import("emotion.zig");
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color", "hugh hd", "xeno hd" };
+    const moods = [_]emotion_mod.Emotion{ .surprised, .angry };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            const dest_avb = avatarByName(dest) orelse return error.TestUnexpectedResult;
+            for (moods) |mood| {
+                const pose = try figure.poseStateForEmotion(gpa, dest_avb, mood, 255);
+                var image = try renderWithOptions(gpa, &.{.{
+                    .speaker = dest,
+                    .text = tall,
+                    .pose_state = pose,
+                }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest emotion-wheel happy coy and bored dests keep dest-only paint" {
+    const gpa = std.testing.allocator;
+    const emotion_mod = @import("emotion.zig");
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color", "hugh hd", "xeno hd" };
+    const moods = [_]emotion_mod.Emotion{ .happy, .coy, .bored };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            const dest_avb = avatarByName(dest) orelse return error.TestUnexpectedResult;
+            for (moods) |mood| {
+                const pose = try figure.poseStateForEmotion(gpa, dest_avb, mood, 255);
+                var image = try renderWithOptions(gpa, &.{.{
+                    .speaker = dest,
+                    .text = tall,
+                    .pose_state = pose,
+                }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest gesture-wheel point and shrug dests keep dest-only paint" {
+    const gpa = std.testing.allocator;
+    const emotion_mod = @import("emotion.zig");
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color", "hugh hd", "xeno hd" };
+    const moods = [_]emotion_mod.Emotion{ .point_other, .point_self, .double_point, .shrug };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            const dest_avb = avatarByName(dest) orelse return error.TestUnexpectedResult;
+            for (moods) |mood| {
+                const pose = try figure.poseStateForEmotion(gpa, dest_avb, mood, 255);
+                var image = try renderWithOptions(gpa, &.{.{
+                    .speaker = dest,
+                    .text = tall,
+                    .pose_state = pose,
+                }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest walk gestures keep dest-only paint" {
+    const gpa = std.testing.allocator;
+    const emotion_mod = @import("emotion.zig");
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color", "hugh hd", "xeno hd" };
+    const moods = [_]emotion_mod.Emotion{ .walk_three_quarter_rear, .walk_side, .walk_three_quarter_front };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            const dest_avb = avatarByName(dest) orelse return error.TestUnexpectedResult;
+            for (moods) |mood| {
+                const pose = try figure.poseStateForEmotion(gpa, dest_avb, mood, 255);
+                var image = try renderWithOptions(gpa, &.{.{
+                    .speaker = dest,
+                    .text = tall,
+                    .pose_state = pose,
+                }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorHits(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest dests stay below the balloon with dest-only paint" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "rebecca color", "armando color", "sage color" };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorBelowBalloon(image, empty);
+        }
+    }
+}
+
+test "leftover dest wrap continuation fills the bezel without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-apartment.bgb"),
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "rebecca color" };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            const checked = try leftoverWrapContinuationPaperBleed(image);
+            try std.testing.expect(checked >= 2);
+        }
+    }
+}
+
+test "remaining leftover dest dests stay below the balloon on unused rooms" {
+    // dests/rooms not in the park/hd-cafe dest-below-balloon lock.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{
+        "bolo color", "lance color", "susan color", "dan color", "mike color",
+        "lynnea color", "scotty color", "kwensa color", "tongtyed color",
+        "maynard color", "cro color", "margaret color",
+        "bolo hd", "lance hd", "susan hd", "dan hd", "mike hd", "lynnea hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorBelowBalloon(image, empty);
+        }
+    }
+}
+
+test "remaining leftover dest wrap continuation fills the bezel without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{
+        "bolo color", "lance color", "susan color", "mike color", "cro color", "maynard color",
+        "bolo hd", "lance hd", "susan hd",
+    };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            const checked = try leftoverWrapContinuationPaperBleed(image);
+            try std.testing.expect(checked >= 2);
+        }
+    }
+}
+
+test "leftover dest dests stay below the balloon on leftover unused rooms" {
+    // dests/rooms not in the cafe/rooftop/library/apartment dest-below-balloon lock.
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/color-space-corridor.bgb"),
+        @embedFile("../assets/generated/color-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-rooftop.bgb"),
+        @embedFile("../assets/generated/hd-park.bgb"),
+        @embedFile("../assets/generated/hd-library.bgb"),
+        @embedFile("../assets/generated/hd-boardwalk.bgb"),
+    };
+    const dests = [_][]const u8{
+        "hugh color", "xeno color", "jordan color", "bolo color", "lance color",
+        "susan color", "maynard color", "cro color", "bolo hd", "lance hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorBelowBalloon(image, empty);
+        }
+    }
+}
+
+test "leftover dest wrap continuation fills leftover unused rooms without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/color-space-corridor.bgb"),
+        @embedFile("../assets/generated/color-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-rooftop.bgb"),
+        @embedFile("../assets/generated/hd-park.bgb"),
+        @embedFile("../assets/generated/hd-library.bgb"),
+    };
+    const dests = [_][]const u8{
+        "hugh color", "xeno color", "bolo color", "lance color", "maynard color", "bolo hd",
+    };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            const checked = try leftoverWrapContinuationPaperBleed(image);
+            try std.testing.expect(checked >= 2);
+        }
+    }
+}
+
+test "two leftover speakers keep dest-only paint on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-library.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+        @embedFile("../assets/generated/hd-rooftop.bgb"),
+    };
+    const lines = [_]Line{
+        .{ .speaker = "hugh color", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "mike color", .text = "Standing dests still keep their faces visible." },
+    };
+    const empty_lines = [_]Line{
+        .{ .speaker = "anna", .text = "Different leftover speakers may share a panel." },
+        .{ .speaker = "anna", .text = "Standing dests still keep their faces visible." },
+    };
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &empty_lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        var image = try renderWithOptions(gpa, &lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        try leftoverDestXorHits(image, empty);
+    }
+}
+
+test "leftover dest thought and whisper dests stay below the balloon on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const cases = [_]struct { speaker: []const u8, modes: u16 }{
+        .{ .speaker = "hugh color", .modes = original_page.bm_think },
+        .{ .speaker = "cro color", .modes = original_page.bm_whisper },
+        .{ .speaker = "sage color", .modes = original_page.bm_action },
+    };
+    const text = "Great. The leftover dest must stay visible under this leftover balloon.";
+    for (rooms) |room| {
+        for (cases) |case| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text, .modes = case.modes }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = case.speaker, .text = text, .modes = case.modes }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorBelowBalloon(image, empty);
+        }
+    }
+}
+
+test "leftover dests speaking the conversation UI lines keep dest-only paint on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-park.bgb"),
+        @embedFile("../assets/generated/color-rooftop.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+        @embedFile("../assets/generated/hd-cafe.bgb"),
+    };
+    const color_lines = [_]Line{
+        .{ .speaker = "armando color", .text = "Welcome to #root. The new studio is ready." },
+        .{ .speaker = "anna color", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "rebecca color", .text = "Color portraits should stay faces, not smashed bodies." },
+        .{ .speaker = "kevin color", .text = "Every default character now keeps its color." },
+    };
+    const empty_lines = [_]Line{
+        .{ .speaker = "anna", .text = "Welcome to #root. The new studio is ready." },
+        .{ .speaker = "anna", .text = "Great. The comic view feels much clearer now." },
+        .{ .speaker = "anna", .text = "Color portraits should stay faces, not smashed bodies." },
+        .{ .speaker = "anna", .text = "Every default character now keeps its color." },
+    };
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &empty_lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        var image = try renderWithOptions(gpa, &color_lines, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer image.deinit(gpa);
+        try leftoverDestXorEachStoryPanel(image, empty);
+    }
+}
+
+test "remaining leftover dest dests stay below the balloon on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/color-school-hall.bgb"),
+        @embedFile("../assets/generated/color-campsite.bgb"),
+        @embedFile("../assets/generated/hd-school-hall.bgb"),
+        @embedFile("../assets/generated/hd-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-campsite.bgb"),
+        @embedFile("../assets/generated/hd-space-corridor.bgb"),
+    };
+    const dests = [_][]const u8{
+        "dan color", "mike color", "lynnea color", "scotty color", "kwensa color",
+        "tongtyed color", "rebecca color", "margaret color", "armando color", "sage color",
+        "hugh hd", "xeno hd", "jordan hd", "susan hd",
+    };
+    const tall = "Great. The leftover dest must stay visible on this unused room even when the balloon is tall.";
+    for (rooms) |room| {
+        var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = tall }}, .{
+            .page_columns = 4,
+            .reserve_page_columns = true,
+            .backdrop = room,
+        });
+        defer empty.deinit(gpa);
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = tall }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            try leftoverDestXorBelowBalloon(image, empty);
+        }
+    }
+}
+
+test "leftover dest shout and wave dests stay below the balloon on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "sage color" };
+    const texts = [_][]const u8{
+        "WATCH OUT LEFTOVER DEST SHOUTING NOW",
+        "Hello leftover dest wave from this unused room.",
+    };
+    for (rooms) |room| {
+        for (texts) |text| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            for (dests) |dest| {
+                var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = text }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorBelowBalloon(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest laugh and sad dests stay below the balloon on leftover unused rooms" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/color-cafe.bgb"),
+        @embedFile("../assets/generated/color-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-apartment.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "xeno color", "jordan color", "cro color" };
+    const texts = [_][]const u8{ "ha ha leftover laugh that is hilarious", "oh no leftover sad that is terrible" };
+    for (rooms) |room| {
+        for (texts) |text| {
+            var empty = try renderWithOptions(gpa, &.{.{ .speaker = "anna", .text = text }}, .{
+                .page_columns = 4,
+                .reserve_page_columns = true,
+                .backdrop = room,
+            });
+            defer empty.deinit(gpa);
+            for (dests) |dest| {
+                var image = try renderWithOptions(gpa, &.{.{ .speaker = dest, .text = text }}, .{
+                    .page_columns = 4,
+                    .reserve_page_columns = true,
+                    .backdrop = room,
+                });
+                defer image.deinit(gpa);
+                try leftoverDestXorBelowBalloon(image, empty);
+            }
+        }
+    }
+}
+
+test "leftover dest wrap continuation fills leftover HD rooms without paper bleed" {
+    const gpa = std.testing.allocator;
+    const rooms = [_][]const u8{
+        @embedFile("../assets/generated/hd-boardwalk.bgb"),
+        @embedFile("../assets/generated/hd-school-hall.bgb"),
+        @embedFile("../assets/generated/hd-rainy-street.bgb"),
+        @embedFile("../assets/generated/hd-campsite.bgb"),
+        @embedFile("../assets/generated/hd-space-corridor.bgb"),
+    };
+    const dests = [_][]const u8{ "hugh color", "bolo color", "lance color", "bolo hd" };
+    const first = "Great. The leftover dest must stay visible on the first story panel.";
+    const second = "A repeated leftover dest starts a fresh continuation panel that must still show dest paint.";
+    for (rooms) |room| {
+        for (dests) |dest| {
+            var image = try renderWithOptions(gpa, &.{
+                .{ .speaker = dest, .text = first },
+                .{ .speaker = dest, .text = second },
+            }, .{
+                .page_columns = 2,
+                .backdrop = room,
+            });
+            defer image.deinit(gpa);
+            const checked = try leftoverWrapContinuationPaperBleed(image);
+            try std.testing.expect(checked >= 2);
+        }
+    }
 }

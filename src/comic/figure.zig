@@ -20,10 +20,16 @@ pub const Rendered = struct {
     image: Image,
     /// Original `GetDimInfo` values in authored bitmap pixels.
     face_x: i32,
+    /// `CBodySingle::GetDimInfo` (`avatar.cpp:63`) uses `ydim/2` for simple
+    /// avatars. Complex bodies use the neck-assembled head band from
+    /// `CBodyDouble::GetDimInfo`.
     head_height: i32,
     /// `CBody::m_requested` is not visual, but it is part of the exact state
     /// installed by `SetIndices` and must survive the portable assembly path.
     requested: bool = false,
+    /// Cropped generated Color/HD standing card. Comic layout must not
+    /// zoom these around the ground line (legs-only).
+    generated_standing: bool = false,
 
     pub fn deinit(self: *Rendered, gpa: std.mem.Allocator) void {
         self.image.deinit(gpa);
@@ -273,6 +279,15 @@ pub fn assembleDetailedForSourcePose(
     avb_data: []const u8,
     pose: udi.PoseState,
 ) !Rendered {
+    return assembleDetailedForSourcePoseInner(gpa, avb_data, pose, false);
+}
+
+fn assembleDetailedForSourcePoseInner(
+    gpa: std.mem.Allocator,
+    avb_data: []const u8,
+    pose: udi.PoseState,
+    srcand: bool,
+) !Rendered {
     const asset = try avb_asset.parse(avb_data);
     var table = try avb_asset.parsePoseTable(gpa, avb_data);
     defer table.deinit(gpa);
@@ -280,12 +295,15 @@ pub fn assembleDetailedForSourcePose(
 
     if (asset.kind == .simple_avatar) {
         const record = selected.body orelse return error.PoseNotFound;
-        const image = try bgb.decodeImageRef(gpa, avb_data, record.images[0]);
+        var image = try bgb.decodeImageRef(gpa, avb_data, record.images[0]);
+        const crop = try takePaddedSimpleCard(gpa, &image);
+        if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
-            .face_x = record.face.x,
-            .head_height = @intCast(image.height / 2),
+            .face_x = remappedSimpleFaceX(image, record.face.x, crop),
+            .head_height = simpleHeadHeight(image.height),
             .requested = selected.requested,
+            .generated_standing = isGeneratedStanding(crop.applied, image),
         };
     }
 
@@ -295,6 +313,10 @@ pub fn assembleDetailedForSourcePose(
     defer head.deinit(gpa);
     var body = try bgb.decodeImageRef(gpa, avb_data, torso_record.images[0]);
     defer body.deinit(gpa);
+    if (srcand) {
+        keySrcAndMatte(head);
+        keySrcAndMatte(body);
+    }
     const anchors = bgb.NeckAnchors{
         .head = .{
             .x = @as(i32, face_record.center.x) - face_record.delta.x,
@@ -316,6 +338,15 @@ pub fn assembleDetailedForSourcePose(
 }
 
 pub fn assembleDetailedAnalysis(gpa: std.mem.Allocator, avb_data: []const u8, analysis: *const emotion_mod.TextAnalysis) !Rendered {
+    return assembleDetailedAnalysisInner(gpa, avb_data, analysis, false);
+}
+
+fn assembleDetailedAnalysisInner(
+    gpa: std.mem.Allocator,
+    avb_data: []const u8,
+    analysis: *const emotion_mod.TextAnalysis,
+    srcand: bool,
+) !Rendered {
     const asset = try avb_asset.parse(avb_data);
     var table = try avb_asset.parsePoseTable(gpa, avb_data);
     defer table.deinit(gpa);
@@ -323,11 +354,14 @@ pub fn assembleDetailedAnalysis(gpa: std.mem.Allocator, avb_data: []const u8, an
         const choice = selectAvailable(table.records, analysis, .body, null) orelse neutralChoice();
         const record = bgb.selectPose(table.records, .body, choice.emotion.assetIndex(), choice.intensity) orelse
             return error.PoseNotFound;
-        const image = try bgb.decodePoseForEmotion(gpa, avb_data, .body, choice.emotion.assetIndex(), choice.intensity);
+        var image = try bgb.decodePoseForEmotion(gpa, avb_data, .body, choice.emotion.assetIndex(), choice.intensity);
+        const crop = try takePaddedSimpleCard(gpa, &image);
+        if (srcand) keySrcAndMatte(image);
         return .{
             .image = image,
-            .face_x = record.face.x,
-            .head_height = @intCast(image.height / 2),
+            .face_x = remappedSimpleFaceX(image, record.face.x, crop),
+            .head_height = simpleHeadHeight(image.height),
+            .generated_standing = isGeneratedStanding(crop.applied, image),
         };
     }
 
@@ -353,6 +387,10 @@ pub fn assembleDetailedAnalysis(gpa: std.mem.Allocator, avb_data: []const u8, an
         torso_choice.intensity,
     );
     defer body.deinit(gpa);
+    if (srcand) {
+        keySrcAndMatte(head);
+        keySrcAndMatte(body);
+    }
     const anchors = bgb.NeckAnchors{
         .head = .{
             .x = @as(i32, face_record.center.x) - face_record.delta.x,
@@ -391,6 +429,462 @@ fn selectAvailable(
         if (best == null or option.priority > best.?.priority) best = option;
     }
     return best;
+}
+
+/// `CBodySingle::GetDimInfo` at `avatar.cpp:63`:
+/// `headHeight = ydim/2; // for now, be conservative -- head = half body!`
+/// Authored `face.y` is unused for simple-avatar layout. Generated Color/HD
+/// cards are cropped to the opaque silhouette first so `ydim` is the figure,
+/// not the 240×280 pad. Do not replace this with `face.y`.
+fn simpleHeadHeight(image_height: u32) i32 {
+    return @intCast(image_height / 2);
+}
+
+fn isGeneratedStanding(cropped_card: bool, image: Image) bool {
+    return cropped_card and image.height >= 80;
+}
+
+fn clampedFaceX(face_x: i32, width: u32) i32 {
+    if (width == 0) return 0;
+    if (face_x < 0 or face_x > @as(i32, @intCast(width))) return @intCast(width / 2);
+    return face_x;
+}
+
+/// Packager dummy `face` is `(120, 60)` on the 240-wide card (`package_generated_avb.py`).
+/// After the ink-run crop that point often sits in the right-hand paper, so balloon
+/// tails would aim at the pad instead of the head.
+fn remappedSimpleFaceX(image: Image, face_x: i32, crop: SimpleCardCrop) i32 {
+    const local = face_x - crop.origin_x;
+    if (!crop.applied) return clampedFaceX(face_x, image.width);
+    const ink = paperInkBounds(image) orelse return clampedFaceX(local, image.width);
+    if (local >= @as(i32, @intCast(ink.x)) and local <= @as(i32, @intCast(ink.x + ink.w)))
+        return local;
+    const head_h = @max(@as(u32, 1), ink.h / 2);
+    if (paperInkCenterX(image, ink.x, ink.y, ink.w, head_h)) |cx| return @intCast(cx);
+    return @intCast(ink.x + ink.w / 2);
+}
+
+/// Packager canvas from `tools/package_generated_avb.py`. Authored simple
+/// poses stay well below this; they keep their decoded DIB dimensions.
+fn isPaddedSimpleCard(image: Image, bbox: Bounds) bool {
+    if (image.width < 200 or image.height < 240) return false;
+    return bbox.w + 8 < image.width or bbox.h + 8 < image.height;
+}
+
+fn paperInkPixel(image: Image, x: u32, y: u32) bool {
+    if (x >= image.width or y >= image.height) return false;
+    const pixel = image.pixels[y * image.width + x];
+    if ((pixel >> 24) == 0) return false;
+    const red: u8 = @truncate(pixel >> 16);
+    const green: u8 = @truncate(pixel >> 8);
+    const blue: u8 = @truncate(pixel);
+    if (red == 255 and green == 255 and blue == 255) return false;
+    const max_c = @max(red, @max(green, blue));
+    const min_c = @min(red, @min(green, blue));
+    // Same near-gray AA rule as `original_figure.stickerInk`: a pale fringe
+    // must not join a wrap sliver onto the real silhouette.
+    if (min_c >= 228 and max_c - min_c < 18) return false;
+    return true;
+}
+
+fn paperInkBounds(image: Image) ?Bounds {
+    var min_x: u32 = image.width;
+    var min_y: u32 = image.height;
+    var max_x: u32 = 0;
+    var max_y: u32 = 0;
+    var y: u32 = 0;
+    while (y < image.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < image.width) : (x += 1) {
+            if (!paperInkPixel(image, x, y)) continue;
+            min_x = @min(min_x, x);
+            min_y = @min(min_y, y);
+            max_x = @max(max_x, x + 1);
+            max_y = @max(max_y, y + 1);
+        }
+    }
+    if (min_x >= max_x or min_y >= max_y) return null;
+    return .{ .x = min_x, .y = min_y, .w = max_x - min_x, .h = max_y - min_y };
+}
+
+fn columnHasPaperInk(image: Image, x: u32) bool {
+    var y: u32 = 0;
+    while (y < image.height) : (y += 1) {
+        if (paperInkPixel(image, x, y)) return true;
+    }
+    return false;
+}
+
+fn paperInkColumnRunCount(image: Image) u32 {
+    var runs: u32 = 0;
+    var x: u32 = 0;
+    while (x < image.width) {
+        if (!columnHasPaperInk(image, x)) {
+            x += 1;
+            continue;
+        }
+        runs += 1;
+        x += 1;
+        while (x < image.width and columnHasPaperInk(image, x)) : (x += 1) {}
+    }
+    return runs;
+}
+
+fn paperInkCenterX(image: Image, x: u32, y: u32, w: u32, h: u32) ?u32 {
+    var weighted: u64 = 0;
+    var mass: u64 = 0;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            if (!paperInkPixel(image, x + col, y + row)) continue;
+            weighted += x + col;
+            mass += 1;
+        }
+    }
+    if (mass == 0) return null;
+    return @intCast(weighted / mass);
+}
+
+/// Generated HD/Color cards sometimes store a wrap sliver to the right of the
+/// real figure. Layout must use the widest ink column-run, not the bbox of
+/// every non-white pixel.
+fn largestPaperInkRun(image: Image) ?Bounds {
+    var best_x0: u32 = 0;
+    var best_x1: u32 = 0;
+    var x: u32 = 0;
+    while (x < image.width) {
+        if (!columnHasPaperInk(image, x)) {
+            x += 1;
+            continue;
+        }
+        var x1 = x + 1;
+        while (x1 < image.width and columnHasPaperInk(image, x1)) : (x1 += 1) {}
+        if (x1 - x > best_x1 - best_x0) {
+            best_x0 = x;
+            best_x1 = x1;
+        }
+        x = x1;
+    }
+    if (best_x1 <= best_x0) return paperInkBounds(image);
+
+    var min_y: u32 = image.height;
+    var max_y: u32 = 0;
+    var y: u32 = 0;
+    while (y < image.height) : (y += 1) {
+        var col = best_x0;
+        while (col < best_x1) : (col += 1) {
+            if (!paperInkPixel(image, col, y)) continue;
+            min_y = @min(min_y, y);
+            max_y = @max(max_y, y + 1);
+        }
+    }
+    if (min_y >= max_y) return paperInkBounds(image);
+
+    // A wrap sliver can sit in the same columns as the figure, far below the
+    // heels. Keep the tallest y-band and allow a 2-row hole so a shoe strap
+    // is not split off.
+    var best_y0 = min_y;
+    var best_y1 = min_y;
+    var band_start: ?u32 = null;
+    var last_ink = min_y;
+    y = min_y;
+    while (y <= max_y) : (y += 1) {
+        var row_ink = false;
+        if (y < max_y) {
+            var col = best_x0;
+            while (col < best_x1) : (col += 1) {
+                if (paperInkPixel(image, col, y)) {
+                    row_ink = true;
+                    break;
+                }
+            }
+        }
+        if (row_ink) {
+            if (band_start == null) band_start = y;
+            last_ink = y;
+            continue;
+        }
+        if (band_start) |start| {
+            if (y < max_y and y <= last_ink + 2) continue;
+            const end = last_ink + 1;
+            if (end > start and end - start > best_y1 - best_y0) {
+                best_y0 = start;
+                best_y1 = end;
+            }
+            band_start = null;
+        }
+    }
+    if (best_y1 <= best_y0) return .{ .x = best_x0, .y = min_y, .w = best_x1 - best_x0, .h = max_y - min_y };
+    return .{ .x = best_x0, .y = best_y0, .w = best_x1 - best_x0, .h = best_y1 - best_y0 };
+}
+
+/// Packager `normalize_pose` keeps 12px of paper around the silhouette. Grow
+/// the widest ink run by that much so hair/arm anti-alias is not flush with
+/// the dest rect. Stop before the next ink column-run so a wrap sliver stays out.
+const generated_card_pad: u32 = 12;
+
+fn expandPaperInkRun(image: Image, run: Bounds) Bounds {
+    var x0 = run.x;
+    var x1 = run.x + run.w;
+    var left: u32 = 0;
+    while (left < generated_card_pad and x0 > 0) {
+        if (columnHasPaperInk(image, x0 - 1)) break;
+        x0 -= 1;
+        left += 1;
+    }
+    var right: u32 = 0;
+    while (right < generated_card_pad and x1 < image.width) {
+        if (columnHasPaperInk(image, x1)) break;
+        x1 += 1;
+        right += 1;
+    }
+    const top_pad = @min(generated_card_pad, run.y);
+    const bot_room = image.height - (run.y + run.h);
+    const bot_pad = @min(generated_card_pad, bot_room);
+    return .{
+        .x = x0,
+        .y = run.y - top_pad,
+        .w = x1 - x0,
+        .h = run.h + top_pad + bot_pad,
+    };
+}
+
+pub const SimpleCardCrop = struct {
+    origin_x: i32 = 0,
+    applied: bool = false,
+};
+
+/// Crop a generated 240×280 white card to the ink silhouette plus paper pad.
+/// `origin_x` is the discarded left so `face.x` can be remapped.
+pub fn takePaddedSimpleCard(gpa: std.mem.Allocator, image: *Image) !SimpleCardCrop {
+    const full = paperInkBounds(image.*) orelse return .{};
+    if (!isPaddedSimpleCard(image.*, full)) return .{};
+    const run = largestPaperInkRun(image.*) orelse full;
+    const bbox = expandPaperInkRun(image.*, run);
+    const cropped = try copyRect(gpa, image.*, bbox.x, bbox.y, bbox.w, bbox.h);
+    image.deinit(gpa);
+    image.* = cropped;
+    return .{ .origin_x = @intCast(bbox.x), .applied = true };
+}
+
+/// `CBodyCam::DrawBody` calls `DrawBody(..., FALSE)` and `CBodySingle` uses
+/// `SRCAND`. Exact white is the paper matte: it leaves the destination
+/// unchanged. Chrome RGBA blits must key that matte or the figure becomes a
+/// white rectangle on the roster / body camera.
+pub fn keySrcAndMatte(image: Image) void {
+    for (image.pixels) |*pixel| {
+        if (pixel.* & 0x00ffffff == 0x00ffffff) pixel.* = 0x00000000;
+    }
+}
+
+/// Member-list / CAST portrait. Microsoft uses `CAvatarX::GetIconPose`
+/// (`avatar.h:251`) — the authored `AK_ICON` mugshot — for roster and title
+/// stars. Generated HD packages smash the whole simple-avatar body into 64×64
+/// without preserving aspect; those fail `GetIconPose` and fall back to the
+/// silhouette mugshot. Authored simple icons keep other sizes.
+pub fn chromePortrait(gpa: std.mem.Allocator, avb_data: []const u8) !Image {
+    const asset = try avb_asset.parse(avb_data);
+    var icon = try bgb.decodeIcon(gpa, avb_data);
+    errdefer icon.deinit(gpa);
+    keySrcAndMatte(icon);
+
+    if (asset.kind == .simple_avatar) {
+        const analysis = emotion_mod.analyzeText("");
+        var rendered = try assembleDetailedAnalysisInner(gpa, avb_data, &analysis, true);
+        defer rendered.deinit(gpa);
+        // Generated Color/HD packages always store a 64×64 AK_ICON. HD smashes
+        // the whole body; Color portraits can still be a hair pancake. Both
+        // read better as a silhouette mugshot. Authored simple icons keep
+        // other sizes and stay on GetIconPose.
+        if (icon.width == 64 and icon.height == 64) {
+            const portrait = try cropHeadPortrait(gpa, rendered.image, rendered.head_height);
+            icon.deinit(gpa);
+            return portrait;
+        }
+    }
+
+    const trimmed = trimTransparent(gpa, icon) catch return icon;
+    icon.deinit(gpa);
+    return trimmed;
+}
+
+/// Title-panel starring icon. `CBodyUnary` draws `m_icon` (`panel.cpp:1437`)
+/// through `CBodySingle::DrawBody`. Generated Color/HD packages store a
+/// smashed or pancake 64×64 `AK_ICON` on a much larger pose card; those
+/// stars reuse the chrome silhouette mugshot. Authored icons — including
+/// 64×64 simple-avatar mugshots whose pose stays near the icon — stay the
+/// decoded `AK_ICON` so legacy title goldens do not move.
+pub fn titleStarIcon(gpa: std.mem.Allocator, avb_data: []const u8) !Image {
+    var icon = try bgb.decodeIcon(gpa, avb_data);
+    const asset = try avb_asset.parse(avb_data);
+    if (asset.kind != .simple_avatar or icon.width != 64 or icon.height != 64)
+        return icon;
+
+    var pose = try assemble(gpa, avb_data, 0, 0);
+    defer pose.deinit(gpa);
+    if (!generatedCardIcon(icon, pose)) return icon;
+
+    icon.deinit(gpa);
+    return chromePortrait(gpa, avb_data);
+}
+
+/// Generated Color/HD cards are 240×280-class. Authored simple poses stay
+/// near their 64×64 `AK_ICON`, so `GetIconPose` remains a usable mugshot.
+fn generatedCardIcon(icon: Image, body: Image) bool {
+    if (icon.width != 64 or icon.height != 64) return false;
+    return body.width > icon.width * 2 or body.height > icon.height * 2;
+}
+
+/// Body-camera figure. `CBodyCam::DrawBody(..., FALSE)` (`bodycam.cpp:499`):
+/// full body, no aura/nimbus, `SRCAND` paper (white leaves dest). Layers are
+/// keyed before the neck join so a head DIB's white sticker cannot cut the
+/// torso — the same ROP as `CBodyDouble::DrawBody`.
+pub fn chromeBody(gpa: std.mem.Allocator, avb_data: []const u8, text: []const u8) !Image {
+    const analysis = emotion_mod.analyzeText(text);
+    var rendered = try assembleDetailedAnalysisInner(gpa, avb_data, &analysis, true);
+    return takeTrimmed(gpa, &rendered.image);
+}
+
+/// Body-camera figure for an explicit cooked UDI / mood-dial pose.
+pub fn chromeBodyForSourcePose(gpa: std.mem.Allocator, avb_data: []const u8, pose: udi.PoseState) !Image {
+    var rendered = try assembleDetailedForSourcePoseInner(gpa, avb_data, pose, true);
+    return takeTrimmed(gpa, &rendered.image);
+}
+
+fn takeTrimmed(gpa: std.mem.Allocator, image: *Image) !Image {
+    const trimmed = trimTransparent(gpa, image.*) catch return image.*;
+    image.deinit(gpa);
+    return trimmed;
+}
+
+/// Generated HD icons are `resize((64, 64))` of the neutral pose. Authored
+/// mugshots and Color `--portrait-icon` crops do not track that stretch.
+fn iconLooksLikeStretchedBody(icon: Image, body: Image) bool {
+    if (icon.width == 0 or icon.height == 0 or body.width == 0 or body.height == 0) return false;
+    if (icon.width != 64 or icon.height != 64) return false;
+    if (body.height <= icon.height * 2 and body.width <= icon.width * 2) return false;
+
+    var opaque_icon: usize = 0;
+    var matches: usize = 0;
+    var samples: usize = 0;
+    var y: u32 = 0;
+    while (y < icon.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < icon.width) : (x += 1) {
+            const icon_opaque = icon.pixels[y * icon.width + x] >> 24 != 0;
+            if (icon_opaque) opaque_icon += 1;
+            const bx = @min(body.width - 1, @as(u32, @intCast(@divTrunc(@as(u64, x) * body.width, icon.width))));
+            const by = @min(body.height - 1, @as(u32, @intCast(@divTrunc(@as(u64, y) * body.height, icon.height))));
+            const body_opaque = body.pixels[by * body.width + bx] >> 24 != 0;
+            samples += 1;
+            if (icon_opaque == body_opaque) matches += 1;
+        }
+    }
+    const coverage = opaque_icon * 100 / (@as(usize, icon.width) * icon.height);
+    const agreement = matches * 100 / samples;
+    return coverage >= 25 and agreement >= 80;
+}
+
+fn cropHeadPortrait(gpa: std.mem.Allocator, image: Image, head_height: i32) !Image {
+    // Generated cards are cropped to the opaque silhouette first. A half-body
+    // band that is wider than it is tall contain-fits into a pancake and reads
+    // as a waist cut; keep the full silhouette instead of 5:4-clipping arms.
+    const bbox = opaqueBounds(image) orelse return copyRect(gpa, image, 0, 0, image.width, image.height);
+    const half: u32 = if (head_height > 0) @intCast(head_height) else bbox.h / 2;
+    const crop_h = @min(bbox.h, @max(@as(u32, 64), half));
+    // Generated standing figures are taller than a mugshot slot. Returning the
+    // full silhouette lets CAST/gallery contain-fit the whole woman instead of
+    // a waist-cut head band or a 5:4 side clip.
+    if (bbox.h >= 140 and (bbox.w >= 80 or bbox.h > bbox.w + 20)) {
+        return copyRect(gpa, image, bbox.x, bbox.y, bbox.w, bbox.h);
+    }
+    const band = opaqueBoundsIn(image, bbox.x, bbox.y, bbox.w, crop_h) orelse bbox;
+    var head = try copyRect(gpa, image, band.x, band.y, band.w, band.h);
+    const trimmed = trimTransparent(gpa, head) catch return head;
+    head.deinit(gpa);
+    return trimmed;
+}
+
+const Bounds = struct { x: u32, y: u32, w: u32, h: u32 };
+
+fn opaqueBounds(image: Image) ?Bounds {
+    return opaqueBoundsIn(image, 0, 0, image.width, image.height);
+}
+
+fn opaquePixel(image: Image, x: u32, y: u32) bool {
+    if (x >= image.width or y >= image.height) return false;
+    return image.pixels[y * image.width + x] >> 24 != 0;
+}
+
+fn hasOpaqueNeighbor(image: Image, x: u32, y: u32) bool {
+    const x0 = if (x == 0) 0 else x - 1;
+    const y0 = if (y == 0) 0 else y - 1;
+    const x1 = @min(image.width - 1, x + 1);
+    const y1 = @min(image.height - 1, y + 1);
+    var row = y0;
+    while (row <= y1) : (row += 1) {
+        var col = x0;
+        while (col <= x1) : (col += 1) {
+            if (col == x and row == y) continue;
+            if (opaquePixel(image, col, row)) return true;
+        }
+    }
+    return false;
+}
+
+fn opaqueBoundsIn(image: Image, x: u32, y: u32, w: u32, h: u32) ?Bounds {
+    var min_x: u32 = image.width;
+    var min_y: u32 = image.height;
+    var max_x: u32 = 0;
+    var max_y: u32 = 0;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            const px = x + col;
+            const py = y + row;
+            if (!opaquePixel(image, px, py) or !hasOpaqueNeighbor(image, px, py)) continue;
+            min_x = @min(min_x, px);
+            min_y = @min(min_y, py);
+            max_x = @max(max_x, px + 1);
+            max_y = @max(max_y, py + 1);
+        }
+    }
+    if (min_x >= max_x or min_y >= max_y) return null;
+    return .{ .x = min_x, .y = min_y, .w = max_x - min_x, .h = max_y - min_y };
+}
+
+fn opaqueCenterX(image: Image, x: u32, y: u32, w: u32, h: u32) ?u32 {
+    var weighted: u64 = 0;
+    var mass: u64 = 0;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            if (image.pixels[(y + row) * image.width + (x + col)] >> 24 == 0) continue;
+            weighted += x + col;
+            mass += 1;
+        }
+    }
+    if (mass == 0) return null;
+    return @intCast(weighted / mass);
+}
+
+fn copyRect(gpa: std.mem.Allocator, image: Image, x: u32, y: u32, w: u32, h: u32) !Image {
+    const pixels = try gpa.alloc(u32, @as(usize, w) * h);
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        const src = (y + row) * image.width + x;
+        const dst = row * w;
+        @memcpy(pixels[dst .. dst + w], image.pixels[src .. src + w]);
+    }
+    return .{ .width = w, .height = h, .pixels = pixels };
+}
+
+fn trimTransparent(gpa: std.mem.Allocator, image: Image) !Image {
+    const bbox = opaqueBounds(image) orelse return error.PoseNotFound;
+    return copyRect(gpa, image, bbox.x, bbox.y, bbox.w, bbox.h);
 }
 
 fn joinExact(gpa: std.mem.Allocator, anchors: bgb.NeckAnchors, head: Image, body: Image) !Image {
@@ -456,6 +950,625 @@ test "assemble produces a figure with transparent margins and opaque ink" {
         if (p >> 24 != 0) opaque_px += 1;
     }
     try std.testing.expect(opaque_px > 1000);
+}
+
+test "chrome portraits crop simple-avatar heads and key the SRCAND paper matte" {
+    const gpa = std.testing.allocator;
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var body = try assembleDetailedForText(gpa, jordan, "");
+    defer body.deinit(gpa);
+    var portrait = try chromePortrait(gpa, jordan);
+    defer portrait.deinit(gpa);
+    try std.testing.expect(portrait.height <= @as(u32, @intCast(body.head_height)));
+    try std.testing.expect(portrait.height < body.image.height);
+    try std.testing.expect(portrait.width > 0);
+    for (portrait.pixels) |pixel| try std.testing.expect(pixel & 0x00ffffff != 0x00ffffff);
+
+    const hd = @embedFile("../assets/generated/anna-reimagined-hd-v1.avb");
+    var smashed = try bgb.decodeIcon(gpa, hd);
+    defer smashed.deinit(gpa);
+    var hd_portrait = try chromePortrait(gpa, hd);
+    defer hd_portrait.deinit(gpa);
+    try std.testing.expect(hd_portrait.height > smashed.height or hd_portrait.width != smashed.width);
+    for (hd_portrait.pixels) |pixel| try std.testing.expect(pixel & 0x00ffffff != 0x00ffffff);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var color_portrait = try chromePortrait(gpa, color);
+    defer color_portrait.deinit(gpa);
+    var colorful = false;
+    for (color_portrait.pixels) |pixel| {
+        if (pixel >> 24 == 0) continue;
+        const red: u8 = @truncate(pixel >> 16);
+        const green: u8 = @truncate(pixel >> 8);
+        const blue: u8 = @truncate(pixel);
+        if (red != green or green != blue) colorful = true;
+    }
+    try std.testing.expect(colorful);
+
+    const anna = @embedFile("../assets/testdata/anna.avb");
+    var icon = try bgb.decodeIcon(gpa, anna);
+    defer icon.deinit(gpa);
+    var mugshot = try chromePortrait(gpa, anna);
+    defer mugshot.deinit(gpa);
+    try std.testing.expect(mugshot.width > 0 and mugshot.height > 0);
+    try std.testing.expect(mugshot.width <= icon.width);
+    try std.testing.expect(mugshot.height <= icon.height);
+}
+
+test "title stars keep authored icons and replace smashed generated HD" {
+    const gpa = std.testing.allocator;
+    const anna = @embedFile("../assets/testdata/anna.avb");
+    var authored = try bgb.decodeIcon(gpa, anna);
+    defer authored.deinit(gpa);
+    var star = try titleStarIcon(gpa, anna);
+    defer star.deinit(gpa);
+    try std.testing.expectEqual(authored.width, star.width);
+    try std.testing.expectEqual(authored.height, star.height);
+    try std.testing.expectEqualSlices(u32, authored.pixels, star.pixels);
+
+    const hd = @embedFile("../assets/generated/anna-reimagined-hd-v1.avb");
+    var smashed = try bgb.decodeIcon(gpa, hd);
+    defer smashed.deinit(gpa);
+    var hd_star = try titleStarIcon(gpa, hd);
+    defer hd_star.deinit(gpa);
+    var portrait = try chromePortrait(gpa, hd);
+    defer portrait.deinit(gpa);
+    try std.testing.expectEqual(portrait.width, hd_star.width);
+    try std.testing.expectEqual(portrait.height, hd_star.height);
+    try std.testing.expect(hd_star.width != smashed.width or hd_star.height != smashed.height);
+
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var jordan_icon = try bgb.decodeIcon(gpa, jordan);
+    defer jordan_icon.deinit(gpa);
+    var jordan_star = try titleStarIcon(gpa, jordan);
+    defer jordan_star.deinit(gpa);
+    try std.testing.expectEqual(jordan_icon.width, jordan_star.width);
+    try std.testing.expectEqual(jordan_icon.height, jordan_star.height);
+    try std.testing.expectEqualSlices(u32, jordan_icon.pixels, jordan_star.pixels);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var color_star = try titleStarIcon(gpa, color);
+    defer color_star.deinit(gpa);
+    var color_portrait = try chromePortrait(gpa, color);
+    defer color_portrait.deinit(gpa);
+    try std.testing.expectEqual(color_portrait.width, color_star.width);
+    try std.testing.expectEqual(color_portrait.height, color_star.height);
+    try std.testing.expect(color_star.height >= 80);
+}
+
+test "leftover Color and HD title stars are standing silhouettes not smashed icons" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
+    };
+    for (blobs) |avb_data| {
+        var star = try titleStarIcon(gpa, avb_data);
+        defer star.deinit(gpa);
+        var portrait = try chromePortrait(gpa, avb_data);
+        defer portrait.deinit(gpa);
+        try std.testing.expectEqual(portrait.width, star.width);
+        try std.testing.expectEqual(portrait.height, star.height);
+        try std.testing.expect(star.height >= 140);
+        try std.testing.expect(star.height + 16 > star.width);
+        try std.testing.expect(star.width != 64 or star.height != 64);
+        var smashed = try bgb.decodeIcon(gpa, avb_data);
+        defer smashed.deinit(gpa);
+        try std.testing.expect(star.width != smashed.width or star.height != smashed.height);
+    }
+}
+
+test "leftover Color and HD bodycam figures stay standing with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+    };
+    const texts = [_][]const u8{ "", "ha ha leftover laugh", "oh no leftover sad" };
+    for (blobs) |avb_data| {
+        for (texts) |text| {
+            var body = try chromeBody(gpa, avb_data, text);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 140);
+            try std.testing.expect(body.height + 16 > body.width);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
+    }
+}
+
+test "leftover dest emotion-wheel surprised and angry bodycam stay standing with local color" {
+    // The live bodycam mood dial uses chromeBodyForSourcePose. Angry and
+    // surprised have empty text rules, so leftover dest chromeBody(text)
+    // never selected them.
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+    };
+    const moods = [_]emotion_mod.Emotion{ .surprised, .angry };
+    for (blobs) |avb_data| {
+        for (moods) |mood| {
+            const pose = try poseStateForEmotion(gpa, avb_data, mood, 255);
+            var body = try chromeBodyForSourcePose(gpa, avb_data, pose);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 140);
+            try std.testing.expect(body.height + 16 > body.width);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
+    }
+}
+
+test "leftover dest emotion-wheel happy coy and bored bodycam stay standing with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+    };
+    const moods = [_]emotion_mod.Emotion{ .happy, .coy, .bored };
+    for (blobs) |avb_data| {
+        for (moods) |mood| {
+            const pose = try poseStateForEmotion(gpa, avb_data, mood, 255);
+            var body = try chromeBodyForSourcePose(gpa, avb_data, pose);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 140);
+            try std.testing.expect(body.height + 16 > body.width);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
+    }
+}
+
+test "leftover dest gesture-wheel point and shrug bodycam stay standing with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+    };
+    const moods = [_]emotion_mod.Emotion{ .point_other, .point_self, .double_point, .shrug };
+    for (blobs) |avb_data| {
+        for (moods) |mood| {
+            const pose = try poseStateForEmotion(gpa, avb_data, mood, 255);
+            var body = try chromeBodyForSourcePose(gpa, avb_data, pose);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 140);
+            try std.testing.expect(body.height + 16 > body.width);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
+    }
+}
+
+test "leftover dest walk gestures stay standing or authored walk with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+    };
+    const moods = [_]emotion_mod.Emotion{ .walk_three_quarter_rear, .walk_side, .walk_three_quarter_front };
+    for (blobs) |avb_data| {
+        for (moods) |mood| {
+            const pose = try poseStateForEmotion(gpa, avb_data, mood, 255);
+            var body = try chromeBodyForSourcePose(gpa, avb_data, pose);
+            defer body.deinit(gpa);
+            try std.testing.expect(body.height >= 80);
+            try std.testing.expect(body.width != 64 or body.height != 64);
+            var chromatic: usize = 0;
+            for (body.pixels) |pixel| {
+                if (pixel >> 24 == 0) continue;
+                const red: i32 = @as(u8, @truncate(pixel >> 16));
+                const green: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue: i32 = @as(u8, @truncate(pixel));
+                if (red >= 245 and green >= 245 and blue >= 245) continue;
+                const mx = @max(red, @max(green, blue));
+                const mn = @min(red, @min(green, blue));
+                if (mx > mn + 18) chromatic += 1;
+            }
+            try std.testing.expect(chromatic > 400);
+        }
+    }
+}
+
+fn countOpaque(image: Image) usize {
+    var count: usize = 0;
+    for (image.pixels) |pixel| {
+        if (pixel >> 24 != 0) count += 1;
+    }
+    return count;
+}
+
+test "chrome body SRCAND keeps torso ink under the head paper" {
+    const gpa = std.testing.allocator;
+    const anna = @embedFile("../assets/testdata/anna.avb");
+    var punched = try assembleForText(gpa, anna, "");
+    defer punched.deinit(gpa);
+    keySrcAndMatte(punched);
+    var chrome = try chromeBody(gpa, anna, "");
+    defer chrome.deinit(gpa);
+    try std.testing.expect(countOpaque(chrome) > countOpaque(punched));
+}
+
+test "HD chrome portraits reject smashed 64x64 bodies and Color keeps the mugshot" {
+    const gpa = std.testing.allocator;
+    const hd = @embedFile("../assets/generated/anna-reimagined-hd-v1.avb");
+    var smashed = try bgb.decodeIcon(gpa, hd);
+    defer smashed.deinit(gpa);
+    keySrcAndMatte(smashed);
+    var hd_card = try bgb.decodePoseForEmotion(gpa, hd, .body, 9, 0);
+    defer hd_card.deinit(gpa);
+    keySrcAndMatte(hd_card);
+    try std.testing.expectEqual(@as(u32, 64), smashed.width);
+    try std.testing.expectEqual(@as(u32, 64), smashed.height);
+    try std.testing.expect(hd_card.width >= 200);
+    try std.testing.expect(hd_card.height >= 240);
+    var hd_body = try chromeBody(gpa, hd, "");
+    defer hd_body.deinit(gpa);
+    var hd_portrait = try chromePortrait(gpa, hd);
+    defer hd_portrait.deinit(gpa);
+    try std.testing.expect(hd_portrait.height != smashed.height or hd_portrait.width != smashed.width);
+    try std.testing.expect(hd_portrait.height >= 80);
+    try std.testing.expect(countOpaque(hd_portrait) * 4 >= @as(usize, hd_portrait.width) * hd_portrait.height);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var color_icon = try bgb.decodeIcon(gpa, color);
+    defer color_icon.deinit(gpa);
+    keySrcAndMatte(color_icon);
+    var color_body = try chromeBody(gpa, color, "");
+    defer color_body.deinit(gpa);
+    try std.testing.expect(!iconLooksLikeStretchedBody(color_icon, color_body));
+    var color_portrait = try chromePortrait(gpa, color);
+    defer color_portrait.deinit(gpa);
+    try std.testing.expect(color_portrait.height <= color_body.height);
+}
+
+test "Anna HD and Color female chrome is a full silhouette not a half-width or feet crop" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/anna-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/anna-color-hd-v1.avb"),
+    };
+    for (blobs) |avb_data| {
+        var assembled = try assembleDetailedForText(gpa, avb_data, "");
+        defer assembled.deinit(gpa);
+        try std.testing.expect(assembled.image.width < 200);
+        try std.testing.expect(assembled.image.height <= 280);
+        try std.testing.expect(assembled.image.height >= 220);
+        try std.testing.expectEqual(simpleHeadHeight(assembled.image.height), assembled.head_height);
+        try std.testing.expect(assembled.head_height * 5 >= @as(i32, @intCast(assembled.image.height)) * 2);
+
+        var body = try chromeBody(gpa, avb_data, "");
+        defer body.deinit(gpa);
+        var portrait = try chromePortrait(gpa, avb_data);
+        defer portrait.deinit(gpa);
+
+        try std.testing.expect(body.width >= 80);
+        try std.testing.expect(body.width < 160);
+        try std.testing.expect(body.height >= 160);
+        try std.testing.expect(body.height > body.width);
+        try std.testing.expect(portrait.width * 4 >= body.width * 3);
+        try std.testing.expect(portrait.height >= 80);
+        try std.testing.expect(portrait.height <= body.height);
+        try std.testing.expect(portrait.width > body.width / 2);
+
+        const bbox = opaqueBounds(body).?;
+        try std.testing.expectEqual(@as(u32, 0), bbox.x);
+        try std.testing.expect(bbox.w * 8 >= body.width * 7);
+        var empty_run: u32 = 0;
+        var col: u32 = 0;
+        while (col < body.width) : (col += 1) {
+            var ink = false;
+            var row: u32 = 0;
+            while (row < body.height) : (row += 1) {
+                if (body.pixels[row * body.width + col] >> 24 != 0) {
+                    ink = true;
+                    break;
+                }
+            }
+            if (ink) {
+                empty_run = 0;
+            } else {
+                empty_run += 1;
+                try std.testing.expect(empty_run < 12);
+            }
+        }
+    }
+}
+
+test "chrome body keeps the full simple-avatar figure after keying white" {
+    const gpa = std.testing.allocator;
+    const color = @embedFile("../assets/generated/kevin-color-hd-v1.avb");
+    var portrait = try chromePortrait(gpa, color);
+    defer portrait.deinit(gpa);
+    var body = try chromeBody(gpa, color, "");
+    defer body.deinit(gpa);
+    try std.testing.expect(body.height >= portrait.height);
+    var transparent = false;
+    for (body.pixels) |pixel| if (pixel >> 24 == 0) {
+        transparent = true;
+        break;
+    };
+    try std.testing.expect(transparent);
+}
+
+test "simple-avatar GetDimInfo keeps the source half-body head height" {
+    const gpa = std.testing.allocator;
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var simple = try assembleDetailedForText(gpa, jordan, "ordinary text");
+    defer simple.deinit(gpa);
+    try std.testing.expectEqual(simpleHeadHeight(simple.image.height), simple.head_height);
+
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var generated = try assembleDetailedForText(gpa, color, "ordinary text");
+    defer generated.deinit(gpa);
+    try std.testing.expectEqual(avb_asset.Kind.simple_avatar, (try avb_asset.parse(color)).kind);
+    try std.testing.expectEqual(simpleHeadHeight(generated.image.height), generated.head_height);
+    // face.y is authored metadata, not the layout head band.
+    try std.testing.expect(generated.head_height != generated.image.height);
+    try std.testing.expect(generated.image.height <= 280);
+    try std.testing.expect(generated.image.height >= 220);
+    try std.testing.expect(generated.image.width < 240);
+}
+
+test "authored simple face.x is unchanged and generated cards keep paper pad" {
+    const gpa = std.testing.allocator;
+    const jordan = @embedFile("../assets/testdata/jordan.avb");
+    var table = try avb_asset.parsePoseTable(gpa, jordan);
+    defer table.deinit(gpa);
+    const analysis = emotion_mod.analyzeText("ordinary text");
+    const choice = selectAvailable(table.records, &analysis, .body, null) orelse neutralChoice();
+    const record = bgb.selectPose(table.records, .body, choice.emotion.assetIndex(), choice.intensity).?;
+    var simple = try assembleDetailedForText(gpa, jordan, "ordinary text");
+    defer simple.deinit(gpa);
+    try std.testing.expectEqual(@as(i32, record.face.x), simple.face_x);
+
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/anna-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/anna-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+    };
+    for (blobs, 0..) |avb_data, index| {
+        var generated = try assembleDetailedForText(gpa, avb_data, "ordinary text");
+        defer generated.deinit(gpa);
+        const ink = paperInkBounds(generated.image).?;
+        try std.testing.expect(ink.x >= 4);
+        try std.testing.expect(ink.x + ink.w + 4 <= generated.image.width);
+        try std.testing.expect(ink.y >= 4);
+        try std.testing.expect(generated.face_x >= @as(i32, @intCast(ink.x)));
+        try std.testing.expect(generated.face_x <= @as(i32, @intCast(ink.x + ink.w)));
+        try std.testing.expect(generated.face_x * 4 > @as(i32, @intCast(generated.image.width)));
+        try std.testing.expect(generated.face_x * 4 < @as(i32, @intCast(generated.image.width)) * 3);
+        try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(generated.image));
+        try std.testing.expect(generated.image.height + 20 > generated.image.width);
+        try std.testing.expect(generated.image.height <= 280);
+        try std.testing.expect(generated.image.height >= 220);
+        if (index < 2) try std.testing.expect(generated.image.width < 140);
+    }
 }
 
 test "text rules select simple-avatar whole-body expressions" {
@@ -587,6 +1700,552 @@ test "OTHERMAPPED follows BytesToEmotion exact emotion and scaled intensity" {
     });
     try std.testing.expectEqual(@as(u16, 1), fallback.face.?.emotion_index);
     try std.testing.expectEqual(@as(u16, 9), fallback.torso.?.emotion_index);
+}
+
+test "Anna Color uses peach skin and a red top instead of a purple wash" {
+    const gpa = std.testing.allocator;
+    const color = @embedFile("../assets/generated/anna-color-hd-v1.avb");
+    var assembled = try assembleDetailedForText(gpa, color, "");
+    defer assembled.deinit(gpa);
+    try std.testing.expect(assembled.generated_standing);
+    try std.testing.expect(assembled.image.height > assembled.image.width);
+    try std.testing.expect(assembled.image.height >= 220);
+    const ink = paperInkBounds(assembled.image) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(ink.h * 2 >= assembled.image.height);
+    const band = @max(@as(u32, 4), ink.h / 10);
+    var top_edge: usize = 0;
+    var bot_edge: usize = 0;
+    var y: u32 = 0;
+    while (y < assembled.image.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < assembled.image.width) : (x += 1) {
+            if (!paperInkPixel(assembled.image, x, y)) continue;
+            if (y >= ink.y and y < ink.y + band) top_edge += 1;
+            if (y + band >= ink.y + ink.h and y < ink.y + ink.h) bot_edge += 1;
+        }
+    }
+    try std.testing.expect(top_edge > 4);
+    try std.testing.expect(bot_edge > 4);
+
+    var peach: usize = 0;
+    var red: usize = 0;
+    var purple: usize = 0;
+    for (assembled.image.pixels) |pixel| {
+        if (pixel >> 24 == 0) continue;
+        if (pixel & 0x00ffffff == 0x00ffffff) continue;
+        const red_ch: i32 = @as(u8, @truncate(pixel >> 16));
+        const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue_ch: i32 = @as(u8, @truncate(pixel));
+        if (red_ch == green_ch and green_ch == blue_ch) continue;
+        const max_c = @max(red_ch, @max(green_ch, blue_ch));
+        const min_c = @min(red_ch, @min(green_ch, blue_ch));
+        if (max_c < 40) continue;
+        if (max_c - min_c < 20) continue;
+        if (red_ch > green_ch + 15 and red_ch > blue_ch + 15 and green_ch + 25 > blue_ch)
+            peach += 1;
+        if (red_ch > 120 and red_ch > green_ch + 40 and red_ch > blue_ch + 40 and green_ch < 90)
+            red += 1;
+        if (blue_ch + 10 > red_ch and (blue_ch > green_ch + 20 or red_ch > green_ch + 20) and
+            @abs(red_ch - blue_ch) < 60)
+            purple += 1;
+    }
+    try std.testing.expect(peach > 80);
+    try std.testing.expect(red > 40);
+    try std.testing.expect(peach > purple);
+    try std.testing.expect(red > purple);
+}
+
+test "Color default-cast cards are standing silhouettes with local color" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/anna-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kevin-color-hd-v1.avb"),
+        @embedFile("../assets/generated/denise-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tiki-color-hd-v2.avb"),
+    };
+    for (blobs) |avb_data| {
+        var assembled = try assembleDetailedForText(gpa, avb_data, "");
+        defer assembled.deinit(gpa);
+        try std.testing.expect(assembled.generated_standing);
+        try std.testing.expect(assembled.image.height >= 140);
+        try std.testing.expect(assembled.image.height + 20 > assembled.image.width);
+        const ink = paperInkBounds(assembled.image) orelse return error.TestUnexpectedResult;
+        const run = largestPaperInkRun(assembled.image) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(ink.x, run.x);
+        try std.testing.expectEqual(ink.w, run.w);
+        try std.testing.expectEqual(ink.y, run.y);
+        try std.testing.expectEqual(ink.h, run.h);
+        try std.testing.expect(ink.h * 5 >= assembled.image.height * 3);
+        const band = @max(@as(u32, 4), ink.h / 10);
+        var top_edge: usize = 0;
+        var bot_edge: usize = 0;
+        var colorful: usize = 0;
+        var purple: usize = 0;
+        var y: u32 = 0;
+        while (y < assembled.image.height) : (y += 1) {
+            var x: u32 = 0;
+            while (x < assembled.image.width) : (x += 1) {
+                if (!paperInkPixel(assembled.image, x, y)) continue;
+                if (y >= ink.y and y < ink.y + band) top_edge += 1;
+                if (y + band >= ink.y + ink.h and y < ink.y + ink.h) bot_edge += 1;
+                const pixel = assembled.image.pixels[y * assembled.image.width + x];
+                const red_ch: i32 = @as(u8, @truncate(pixel >> 16));
+                const green_ch: i32 = @as(u8, @truncate(pixel >> 8));
+                const blue_ch: i32 = @as(u8, @truncate(pixel));
+                if (red_ch == green_ch and green_ch == blue_ch) continue;
+                colorful += 1;
+                if (blue_ch + 10 > red_ch and (blue_ch > green_ch + 20 or red_ch > green_ch + 20) and
+                    @abs(red_ch - blue_ch) < 60)
+                    purple += 1;
+            }
+        }
+        try std.testing.expect(top_edge > 4);
+        try std.testing.expect(bot_edge > 4);
+        try std.testing.expect(colorful > 80);
+        try std.testing.expect(colorful > purple);
+
+        var portrait = try chromePortrait(gpa, avb_data);
+        defer portrait.deinit(gpa);
+        try std.testing.expect(portrait.height >= 140);
+        try std.testing.expect(portrait.height + 10 > portrait.width);
+    }
+}
+
+test "leftover Color pose cards keep one paper-ink column-run" {
+    // Frozen Anna/Kevin/Denise Color+HD and Tiki Color v2 stay on their
+    // accepted hashes. Every other Color and leftover HD pack is scanned
+    // so a packaged wrap sliver cannot return.
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tiki-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+    };
+    const emotions = [_]u16{ 9, 8, 7, 6, 3, 2, 1, 4, 10 };
+    for (blobs) |avb_data| {
+        for (emotions) |emotion| {
+            var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, emotion, 0);
+            defer card.deinit(gpa);
+            try std.testing.expect(card.width >= 200);
+            try std.testing.expect(card.height >= 240);
+            try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(card));
+            const ink = paperInkBounds(card) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(ink.x >= 2);
+            try std.testing.expect(ink.x + ink.w + 2 <= card.width);
+            try std.testing.expect(ink.w < 200);
+        }
+    }
+}
+
+test "leftover dest gesture pose cards keep authored pad" {
+    // Gestures ≥ 10 need an exact AVB match. Leftover dest packs that do not
+    // author point/shrug stay on the chromeBodyForSourcePose neutral fallback.
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+    };
+    const emotions = [_]u16{ 11, 12, 13, 14 };
+    for (blobs) |avb_data| {
+        for (emotions) |emotion| {
+            var card = bgb.decodePoseForEmotion(gpa, avb_data, .body, emotion, 0) catch |err| switch (err) {
+                error.PoseNotFound => continue,
+                else => return err,
+            };
+            defer card.deinit(gpa);
+            try std.testing.expect(card.width >= 200);
+            try std.testing.expect(card.height >= 240);
+            try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(card));
+            const ink = paperInkBounds(card) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(ink.x >= 2);
+            try std.testing.expect(ink.x + ink.w + 2 <= card.width);
+            try std.testing.expect(ink.w < 200);
+        }
+    }
+}
+
+test "leftover dest walk pose cards keep authored pad" {
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/hugh-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+    };
+    const emotions = [_]u16{ 15, 16, 17 };
+    for (blobs) |avb_data| {
+        for (emotions) |emotion| {
+            var card = bgb.decodePoseForEmotion(gpa, avb_data, .body, emotion, 0) catch |err| switch (err) {
+                error.PoseNotFound => continue,
+                else => return err,
+            };
+            defer card.deinit(gpa);
+            try std.testing.expect(card.width >= 200);
+            try std.testing.expect(card.height >= 240);
+            try std.testing.expectEqual(@as(u32, 1), paperInkColumnRunCount(card));
+            const ink = paperInkBounds(card) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(ink.x >= 2);
+            try std.testing.expect(ink.x + ink.w + 2 <= card.width);
+        }
+    }
+}
+
+test "Maynard Color keeps pose-authored cool paint without a tan wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/maynard-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var cool: usize = 0;
+    var tan: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+        if (red > 180 and green > 120 and blue < 90 and red > blue + 40) tan += 1;
+    }
+    try std.testing.expect(cool > 400);
+    try std.testing.expect(cool > tan * 4);
+}
+
+test "Cro Color keeps pose-authored yellow tunic and peach skin" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/cro-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var peach: usize = 0;
+    var yellow: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+        if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+    }
+    try std.testing.expect(peach > 400);
+    try std.testing.expect(yellow > 200);
+}
+
+test "Hugh Color keeps pose-authored yellow and cool paint" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/hugh-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var yellow: usize = 0;
+    var cool: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+    }
+    try std.testing.expect(yellow > 200);
+    try std.testing.expect(cool > 400);
+}
+
+test "Mike Color keeps pose-authored peach without a shirt wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/mike-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var peach: usize = 0;
+    var cool: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+    }
+    try std.testing.expect(peach > 80);
+    try std.testing.expect(cool > 400);
+}
+
+test "Scotty Color keeps pose-authored green without a peach wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/scotty-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var green_n: usize = 0;
+    var peach: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (green > red + 15 and green > blue + 10) green_n += 1;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+    }
+    try std.testing.expect(green_n > 400);
+    try std.testing.expect(green_n > peach * 4);
+}
+
+test "Lynnea Color keeps pose-authored cool and brown without a peach wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/lynnea-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var cool: usize = 0;
+    var brown: usize = 0;
+    var peach: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+        if (red > 40 and green > 20 and blue > 10 and red > green + 10 and green > blue and red < 160) brown += 1;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+    }
+    try std.testing.expect(cool + brown > 400);
+    try std.testing.expect(cool + brown > peach * 4);
+}
+
+test "Maynard HD and Cro HD keep the same leftover local color as Color" {
+    const gpa = std.testing.allocator;
+    var maynard = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/maynard-reimagined-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer maynard.deinit(gpa);
+    var cool: usize = 0;
+    var tan: usize = 0;
+    for (maynard.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (blue > red + 15 and blue + 10 > green) cool += 1;
+        if (red > 180 and green > 120 and blue < 90 and red > blue + 40) tan += 1;
+    }
+    try std.testing.expect(cool > 400);
+    try std.testing.expect(cool > tan * 4);
+
+    var cro = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/cro-reimagined-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer cro.deinit(gpa);
+    var peach: usize = 0;
+    var yellow: usize = 0;
+    for (cro.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue >= 245) continue;
+        if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+        if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+    }
+    try std.testing.expect(peach > 400);
+    try std.testing.expect(yellow > 200);
+}
+
+test "Sage Color keeps pose-authored yellow without a blue wash" {
+    const gpa = std.testing.allocator;
+    var card = try bgb.decodePoseForEmotion(
+        gpa,
+        @embedFile("../assets/generated/sage-color-hd-v1.avb"),
+        .body,
+        9,
+        0,
+    );
+    defer card.deinit(gpa);
+    var yellow: usize = 0;
+    var blue: usize = 0;
+    for (card.pixels) |pixel| {
+        const red: i32 = @as(u8, @truncate(pixel >> 16));
+        const green: i32 = @as(u8, @truncate(pixel >> 8));
+        const blue_ch: i32 = @as(u8, @truncate(pixel));
+        if (red >= 245 and green >= 245 and blue_ch >= 245) continue;
+        if (red > 180 and green > 160 and blue_ch < 90 and red > blue_ch + 40) yellow += 1;
+        if (blue_ch > red + 15 and blue_ch + 10 > green) blue += 1;
+    }
+    try std.testing.expect(yellow > 400);
+    try std.testing.expect(yellow > blue * 4);
+}
+
+test "Sage HD Mike HD Scotty HD Lynnea HD keep leftover local color" {
+    const gpa = std.testing.allocator;
+    const packs = [_][]const u8{
+        @embedFile("../assets/generated/sage-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/mike-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/scotty-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lynnea-reimagined-hd-v1.avb"),
+    };
+    for (packs, 0..) |avb_data, index| {
+        var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, 9, 0);
+        defer card.deinit(gpa);
+        var yellow: usize = 0;
+        var cool: usize = 0;
+        var peach: usize = 0;
+        var green_n: usize = 0;
+        var brown: usize = 0;
+        for (card.pixels) |pixel| {
+            const red: i32 = @as(u8, @truncate(pixel >> 16));
+            const green: i32 = @as(u8, @truncate(pixel >> 8));
+            const blue: i32 = @as(u8, @truncate(pixel));
+            if (red >= 245 and green >= 245 and blue >= 245) continue;
+            if (red > 180 and green > 160 and blue < 90 and red > blue + 40) yellow += 1;
+            if (blue > red + 15 and blue + 10 > green) cool += 1;
+            if (red > 160 and green > 110 and blue > 80 and red > blue + 20) peach += 1;
+            if (green > red + 15 and green > blue + 10) green_n += 1;
+            if (red > 40 and green > 20 and blue > 10 and red > green + 10 and green > blue and red < 160) brown += 1;
+        }
+        switch (index) {
+            0 => {
+                try std.testing.expect(yellow > 400);
+                try std.testing.expect(yellow > cool * 4);
+            },
+            1 => {
+                try std.testing.expect(peach > 80);
+                try std.testing.expect(cool > 400);
+            },
+            2 => {
+                try std.testing.expect(green_n > 400);
+                try std.testing.expect(green_n > peach * 4);
+            },
+            else => {
+                try std.testing.expect(cool + brown > 400);
+                try std.testing.expect(cool + brown > peach * 4);
+            },
+        }
+    }
+}
+
+test "leftover Color dest cards keep authored chromatic ink" {
+    // Unlocked leftover dests without a dedicated hue lock must still package
+    // local color. A grayscale leftover dest would SRCAND on Color rooms.
+    const gpa = std.testing.allocator;
+    const blobs = [_][]const u8{
+        @embedFile("../assets/generated/armando-color-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-color-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-color-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-color-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-color-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-color-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-color-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-color-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-color-hd-v1.avb"),
+        @embedFile("../assets/generated/armando-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/bolo-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/dan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/jordan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/kwensa-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/lance-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/margaret-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/rebecca-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/susan-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/tongtyed-reimagined-hd-v1.avb"),
+        @embedFile("../assets/generated/xeno-reimagined-hd-v1.avb"),
+    };
+    for (blobs) |avb_data| {
+        var card = try bgb.decodePoseForEmotion(gpa, avb_data, .body, 9, 0);
+        defer card.deinit(gpa);
+        var chromatic: usize = 0;
+        for (card.pixels) |pixel| {
+            const red: i32 = @as(u8, @truncate(pixel >> 16));
+            const green: i32 = @as(u8, @truncate(pixel >> 8));
+            const blue: i32 = @as(u8, @truncate(pixel));
+            if (red >= 245 and green >= 245 and blue >= 245) continue;
+            const mx = @max(red, @max(green, blue));
+            const mn = @min(red, @min(green, blue));
+            if (mx > mn + 18) chromatic += 1;
+        }
+        try std.testing.expect(chromatic > 400);
+    }
 }
 
 test "simple SetIndices uses gesture ordinal while OTHERMAPPED uses expression" {

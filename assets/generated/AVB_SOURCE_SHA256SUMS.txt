@@ -1,9 +1,9 @@
-59e590fa3fc1a144763a01a45236dcdb984e2bc4cfbe3b95bbc671f5852760c1  avatar-pose-sheets-v1/anna/pose-00.png
-50bab29f0cfc9bff461d3218d2fded21ece69d36d8a1152e82857b42bb905d6b  avatar-pose-sheets-v1/anna/pose-01.png
-5ce2e7aafccafec616cb21415f575b8adada73d642686e9079923519459b4c03  avatar-pose-sheets-v1/anna/pose-02.png
-7a27e4418a8caf834cdee2bcdbdc3ec32d312638ebd9dce1f0c82a32c06bc4b2  avatar-pose-sheets-v1/anna/pose-03.png
-c78ed8c4d9d3de25fd8d252b22cc9a833472f2e2d9da51820e9c3cfe8dc3cfae  avatar-pose-sheets-v1/anna/pose-04.png
-1b00a0185d1ec80b19a20b8249d8565a93ee1f738ffb548a44a59fd01ddf1864  avatar-pose-sheets-v1/anna/pose-05.png
+d06f719e9c84989cf5aadbcdefc4ecbba5e066f292b132db4029f80ad1d9acd4  avatar-pose-sheets-v1/anna/pose-00.png
+053e7d9715b7edded512153f97c156f5170436370159975c8d4d3b7a1a695f10  avatar-pose-sheets-v1/anna/pose-01.png
+1c631f140522e3ef585b6433957bf6678068199a414c04bff6dad0e0258197bc  avatar-pose-sheets-v1/anna/pose-02.png
+7345a76db4d0eed6961a271ce797c1db5fac97b96195f74a556b5d1abef01c82  avatar-pose-sheets-v1/anna/pose-03.png
+04711a7980e07da108aa58751ed4e5612023d76c94fd2a7c2d011cfe2cf3f3ad  avatar-pose-sheets-v1/anna/pose-04.png
+12840aad67e96ecfa6b61cbaed287b913c238c4b881d33c33240d12c96feee45  avatar-pose-sheets-v1/anna/pose-05.png
 9b145b30361ccb435aee33d1e4b556bd22a93323a2ae86ca22b8febb339cb197  avatar-pose-sheets-v1/armando/pose-00.png
 76a5675ba6b4fa172adc520e160daf6c7586ac570593cfbf5501ed3fbd8b8fd8  avatar-pose-sheets-v1/armando/pose-01.png
 25d5529d75077d9877d86f4928466b8c2bff10f708649166e0bee23f925d2c49  avatar-pose-sheets-v1/armando/pose-02.png
